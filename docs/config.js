@@ -11,11 +11,14 @@
  * origins, so this must be the Worker's absolute URL: a relative "/api" would
  * resolve to github.io and 404.
  *
- * After `npx wrangler deploy`, paste the URL it prints below.
+ * This is already set to the right value: the Workers subdomain on this
+ * account is arjanknol-ak.workers.dev, and wrangler.toml names the Worker
+ * scrobble-drift-api, so `npx wrangler deploy` will publish exactly here.
+ * Nothing to edit unless you rename the Worker.
  */
-export const API_BASE = "https://scrobble-drift-api.YOUR-SUBDOMAIN.workers.dev";
+export const API_BASE = "https://scrobble-drift-api.arjanknol-ak.workers.dev";
 
-/** True once the placeholder above has been replaced. */
+/** Sanity check, so the UI can explain itself instead of throwing CORS errors. */
 export const isConfigured = () =>
   !API_BASE.includes("YOUR-SUBDOMAIN") && /^https:\/\//.test(API_BASE);
 
