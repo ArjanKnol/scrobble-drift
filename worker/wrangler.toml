@@ -2,6 +2,15 @@ name = "scrobble-drift-api"
 main = "src/index.js"
 compatibility_date = "2026-07-01"
 
+# workers.dev is how the frontend reaches this, so it stays on.
+workers_dev = true
+
+# Preview URLs off. They are enabled by default, which would expose this proxy
+# at an extra per-version hostname for every deployment. Each one spends the
+# same Last.fm key and is not in ALLOWED_ORIGINS, so they add attack surface
+# and no value here.
+preview_urls = false
+
 # Set the key as a secret, never here:
 #   npx wrangler secret put LASTFM_API_KEY
 #
