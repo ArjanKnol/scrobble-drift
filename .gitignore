@@ -1,0 +1,19 @@
+# Never commit the API key.
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local scratch. The committed artefacts are docs/report.json,
+# data/mb-cache.json and data/history/.
+*.log
+scratch/
