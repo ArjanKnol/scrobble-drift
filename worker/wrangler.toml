@@ -1,0 +1,35 @@
+name = "scrobble-drift-api"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# Set the key as a secret, never here:
+#   npx wrangler secret put LASTFM_API_KEY
+#
+# wrangler.toml IS committed, so anything in [vars] is public. Only
+# non-sensitive config belongs below.
+
+[vars]
+# Comma-separated origin allowlist. The GitHub Pages origin is the one that
+# matters: the frontend is served from there, the Worker only proxies.
+#
+# Note this is an ORIGIN, so no repo path and no trailing slash. The site lives
+# at https://arjanknol.github.io/scrobble-drift/ but the origin is just
+# https://arjanknol.github.io
+#
+# Never use "*" on a deployed Worker. This one spends a real API key, and an
+# open CORS policy lets any website on the internet spend it for you.
+ALLOWED_ORIGINS = "https://arjanknol.github.io,http://localhost:8000,http://127.0.0.1:8000"
+
+# Per-IP rate limiting. Optional for a first deploy (the Worker degrades to
+# allow-all without it) and mandatory before sharing the URL, because one
+# abused key means Last.fm error 26 for every user at once.
+#
+#   npx wrangler kv namespace create RATE
+# then paste the id below and uncomment.
+#
+# [[kv_namespaces]]
+# binding = "RATE"
+# id = "<paste-the-id-here>"
+
+[observability]
+enabled = true
