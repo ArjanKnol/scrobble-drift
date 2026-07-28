@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scrobble Drift — find the metadata rot in your Last.fm history</title>
+<meta name="description" content="Scan a Last.fm library for split albums,
+  feature-credit inconsistencies and era-tagged unreleased material, and see
+  how much they distort your charts.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Scrobble Drift</h1>
+  <p class="lede">
+    Your Last.fm metadata degrades on its own. A single you played on release
+    gets absorbed into an album months later, so your plays end up split across
+    two album strings that share no characters. Catalogues get repackaged.
+    Leaks quietly get official releases. None of it is your fault, and no
+    existing tool catches it.
+  </p>
+
+  <div class="nav">
+    <a href="report.html">Saved monthly report</a>
+    <a href="https://github.com/ArjanKnol/scrobble-drift">Source</a>
+  </div>
+
+  <div class="panel">
+    <form id="f">
+      <input id="user" placeholder="Last.fm username" autocomplete="off"
+             spellcheck="false" required>
+      <select id="depth">
+        <option value="10000" selected>Last 10,000 scrobbles</option>
+        <option value="2000">Last 2,000 (quick look)</option>
+        <option value="0">Entire history (slow)</option>
+      </select>
+      <button id="go">Scan</button>
+      <button id="stop" class="ghost hide" type="button">Stop</button>
+    </form>
+    <div id="prog" class="hide">
+      <div class="bar"><i id="fill" style="width:0"></i></div>
+      <div class="note" id="status"></div>
+    </div>
+    <p class="note">
+      Read-only, and nothing is stored. Your scrobbles are fetched straight into
+      this browser tab and vanish when you close it. No account, no login, no
+      database, no analytics.
+    </p>
+  </div>
+
+  <div id="out"></div>
+</div>
+
+<script type="module">
+import { analyse } from "./drift.js";
+import { apiBase, isConfigured } from "./config.js";
+
+const $ = (id) => document.getElementById(id);
+const N = (n) => (n ?? 0).toLocaleString();
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const KEY = (s) => esc(String(s).replace("␟", " — "));
+const col = (v) => v >= 85 ? "var(--good)" : v >= 60 ? "var(--warn)" : "var(--bad)";
+
+let abort = false, report = null, fDet = "", fCls = "";
+
+// Fail loudly and usefully rather than throwing a CORS error at whoever opens
+// the page before the Worker exists.
+if (!isConfigured() && !localStorage.getItem("drift_api")) {
+  $("go").disabled = true;
+  $("out").innerHTML = `
+    <div class="panel" style="margin-top:16px;border-color:var(--warn)">
+      <strong>The API proxy is not deployed yet.</strong>
+      <p class="note">This page is static, and Last.fm sends no CORS headers, so
+      a browser cannot call it directly. A small Cloudflare Worker sits in
+      between and holds the API key. Deploy it, then paste its URL into
+      <code>docs/config.js</code>.</p>
+      <div class="setup"><pre>cd worker
+npx wrangler secret put LASTFM_API_KEY
+npx wrangler deploy</pre></div>
+      <p class="note">To test against a local Worker without editing the file:
+      <code>localStorage.setItem('drift_api','http://127.0.0.1:8787')</code>
+      then reload.</p>
+    </div>`;
+}
+
+$("stop").onclick = () => { abort = true; $("status").textContent = "stopping…"; };
+
+$("f").onsubmit = async (e) => {
+  e.preventDefault();
+  const user = $("user").value.trim();
+  if (!/^[A-Za-z0-9_.-]{2,20}$/.test(user)) {
+    return fail("That does not look like a Last.fm username.");
+  }
+  abort = false;
+  $("go").disabled = true;
+  $("stop").classList.remove("hide");
+  $("prog").classList.remove("hide");
+  $("out").innerHTML = "";
+  try {
+    const cap = Number($("depth").value);
+    const scrobbles = await fetchAll(user, cap);
+    if (!scrobbles.length) return fail("No scrobbles found for that user.");
+    $("status").textContent = `analysing ${N(scrobbles.length)} scrobbles…`;
+    await new Promise((r) => setTimeout(r, 30));   // let the browser paint
+    report = analyse(scrobbles);
+    report.user = user;
+    render();
+    $("prog").classList.add("hide");
+  } catch (err) {
+    fail(err.message || String(err));
+  } finally {
+    $("go").disabled = false;
+    $("stop").classList.add("hide");
+  }
+};
+
+async function fetchAll(user, cap) {
+  const base = apiBase().replace(/\/+$/, "");
+  const all = [];
+  let from = 1, totalPages = null, totalScrobbles = null;
+
+  while (!abort) {
+    let res;
+    try {
+      res = await fetch(
+        `${base}/api/scrobbles?user=${encodeURIComponent(user)}&from=${from}&count=15`);
+    } catch {
+      throw new Error("Could not reach the API proxy. Is the Worker deployed, " +
+                      "and is this origin in its ALLOWED_ORIGINS?");
+    }
+    if (res.status === 404) throw new Error("No such Last.fm user.");
+    if (res.status === 429) throw new Error("Rate limited. Try again in a while.");
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `Request failed (${res.status}).`);
+    }
+    const data = await res.json();
+    totalPages ??= data.total_pages;
+    totalScrobbles ??= data.total_scrobbles;
+    all.push(...data.scrobbles);
+
+    const target = cap ? Math.min(cap, totalScrobbles) : totalScrobbles;
+    $("fill").style.width =
+      Math.min(100, (all.length / Math.max(target, 1)) * 100) + "%";
+    $("status").textContent =
+      `${N(all.length)} of ${N(target)} scrobbles… (page ${from} of ${N(totalPages)})`;
+
+    if (cap && all.length >= cap) { all.length = cap; break; }
+    if (!data.next) break;
+    from = data.next;
+  }
+  return all;
+}
+
+function fail(msg) {
+  $("prog").classList.add("hide");
+  $("out").innerHTML = `<div class="panel err" style="margin-top:16px">${esc(msg)}</div>`;
+}
+
+const metric = (n, l, c) =>
+  `<div class="panel metric"><div class="n"${c ? ` style="color:${c}"` : ""}>${n}</div>
+   <div class="l">${l}</div></div>`;
+
+function render() {
+  const d = report, p = d.profile, h = d.hygiene, era = d.era, im = d.impact;
+  $("out").innerHTML = `
+    <h2>${esc(d.user)}</h2>
+    <div class="grid g2">
+      <div class="panel">
+        <div class="score" style="color:${col(h.score)}">${h.score}<span
+          style="font-size:18px;color:var(--dim)">/100</span></div>
+        <div class="l" style="color:var(--dim);font-size:12px;margin-bottom:12px">
+          hygiene score</div>
+        ${Object.entries(h.subscores).map(([k, v]) => `
+          <div style="margin-bottom:9px">
+            <div class="row" style="border:0;padding:0">
+              <span>${esc(k.replace(/_/g, " "))}</span><span class="v">${v}</span></div>
+            <div class="bar"><i style="width:${v}%;background:${col(v)}"></i></div>
+          </div>`).join("")}
+      </div>
+      <div class="grid g4">
+        ${metric(N(p.scrobbles_ingested), "scrobbles scanned")}
+        ${metric(N(p.distinct_albums), "album strings")}
+        ${metric(N(d.issues_total), "issues found")}
+        ${metric((p.scrobbles_ingested / Math.max(p.distinct_albums, 1)).toFixed(1),
+                 "plays per album string")}
+      </div>
+    </div>
+
+    ${era.plays ? `
+      <h2>Unreleased, tagged by era</h2>
+      <div class="panel grid g2">
+        <div class="grid g4" style="align-content:start">
+          ${metric(era.share_of_all_plays + "%", "of all scrobbles", "var(--era)")}
+          ${metric(N(era.plays), "era-tagged plays")}
+          ${metric(N(era.album_strings), "era album strings")}
+          ${metric(N(era.distinct_eras), "distinct eras")}
+        </div>
+        <div>${era.top_albums.slice(0, 12).map((a) =>
+          `<div class="row"><span>${KEY(a.key)}</span>
+           <span class="v">${N(a.plays)}</span></div>`).join("")}</div>
+      </div>
+      <p class="note">Era-tagged material is protected. No detector will suggest
+      merging it into an official release.</p>` : ""}
+
+    ${im.biggest_movers.length ? `
+      <h2>Your chart, corrected</h2>
+      ${im.number_one_changes ? `<div class="panel" style="border-color:var(--warn);
+        margin-bottom:12px">Your true number one album is not the one Last.fm
+        shows you.</div>` : ""}
+      <div class="panel">${im.biggest_movers.slice(0, 14).map((m) => `
+        <div class="mv">
+          <span class="${m.delta > 0 ? "up" : "down"}" style="width:64px;
+            font-variant-numeric:tabular-nums">#${m.from} → #${m.to}</span>
+          <span style="flex:1">${KEY(m.album)}</span>
+          <span class="v" style="color:var(--dim)">
+            ${N(m.plays_before)} → ${N(m.plays_after)}</span>
+        </div>`).join("")}</div>` : ""}
+
+    <h2>Issues</h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      <select id="fd"><option value="">All detectors</option>
+        ${Object.entries(d.summary_by_detector)
+          .sort((a, b) => b[1].plays_affected - a[1].plays_affected)
+          .map(([k, v]) => `<option value="${k}">${k} — ${v.count} issue(s),
+            ${N(v.plays_affected)} plays</option>`).join("")}</select>
+      <select id="fc"><option value="">All classes</option>
+        ${[...new Set(d.issues.map((i) => i.class))].sort()
+          .map((c) => `<option value="${c}">${c}</option>`).join("")}</select>
+    </div>
+    <div id="issues"></div>`;
+
+  $("fd").value = fDet; $("fc").value = fCls;
+  $("fd").onchange = (e) => { fDet = e.target.value; issues(); };
+  $("fc").onchange = (e) => { fCls = e.target.value; issues(); };
+  issues();
+}
+
+function issues() {
+  const list = report.issues.filter((i) =>
+    (!fDet || i.detector === fDet) && (!fCls || i.class === fCls)).slice(0, 200);
+
+  $("issues").innerHTML = list.length ? list.map((i) => `
+    <div class="issue">
+      <h3>${esc(i.title)}</h3>
+      <div>
+        <span class="tag t-${i.class}">${i.class}</span>
+        <span class="tag">${i.detector}</span>
+        <span class="tag">${N(i.plays_affected)} plays</span>
+        <span class="tag">confidence ${Math.round((i.confidence || 0) * 100)}%</span>
+      </div>
+      ${i.suggest ? `<p>${esc(i.suggest)}</p>` : ""}
+      ${i.temporal ? `<p style="color:var(--warn)">${esc(i.temporal.note)}</p>` : ""}
+      ${(i.members || []).length ? `<div class="mem">${i.members.slice(0, 8).map((m) => {
+        const label = m.album ?? m.artist ?? m.track ?? m.era ?? m.month ?? "";
+        const n = m.plays ?? m.dupes ?? null;
+        return `<code>${esc(label)}</code>${n !== null ? " " + N(n) : ""}${
+          m.looks_like ? ` <span style="opacity:.65">(${esc(m.looks_like)})</span>` : ""}`;
+      }).join(" &nbsp;·&nbsp; ")}</div>` : ""}
+    </div>`).join("") : `<div class="panel">Nothing matches that filter.</div>`;
+}
+</script>
+</body>
+</html>
