@@ -1,0 +1,62 @@
+name: scan
+
+# The scheduled run IS the product. Scrobble Drift is a monitor, not a one-off
+# audit: singles get absorbed into albums and catalogues get repackaged on
+# someone else's schedule, so the problem regenerates forever. A monthly diff
+# of "3 things changed" is a five-minute manual fix. A 500-item backlog never
+# gets touched.
+
+on:
+  schedule:
+    - cron: "0 6 1 * *"      # 06:00 UTC on the 1st of each month
+  workflow_dispatch:
+    inputs:
+      resolve:
+        description: "Resolve against MusicBrainz (slow, 1 req/s)"
+        type: boolean
+        default: true
+      budget:
+        description: "Max MusicBrainz lookups"
+        default: "300"
+
+permissions:
+  contents: write            # to commit the report and the MB cache
+
+concurrency:
+  group: scan
+  cancel-in-progress: false  # never interrupt a run mid-ingest
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # No pip install step. The scanner is stdlib-only on purpose: nothing to
+      # pin, nothing to audit, nothing to break in six months.
+      - name: Scan
+        env:
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+          LASTFM_USER: ${{ vars.LASTFM_USER || 'ArjanKnol' }}
+        run: |
+          python scripts/run.py \
+            ${{ (github.event_name == 'schedule' || inputs.resolve) && '--resolve' || '' }} \
+            --budget ${{ inputs.budget || 300 }}
+
+      - name: Commit results
+        run: |
+          git config user.name  "scrobble-drift[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/report.json data/
+          if git diff --staged --quiet; then
+            echo "nothing changed"
+          else
+            git commit -m "scan: $(date -u +%Y-%m-%d)"
+            git push
+          fi
