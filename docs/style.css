@@ -22,7 +22,7 @@ h1 .dot{color:var(--accent)}
 h2{font-size:13px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);
   margin:38px 0 12px;font-weight:700;
   border-bottom:1px solid var(--line);padding-bottom:8px}
-.lede{color:var(--dim);max-width:60ch;margin:0 0 26px}
+.lede{color:var(--dim);margin:0 0 26px}
 .sub{color:var(--dim);font-size:13px;margin-bottom:26px}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px}
 .grid{display:grid;gap:14px}
@@ -90,13 +90,9 @@ button.ghost:hover{background:transparent;color:var(--ink);
 .lfm:hover{color:var(--ink);opacity:.85}
 
 /* The official asset is the 1200x630 social share image: the red wordmark
-   block sits inside a lot of dark padding. This crops to just the block by
-   oversizing the image inside a fixed window, so it reads as a compact footer
-   logo instead of a mostly-empty rectangle. */
-.lfm-logo{display:block;width:50px;height:26px;overflow:hidden;
-  position:relative;border-radius:2px}
-.lfm-logo img{position:absolute;left:-28px;top:-14px;width:106px;height:auto;
-  display:block}
+   block sits inside dark padding. Shown whole rather than cropped: a crop needs hard-coded pixel offsets into someone else's export, which break silently if they ever re-export it. The padding is near-black and blends into --bg anyway. */
+.lfm-logo{display:block;width:96px;height:auto;line-height:0}
+.lfm-logo img{display:block;width:100%;height:auto;border-radius:2px}
 
 /* Shown only if the hotlinked asset 404s. Last.fm fingerprints static files
    (lastfm_logo_facebook.15d8133be114.png), so that URL dies whenever they
