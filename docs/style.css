@@ -86,10 +86,23 @@ button.ghost:hover{background:transparent;color:var(--ink);
   font-size:12.5px;color:var(--dim)}
 .attrib a{border-bottom:0}
 .lfm{display:inline-flex;align-items:center;gap:7px;font-weight:800;
-  letter-spacing:-.02em;color:var(--ink);font-size:14px}
-.lfm:hover{color:var(--ink)}
-.lfm .mark{display:inline-flex;align-items:center;justify-content:center;
+  letter-spacing:-.02em;color:var(--ink);font-size:14px;line-height:1}
+.lfm:hover{color:var(--ink);opacity:.85}
+
+/* The official asset is the 1200x630 social share image: the red wordmark
+   block sits inside a lot of dark padding. This crops to just the block by
+   oversizing the image inside a fixed window, so it reads as a compact footer
+   logo instead of a mostly-empty rectangle. */
+.lfm-logo{display:block;width:50px;height:26px;overflow:hidden;
+  position:relative;border-radius:2px}
+.lfm-logo img{position:absolute;left:-28px;top:-14px;width:106px;height:auto;
+  display:block}
+
+/* Shown only if the hotlinked asset 404s. Last.fm fingerprints static files
+   (lastfm_logo_facebook.15d8133be114.png), so that URL dies whenever they
+   redeploy. Self-hosting the file in docs/ removes this failure mode. */
+.lfm-fallback{display:none;align-items:center;gap:7px}
+.lfm-fallback .mark{display:inline-flex;align-items:center;justify-content:center;
   width:22px;height:22px;border-radius:3px;background:var(--accent);
   color:#fff;font-size:10px;font-weight:800;letter-spacing:-.04em}
-.lfm:hover .mark{background:var(--accent-hover)}
 .attrib .sep{color:var(--line)}
