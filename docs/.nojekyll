@@ -1,0 +1,3 @@
+Disables Jekyll processing on GitHub Pages. Without this, Pages runs the files
+through Jekyll, which ignores paths beginning with an underscore and adds build
+latency for no benefit. This site is plain static HTML, CSS and ES modules.
