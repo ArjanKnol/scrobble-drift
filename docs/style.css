@@ -1,16 +1,27 @@
+/* Palette follows Last.fm's own dark theme: near-black greys with their
+   signature red (#d51007) as the single accent. Deliberately not a clone --
+   this is a third-party tool and should not pass itself off as Last.fm -- but
+   it should feel like it belongs next to it. */
 :root{
-  --bg:#0f1115; --panel:#171a21; --line:#252a34; --ink:#e6e8ee; --dim:#8b93a5;
-  --accent:#7aa2f7; --good:#7fd88f; --warn:#e0af68; --bad:#f7768e; --era:#bb9af7;
+  --bg:#131313; --panel:#1c1c1c; --line:#2b2b2b; --ink:#f0f0f0; --dim:#999;
+  --accent:#d51007;          /* Last.fm red */
+  --accent-hover:#ff2010;
+  --good:#5cb85c; --warn:#e0af68; --bad:#d51007; --era:#b56bd8;
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);
-  font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
-a{color:var(--accent)}
+  font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
+    "Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased}
+a{color:var(--ink);text-decoration:none;border-bottom:1px solid var(--line)}
+a:hover{color:var(--accent);border-bottom-color:var(--accent)}
 code{font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace}
-.wrap{max-width:1080px;margin:0 auto;padding:40px 20px 90px}
-h1{font-size:30px;margin:0 0 6px;letter-spacing:-.025em}
-h2{font-size:15px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);
-  margin:38px 0 12px;font-weight:600}
+.wrap{max-width:1080px;margin:0 auto;padding:40px 20px 40px}
+h1{font-size:32px;margin:0 0 6px;letter-spacing:-.02em;font-weight:800}
+h1 .dot{color:var(--accent)}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);
+  margin:38px 0 12px;font-weight:700;
+  border-bottom:1px solid var(--line);padding-bottom:8px}
 .lede{color:var(--dim);max-width:60ch;margin:0 0 26px}
 .sub{color:var(--dim);font-size:13px;margin-bottom:26px}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px}
@@ -18,13 +29,19 @@ h2{font-size:15px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim)
 .g4{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
 .g2{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
 form{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
-input,select,button{background:#0c0e12;color:var(--ink);border:1px solid var(--line);
-  border-radius:8px;padding:11px 13px;font:inherit;font-size:14px}
+input,select,button{background:#0d0d0d;color:var(--ink);border:1px solid var(--line);
+  border-radius:4px;padding:11px 13px;font:inherit;font-size:14px}
 input{min-width:230px}
-button{background:var(--accent);color:#0b0e14;border-color:transparent;
-  font-weight:600;cursor:pointer}
-button:disabled{opacity:.5;cursor:default}
-button.ghost{background:var(--panel);color:var(--ink);border-color:var(--line);font-weight:500}
+input:focus,select:focus{outline:none;border-color:var(--accent)}
+button{background:var(--accent);color:#fff;border-color:transparent;
+  font-weight:700;cursor:pointer;text-transform:uppercase;
+  letter-spacing:.04em;font-size:13px;border-radius:4px}
+button:hover:not(:disabled){background:var(--accent-hover)}
+button:disabled{opacity:.45;cursor:default}
+button.ghost{background:transparent;color:var(--dim);border-color:var(--line);
+  font-weight:600}
+button.ghost:hover{background:transparent;color:var(--ink);
+  border-color:var(--dim)}
 .bar{height:7px;background:var(--line);border-radius:99px;overflow:hidden;margin-top:9px}
 .bar>i{display:block;height:100%;background:var(--accent);transition:width .25s}
 .metric .n{font-size:29px;font-weight:650;letter-spacing:-.02em}
@@ -54,7 +71,25 @@ button.ghost{background:var(--panel);color:var(--ink);border-color:var(--line);f
 .err{border-color:var(--bad);color:var(--bad)}
 .hide{display:none}
 .note{font-size:12.5px;color:var(--dim);margin-top:9px}
-.nav{display:flex;gap:14px;font-size:13px;margin-bottom:24px}
-.setup{background:#0c0e12;border-radius:8px;padding:12px 14px;margin-top:12px;
+.nav{display:flex;gap:18px;font-size:13px;margin-bottom:24px}
+.setup{background:#0d0d0d;border-radius:4px;padding:12px 14px;margin-top:12px;
   overflow-x:auto}
 .setup pre{margin:0;font:12.5px ui-monospace,Menlo,monospace;color:var(--ink)}
+
+/* ---- Last.fm attribution ------------------------------------------------
+   The API terms ask for attribution and a link back, so this is a compliance
+   item as much as a design one. Rendered as type rather than a copy of their
+   logo: reproducing a trademark imprecisely is worse than not using it, and a
+   hotlinked hashed asset from their CDN breaks the moment they redeploy. */
+.attrib{border-top:1px solid var(--line);margin-top:56px;padding:22px 0 8px;
+  display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;
+  font-size:12.5px;color:var(--dim)}
+.attrib a{border-bottom:0}
+.lfm{display:inline-flex;align-items:center;gap:7px;font-weight:800;
+  letter-spacing:-.02em;color:var(--ink);font-size:14px}
+.lfm:hover{color:var(--ink)}
+.lfm .mark{display:inline-flex;align-items:center;justify-content:center;
+  width:22px;height:22px;border-radius:3px;background:var(--accent);
+  color:#fff;font-size:10px;font-weight:800;letter-spacing:-.04em}
+.lfm:hover .mark{background:var(--accent-hover)}
+.attrib .sep{color:var(--line)}

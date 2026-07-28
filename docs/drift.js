@@ -192,18 +192,50 @@ export function d14aFormatVariants(era) {
         if (norm(a) === norm(b) || similar(norm(a), norm(b)) < 0.82) continue;
         const [lo, hi] = counts.get(a) <= counts.get(b) ? [a, b] : [b, a];
         if (counts.get(lo) > Math.max(2, 0.25 * counts.get(hi))) continue;
+        const sequel = differsOnlyByVersion(lo, hi);
         issues.push({
-          detector: "D14a", class: "error", confidence: 0.7, artist,
-          title: `Probable era-name typo for ${artist}: '${lo}' vs '${hi}'`,
+          detector: "D14a",
+          // A trailing number or version token means these are very likely
+          // distinct projects, not a misspelling: 'Drip Season' and 'Drip
+          // Season 3' are two different Gunna tapes. Play count asymmetry
+          // cannot separate that from a typo, so downgrade to review rather
+          // than assert an error.
+          class: sequel ? "review" : "error",
+          confidence: sequel ? 0.35 : 0.7,
+          artist,
+          title: sequel
+            ? `Similar era names for ${artist}: '${lo}' vs '${hi}'`
+            : `Probable era-name typo for ${artist}: '${lo}' vs '${hi}'`,
           plays_affected: counts.get(lo) + counts.get(hi),
-          suggest: `'${hi}' has ${counts.get(hi)} plays against ` +
-                   `${counts.get(lo)}, so '${lo}' is likely the typo.`,
+          suggest: sequel
+            ? `these differ only by a version or sequel marker, so they are ` +
+              `probably separate projects rather than a typo. Flagged in case ` +
+              `one is wrong. '${hi}' has ${counts.get(hi)} plays, '${lo}' has ` +
+              `${counts.get(lo)}.`
+            : `'${hi}' has ${counts.get(hi)} plays against ` +
+              `${counts.get(lo)}, so '${lo}' is likely the typo.`,
           members: [lo, hi].map((n) => ({ era: n, plays: counts.get(n) })),
         });
       }
     }
   }
   return issues;
+}
+
+const VERSION_TAIL =
+  /\s*(?:v\.?\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?|og|alt|final|deluxe|pt\.?\s*\d+)$/i;
+
+/**
+ * True when two names are identical once a trailing version token is cut.
+ *
+ * Catches sequels ('Drip Season' / 'Drip Season 3'), numbered versions
+ * ('Luv Is Rage' / 'Luv Is Rage 2') and leak-scene markers ('Eternal Atake v1'
+ * / 'Eternal Atake OG'), all routinely distinct releases rather than typos.
+ */
+function differsOnlyByVersion(a, b) {
+  const sa = a.replace(VERSION_TAIL, "").trim();
+  const sb = b.replace(VERSION_TAIL, "").trim();
+  return norm(sa) === norm(sb) && (sa !== a || sb !== b);
 }
 
 export function d14cTrackInTwoEras(era) {
