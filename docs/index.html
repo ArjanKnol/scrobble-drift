@@ -9,7 +9,7 @@
   how much they distort your charts.">
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=2">
+<link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
 <div class="wrap">
@@ -56,8 +56,14 @@
   <footer class="attrib">
     <span>Powered by</span>
     <a class="lfm" href="https://www.last.fm/" target="_blank"
-       rel="noopener noreferrer">
-      <span class="mark" aria-hidden="true">as</span>Last.fm
+       rel="noopener noreferrer" aria-label="Last.fm">
+      <span class="lfm-logo"><img
+        src="https://www.last.fm/static/images/lastfm_logo_facebook.15d8133be114.png"
+        alt="Last.fm" width="106" loading="lazy"
+        onerror="this.closest('.lfm-logo').style.display='none';
+                 this.closest('.lfm').querySelector('.lfm-fallback')
+                     .style.display='inline-flex'"></span>
+      <span class="lfm-fallback"><span class="mark" aria-hidden="true">as</span>Last.fm</span>
     </a>
     <span class="sep">|</span>
     <span>Metadata from
