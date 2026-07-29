@@ -141,6 +141,7 @@
 import {
   analyse, partitionEra, resolutionPlan, d0Resolve, d14eReleasedSince,
   eraVerificationPlan, verifyEraNames, hygieneScore, chartImpact,
+  weakEraCandidates, officialKey, d5Resolve,
 } from "./drift.js";
 import { apiBase, isConfigured } from "./config.js";
 import * as store from "./store.js";
@@ -208,16 +209,21 @@ function issueLinks(issue, user) {
     push("track", issue.track, libUrl(user, artist, { track: issue.track }));
   }
   for (const m of issue.members || []) {
+    // A member may name its own artist. D5 spans many artists, so linking every
+    // track under issue.artist would build wrong URLs for most of them.
+    const who = m.artist || artist;
     if (m.album && artist && m.album !== "(no album)") {
       push("album", m.album, libUrl(user, artist, { album: m.album }));
+    } else if (m.track && who) {
+      push("track", m.track, libUrl(user, who, { track: m.track }));
     } else if (m.artist) {
       push("artist", m.artist, libUrl(user, m.artist));
-    } else if (m.track && artist) {
-      push("track", m.track, libUrl(user, artist, { track: m.track }));
     }
   }
   if (!out.length && artist) push("artist", artist, libUrl(user, artist));
-  return out.slice(0, 6);
+  // 10, not 6: a blank-album finding is a to-do list and truncating it to six
+  // defeats the point.
+  return out.slice(0, 10);
 }
 const col = (v) => v >= 85 ? "var(--good)" : v >= 60 ? "var(--warn)" : "var(--bad)";
 
@@ -458,9 +464,19 @@ $("f").onsubmit = async (e) => {
       ? `Analysing ${N(scrobbles.length)} scrobbles. This blocks the tab for ` +
         `up to 30 seconds and cannot show progress. Do not close it.`
       : `Analysing ${N(scrobbles.length)} scrobbles in your browser…`;
+    // Settle ambiguous album names BEFORE analysing, because the answer decides
+    // which partition they land in and the era partition is hidden from most
+    // detectors. Deliberately not part of resolvePhase: by then analyse() has
+    // already run and the classification is baked in.
+    //
+    // Cheap enough to run first. Only weak markers qualify ('The Leaks',
+    // 'Outtakes', 'Rodeo Sessions'), which is a handful per library, not
+    // thousands.
+    const official = await verifyOfficialAlbums(scrobbles, apiKey);
+
     await sleep(60);                  // let the browser paint before the CPU work
     const t1 = Date.now();
-    report = analyse(scrobbles);
+    report = analyse(scrobbles, { official });
     stats.analyse_ms = Date.now() - t1;
     stats.phase = "analysing";
     setPhase(1, 2, "Analysing in your browser",
@@ -642,6 +658,68 @@ class Pacer {
   backoff(seconds) {
     this.nextSlot = Math.max(this.nextSlot, Date.now() + seconds * 1000);
   }
+}
+
+/**
+ * Which ambiguous album names are actually real releases?
+ *
+ * 'The Leaks' is a Lil Baby project. 'Outtakes' and 'Snippets' title real
+ * records too. Matching them as unreleased material does not merely mislabel a
+ * row: the era guard PROTECTS what it matches, excluding it from D0, D4 and D1,
+ * so a real album silently stops being checked for splits.
+ *
+ * The library-shape heuristic in partitionEra cannot settle this on its own,
+ * because an artist can both release a record called 'The Leaks' AND tag leaks
+ * by era. Asking whether the release exists is a fact rather than a correlation.
+ *
+ * Spotify first, MusicBrainz as fallback, same ordering as everywhere else.
+ * Returns an empty Set when neither is reachable, which drops back to the
+ * heuristic rather than failing the scan.
+ */
+async function verifyOfficialAlbums(scrobbles, apiKey) {
+  const official = new Set();
+  const candidates = weakEraCandidates(scrobbles);
+  if (!candidates.length) return official;
+
+  const base = apiBase().replace(/\/+$/, "");
+  setPhase(1, 2, "Checking a few album names",
+           `${N(candidates.length)} album name${candidates.length === 1 ? "" : "s"} ` +
+           `could be either a real release or a folder of unreleased tracks. ` +
+           `Asking, so real albums are not hidden from the split detectors.`);
+
+  for (const c of candidates) {
+    if (abort) break;
+
+    // Cached permanently: whether a release exists is a historical fact.
+    const cached = await store.getLookup("official", c.artist, c.album);
+    if (cached !== null) {
+      if (cached?.exists) official.add(officialKey(c.artist, c.album));
+      continue;
+    }
+
+    let exists = null;
+    if (spotifyOn) {
+      const sp = await fetch(`${base}/api/spotify/album?` + new URLSearchParams(
+        { artist: c.artist, title: c.album })).then((r) => r.ok ? r.json() : null)
+        .catch(() => null);
+      if (sp) exists = Boolean(sp.exists);
+    }
+    // Only ask MusicBrainz when Spotify had nothing to say. A Spotify miss is
+    // not proof of absence, and MusicBrainz catalogues far more.
+    if (exists !== true) {
+      await sleep(1000);              // MusicBrainz: one request per second
+      const mb = await fetch(`${base}/api/mb/release-group?` + new URLSearchParams(
+        { artist: c.artist, title: c.album })).then((r) => r.ok ? r.json() : null)
+        .catch(() => null);
+      if (mb) exists = Boolean(mb.exists) || exists === true;
+    }
+
+    if (exists !== null) {
+      await store.putLookup("official", c.artist, c.album, { exists });
+      if (exists) official.add(officialKey(c.artist, c.album));
+    }
+  }
+  return official;
 }
 
 /** Visible countdown, so a wait never looks like a hang. */
@@ -1131,6 +1209,11 @@ async function resolvePhase(scrobbles, apiKey) {
     ...resolved, ...released,
   ].sort((a, b) => (b.plays_affected || 0) - (a.plays_affected || 0));
 
+  // Name the album each blank-album track should carry. Uses the same cache as
+  // the split resolver, so it costs no extra lookups.
+  report.issues = report.issues.map((i) =>
+    i.detector === "D5" ? d5Resolve(i, lookup) : i);
+
   report.summary_by_detector = {};
   for (const i of report.issues) {
     report.summary_by_detector[i.detector] ??= { count: 0, plays_affected: 0 };
@@ -1392,8 +1475,11 @@ function issues() {
       </div>
       ${i.suggest ? `<p>${esc(i.suggest)}</p>` : ""}
       ${i.temporal ? `<p style="color:var(--warn)">${esc(i.temporal.note)}</p>` : ""}
-      ${(i.members || []).length ? `<div class="mem">${i.members.slice(0, 8).map((m) => {
-        const label = m.album ?? m.artist ?? m.track ?? m.era ?? m.month ?? "";
+      ${(i.members || []).length ? `<div class="mem">${i.members.slice(0, 12).map((m) => {
+        // artist + track together when both are present, so a multi-artist list
+        // like D5's says whose track each one is.
+        const label = (m.artist && m.track) ? `${m.artist} - ${m.track}`
+          : m.album ?? m.artist ?? m.track ?? m.era ?? m.month ?? "";
         const n = m.plays ?? m.dupes ?? null;
         return `<code>${esc(label)}</code>${n !== null ? " " + N(n) : ""}${
           m.looks_like ? ` <span style="opacity:.65">(${esc(m.looks_like)})</span>` : ""}`;

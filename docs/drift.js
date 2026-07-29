@@ -331,7 +331,26 @@ export const isUndifferentiated = (album) =>
  * near-zero listeners and no database entry. Confidently damaging a carefully
  * maintained taxonomy is the worst thing this tool could do.
  */
-export function partitionEra(scrobbles) {
+export function partitionEra(scrobbles, { official } = {}) {
+  /*
+   * `official` is an optional Set of album strings VERIFIED to be real releases,
+   * keyed `norm(artist)␟norm(album)`. Built by the caller from Spotify or
+   * MusicBrainz before analysis; see weakEraCandidates().
+   *
+   * This beats the corroboration heuristic outright, and it fixes a case the
+   * heuristic cannot: Lil Baby's "The Leaks" is an officially released project,
+   * but he ALSO tags leaks with explicit era names, so corroboration alone still
+   * swallowed the real album. Asking whether the release exists is a fact;
+   * "does this artist tag leaks elsewhere" is only a correlation.
+   *
+   * Applied to weak and ambiguous markers only. A strong marker stays strong
+   * even if some artist happens to have released a record called "Unreleased",
+   * because un-protecting a genuine leak bucket is the more damaging error.
+   */
+  const isOfficial = official instanceof Set
+    ? (artist, album) => official.has(`${norm(artist)}␟${norm(album)}`)
+    : () => false;
+
   // Pass 1: which artists tag unreleased material explicitly? Only for those is
   // a bare "Rodeo Sessions" evidence of the convention rather than a guess about
   // a real album. Without this, Abbey Road Sessions gets protected and silently
@@ -343,17 +362,45 @@ export function partitionEra(scrobbles) {
 
   const era = [], rest = [];
   for (const s of scrobbles) {
-    // Weak markers and bare qualifiers both need the same corroboration: this
-    // artist must be strongly marked somewhere. Without it, 'The Leaks' by Lil
-    // Baby and 'Spotify Sessions' by Coldplay stay in `rest`, where split
-    // detection can still see them.
-    const needsBacking = weakEra(s.album) || ambiguousEra(s.album);
-    const isEra = explicitEra(s.album) ||
-                  (needsBacking && taggers.has(norm(s.artist)));
+    let isEra;
+    if (explicitEra(s.album)) {
+      isEra = true;
+    } else if (weakEra(s.album) || ambiguousEra(s.album)) {
+      // Verified real release wins; otherwise fall back to corroboration.
+      isEra = !isOfficial(s.artist, s.album) && taggers.has(norm(s.artist));
+    } else {
+      isEra = false;
+    }
     (isEra ? era : rest).push(s);
   }
   return { era, rest };
 }
+
+/**
+ * Album strings whose classification would benefit from a release lookup.
+ *
+ * Only the weak and ambiguous ones: 'The Leaks', 'Outtakes', 'Rodeo Sessions'.
+ * Strong markers need no help and normal albums are not in question, so this
+ * list is short, usually a handful per library. Sorted busiest first so a capped
+ * budget is spent where it changes the most plays.
+ */
+export function weakEraCandidates(scrobbles, { limit = 40 } = {}) {
+  const seen = new Map();
+  for (const s of scrobbles) {
+    if (!s.album) continue;
+    if (explicitEra(s.album)) continue;
+    if (!weakEra(s.album) && !ambiguousEra(s.album)) continue;
+    const k = `${norm(s.artist)}␟${norm(s.album)}`;
+    const rec = seen.get(k) || { artist: s.artist, album: s.album, plays: 0 };
+    rec.plays++;
+    seen.set(k, rec);
+  }
+  return [...seen.values()].sort((a, b) => b.plays - a.plays).slice(0, limit);
+}
+
+/** Key an artist/album pair for the `official` set. */
+export const officialKey = (artist, album) =>
+  `${norm(artist)}␟${norm(album)}`;
 
 export function d14Overview(era, totalPlays) {
   const albums = counter(era, (s) => `${s.artist}␟${s.album}`);
@@ -1084,20 +1131,94 @@ export function d1ArtistVariants(rest) {
   return issues.sort((a, b) => b.plays_affected - a.plays_affected);
 }
 
+/**
+ * Scrobbles with no album at all.
+ *
+ * This used to list the MONTHS the blanks fell in, which explained the cause (a
+ * cluster means one misbehaving scrobbler) but gave the reader nothing to do:
+ * "18 scrobbles have no album, concentrated in 2017-07" cannot be acted on
+ * without hunting through a year of history by hand.
+ *
+ * It now lists the actual tracks, busiest first, so every one is a link. The
+ * month clustering stays in the prose, where it belongs: it is an explanation,
+ * not a task. `tracks` is carried on the issue so d5Resolve() can add the album
+ * each one probably belongs to once the release lookups have run.
+ */
 export function d5MissingAlbum(rest) {
   const blanks = rest.filter((s) => !s.album);
   if (!blanks.length) return [];
   const months = counter(blanks, (s) => monthOf(s.uts));
-  const worst = ranked(months).slice(0, 6);
+  const worst = ranked(months).slice(0, 4);
+
+  const tracks = new Map();
+  for (const s of blanks) {
+    const k = `${norm(s.artist)}␟${trackIdentity(s.track)}`;
+    const rec = tracks.get(k) ||
+      { artist: s.artist, track: s.track, plays: 0, first: s.uts, last: s.uts };
+    rec.plays++;
+    rec.first = Math.min(rec.first, s.uts);
+    rec.last = Math.max(rec.last, s.uts);
+    tracks.set(k, rec);
+  }
+  const order = [...tracks.values()].sort((a, b) => b.plays - a.plays);
+
   return [{
     detector: "D5", class: "error", confidence: 0.9,
-    title: `${blanks.length.toLocaleString()} scrobbles have no album`,
+    title: `${blanks.length.toLocaleString()} scrobbles have no album, across ` +
+           `${order.length.toLocaleString()} track${order.length === 1 ? "" : "s"}`,
     plays_affected: blanks.length,
-    suggest: `concentrated in ${worst.map(([m, n]) => `${m} (${n})`).join(", ")}. ` +
-             `A cluster usually means one misbehaving scrobbler rather than ` +
-             `scattered mistakes.`,
-    members: ranked(months).slice(0, 24).map(([month, plays]) => ({ month, plays })),
+    suggest:
+      `Every track is listed below and links straight to it in your library. ` +
+      `Mostly ${worst.map(([m, n]) => `${m} (${n})`).join(", ")}: a cluster like ` +
+      `that usually means one misbehaving scrobbler over a short period rather ` +
+      `than scattered mistakes, so the cause may be worth more than the ` +
+      `individual fixes.`,
+    tracks: order,
+    members: order.slice(0, 30).map((t) => ({
+      artist: t.artist, track: t.track, plays: t.plays,
+    })),
+    months: ranked(months).slice(0, 24).map(([month, plays]) => ({ month, plays })),
   }];
+}
+
+/**
+ * Name the album each blank-album track probably belongs to.
+ *
+ * The point of D5 is not "you have 18 blanks", it is "here is what each one
+ * should say". Reuses the same lookup the split resolver uses, so it costs
+ * nothing extra once those answers are cached.
+ *
+ * Preference order matches d0Resolve: the earliest non-compilation album, since
+ * that is where a track originally appeared, rather than whatever compilation
+ * happens to be listed first.
+ */
+export function d5Resolve(issue, lookup) {
+  if (!issue?.tracks?.length) return issue;
+  let named = 0;
+  const members = issue.tracks.slice(0, 30).map((t) => {
+    const found = lookup(t.artist, t.track);
+    const groups = found?.groups || [];
+    const albums = groups.filter((g) =>
+      g.primary === "Album" && !(g.secondary || []).includes("Compilation"));
+    const target = albums[0] || groups[0];
+    if (target) named++;
+    return {
+      artist: t.artist, track: t.track, plays: t.plays,
+      looks_like: target
+        ? `should be: ${target.title}`
+        : "no album found for this title",
+    };
+  });
+
+  return {
+    ...issue,
+    members,
+    suggest: named
+      ? `${named} of ${members.length} have been matched to a release, shown ` +
+        `next to each track below. Each one links to your library. ` +
+        issue.suggest.replace(/^Every track is listed below[^.]*\. /, "")
+      : issue.suggest,
+  };
 }
 
 export function d6Duplicates(scrobbles, windowSec = 30) {
@@ -1311,6 +1432,18 @@ export function resolutionPlan(scrobbles, { budget = 3000 } = {}) {
   };
 
   for (const s of splits) add(s.artist, s.track, s.plays_affected, "split");
+
+  // Blank-album tracks. Cheap to include and it is what turns D5 from "you have
+  // 18 blanks" into "here is the album each one should say".
+  const blanks = new Map();
+  for (const s of rest) {
+    if (s.album) continue;
+    const k = `${norm(s.artist)}␟${trackIdentity(s.track)}`;
+    const cur = blanks.get(k) || { artist: s.artist, track: s.track, plays: 0 };
+    cur.plays++;
+    blanks.set(k, cur);
+  }
+  for (const b of blanks.values()) add(b.artist, b.track, b.plays, "missing");
 
   // D14e works per track, not per album string.
   const eraTracks = new Map();
@@ -1663,9 +1796,11 @@ export const SCORED_DETECTORS = new Set(Object.values(BUCKETS).flat());
 
 /* --------------------------------------------------------- orchestration */
 
-export function analyse(scrobbles) {
+export function analyse(scrobbles, { official } = {}) {
   const total = scrobbles.length;
-  const { era, rest } = partitionEra(scrobbles);   // guard first, always
+  // guard first, always. `official` lets verified real releases out of the
+  // protected partition so they get checked for splits like any other album.
+  const { era, rest } = partitionEra(scrobbles, { official });
 
   const splits = d4AlbumSplits(rest);
   const issues = [
