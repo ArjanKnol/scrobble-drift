@@ -99,32 +99,55 @@ export default {
         }, 200, cors);
       }
 
-      if (url.pathname === "/api/lastfm") return lastfm(url, env, cors);
+      // `return await`, not `return`, on every one of these.
+      //
+      // `return someAsyncFn()` hands back a PENDING promise. The try block then
+      // completes, so when that promise later rejects there is no longer a catch
+      // on the stack: the rejection escapes to the runtime and Cloudflare serves
+      // its own error 1101 page. The handler's careful error handling below was
+      // dead code for every route.
+      //
+      // It cost hours to find, because the symptom is a blank page with no
+      // status, no body and no hint that your own code ever ran.
+      if (url.pathname === "/api/lastfm") return await lastfm(url, env, cors);
       if (url.pathname === "/api/scrobbles") {
-        return scrobbles(url, request, env, cors);
+        return await scrobbles(url, request, env, cors);
       }
-      if (url.pathname === "/api/mb/recording") return mbRecording(url, cors);
+      if (url.pathname === "/api/mb/recording") {
+        return await mbRecording(url, cors);
+      }
       if (url.pathname === "/api/mb/release-group") {
-        return mbReleaseGroup(url, cors);
+        return await mbReleaseGroup(url, cors);
       }
 
       if (url.pathname === "/api/spotify/artist-albums") {
-        return spArtistAlbums(url, env, cors);
+        return await spArtistAlbums(url, env, cors);
       }
       if (url.pathname === "/api/spotify/album-tracks") {
-        return spAlbumTracks(url, env, cors);
+        return await spAlbumTracks(url, env, cors);
       }
-      if (url.pathname === "/api/spotify/album") return spAlbum(url, env, cors);
+      if (url.pathname === "/api/spotify/album") {
+        return await spAlbum(url, env, cors);
+      }
 
       return json({ error: "not found" }, 404, cors);
     } catch (err) {
-      // Never leak internals or the key to the client.
       console.error(err?.stack || String(err));
       if (err instanceof Retryable) {
         return json({ error: err.message, retry_after: err.retryAfter }, 429,
                     { ...cors, "Retry-After": String(err.retryAfter) });
       }
-      return json({ error: "upstream failure" }, 502, cors);
+      // A short, scrubbed reason. Without one, every upstream problem looked
+      // identical from the client and could only be diagnosed with `wrangler
+      // tail`, which is not available to anyone but the operator.
+      //
+      // Scrubbed because callLastfm puts the API key in a URL, and a fetch
+      // error can quote that URL. Any 32-hex run is redacted before it leaves
+      // the Worker, so a leak cannot happen by accident here.
+      return json({
+        error: "upstream failure",
+        reason: redact(`${err?.name || "Error"}: ${err?.message || err}`),
+      }, 502, cors);
     }
   },
 };
@@ -136,6 +159,22 @@ class Retryable extends Error {
     super(message);
     this.retryAfter = retryAfter;
   }
+}
+
+/**
+ * Strip anything that looks like a credential from a string bound for a client.
+ *
+ * 32 hex characters is a Last.fm API key. Spotify tokens are long base64-ish
+ * runs. Neither should ever appear in an error message, and the cheapest way to
+ * guarantee that is to redact at the boundary rather than audit every throw
+ * site for what it might interpolate.
+ */
+function redact(s) {
+  return String(s)
+    .replace(/[a-f0-9]{32}/gi, "[redacted-key]")
+    .replace(/Bearer\s+[\w.-]+/gi, "Bearer [redacted]")
+    .replace(/[\w-]{40,}/g, "[redacted-token]")
+    .slice(0, 300);
 }
 
 function json(body, status, headers) {
@@ -671,6 +710,7 @@ export const spNorm = (s) => (s || "").toLowerCase()
  * as one via `source`.
  */
 export function spAlbumToGroup(al) {
+  if (!al) return null;         // defence in depth; callers filter first
   const type = al.album_type || "album";
   const n = Number(al.total_tracks || 0);
   let primary = "Album";
@@ -731,6 +771,9 @@ async function spArtistAlbums(url, env, cors) {
   while (next && albums.length < SP_ALBUM_CAP) {
     const page = await spFetch(next, env);
     for (const al of page.items || []) {
+      // Spotify puts nulls in result arrays for unmatched or region-restricted
+      // entries. One null used to throw on al.id and take the request down.
+      if (!al?.id) continue;
       albums.push({
         id: al.id,
         name: al.name,
@@ -819,7 +862,7 @@ async function spAlbum(url, env, cors) {
 
   const wantTitle = spNorm(title);
   const wantArtist = spNorm(artist);
-  const groups = (data.albums?.items || []).map((al) => ({
+  const groups = (data.albums?.items || []).filter((al) => al?.id).map((al) => ({
     ...spAlbumToGroup(al),
     // Both must match. Title alone is not enough: a search for a rare era name
     // can surface a same-titled record by a different artist entirely.

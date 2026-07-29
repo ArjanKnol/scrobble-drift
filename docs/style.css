@@ -209,3 +209,9 @@ html{scroll-behavior:smooth}
   flex:0 0 auto}
 .done-mark.ok{background:var(--good);color:#0d1a0d}
 .done-mark.part{background:var(--warn);color:#221a08}
+
+/* Column header for the chart-impact tables. Without it the two numbers on the
+   right were unlabelled, and a reader had no way to know which was which. */
+.mv-head{display:flex;gap:12px;align-items:center;padding:0 0 7px;
+  margin-bottom:5px;border-bottom:1px solid var(--line);
+  font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}

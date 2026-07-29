@@ -1139,7 +1139,40 @@ export function chartImpact(rest, splits, topN = 25) {
   for (const issue of splits) {
     const members = (issue.members || []).filter((m) => m.album);
     if (members.length < 2) continue;
-    const target = issue.temporal?.later || issue.external?.title || members[0].album;
+
+    /*
+     * The sink MUST be an album string the user actually has.
+     *
+     * This used to be `issue.external?.title`, the MusicBrainz release-group
+     * title, which is frequently not the string in the library: MusicBrainz
+     * says "Graduation (Deluxe Edition)" where the scrobbles say "Graduation".
+     * The simulation then moved 159 plays out of a real album and into a
+     * phantom entry that existed nowhere in the data. The user saw their
+     * number-one album drop 409 -> 250 with no visible destination, because
+     * the movers list only reports albums present both before and after.
+     *
+     * The distinction that was missed: the MusicBrainz title is the right thing
+     * to RECOMMEND (D0's suggest text names the canonical release), but the
+     * chart simulation answers a different question, "what would your chart look
+     * like if these plays were one album", and that can only ever redistribute
+     * among strings that exist. Recommendation target and simulation target are
+     * not the same thing.
+     */
+    const wanted = issue.temporal?.later || issue.external?.title || null;
+    let target = null;
+    if (wanted) {
+      const w = norm(wanted);
+      target = members.find((m) => norm(m.album) === w)?.album
+            // Partial match catches "Graduation" against "Graduation (Deluxe)"
+            // in either direction, which is the common real case.
+            ?? members.find((m) => norm(m.album).includes(w) ||
+                                   w.includes(norm(m.album)))?.album
+            ?? null;
+    }
+    // Members arrive ranked by plays, so the fallback consolidates into the
+    // variant the user plays most, which is the safest assumption available.
+    if (!target) target = members[0].album;
+
     const sink = `${issue.artist}␟${target}`;
     for (const m of members) {
       const key = `${issue.artist}␟${m.album}`;
@@ -1150,8 +1183,11 @@ export function chartImpact(rest, splits, topN = 25) {
       merged.set(sink, (merged.get(sink) || 0) + moved);
     }
   }
-  const before = ranked(reported).slice(0, 200).map(([k]) => k);
-  const after = ranked(merged).slice(0, 200).map(([k]) => k);
+  // Drop emptied entries. A string whose plays all moved into its sibling no
+  // longer exists in the corrected world, and listing it at 0 plays invites the
+  // reader to think an album lost everything.
+  const before = ranked(reported).filter(([, n]) => n > 0).slice(0, 200).map(([k]) => k);
+  const after = ranked(merged).filter(([, n]) => n > 0).slice(0, 200).map(([k]) => k);
   const posB = new Map(before.map((k, i) => [k, i + 1]));
   const posA = new Map(after.map((k, i) => [k, i + 1]));
 
@@ -1159,11 +1195,21 @@ export function chartImpact(rest, splits, topN = 25) {
   for (const k of new Set([...before.slice(0, 120), ...after.slice(0, 120)])) {
     const b = posB.get(k), a = posA.get(k);
     if (b && a && b !== a) {
-      movers.push({ album: k, from: b, to: a, delta: b - a,
-                    plays_before: reported.get(k), plays_after: merged.get(k) });
+      const pb = reported.get(k) || 0, pa = merged.get(k) || 0;
+      movers.push({
+        album: k, from: b, to: a, delta: b - a,
+        plays_before: pb, plays_after: pa,
+        // A row can move for two entirely different reasons, and showing both
+        // identically is what made this section unreadable. Either this album
+        // absorbed plays from its own split variants, or its play count did not
+        // change at all and it simply moved because other albums did.
+        reason: pa === pb ? "displaced" : "merged",
+      });
     }
   }
-  movers.sort((x, y) => Math.abs(y.delta) - Math.abs(x.delta));
+  movers.sort((x, y) =>
+    (x.reason === y.reason ? 0 : x.reason === "merged" ? -1 : 1) ||
+    Math.abs(y.delta) - Math.abs(x.delta));
 
   return {
     reported_top: before.slice(0, topN).map((k) => ({ album: k, plays: reported.get(k) })),
