@@ -105,13 +105,20 @@ def main() -> int:
     issues += D.d3_mbid_conflicts(rest)
     issues += D.d5_missing_album(rest)
     issues += D.d6_duplicates(scrobbles)
-    issues += D.d7_casing(rest)
     issues += D.d11_various_artists(rest)
     issues += D.d12_impossible(scrobbles, now)
 
-    # D2 (canonical name divergence) is intentionally not run. This project
-    # keeps autocorrect off, which makes Last.fm's canonical opinion actively
-    # misleading rather than merely unhelpful. See the spec, section 3c.
+    # Two detectors are deliberately not run, and both remain in detectors.py so
+    # the reasoning survives and re-enabling is one line.
+    #
+    # D2 (canonical name divergence): this project keeps autocorrect off, which
+    # makes Last.fm's canonical opinion actively misleading rather than merely
+    # unhelpful. See the spec, section 3c.
+    #
+    # D7 (casing-only variants): the findings are real but Last.fm cannot change
+    # the casing of a name, so none of them are actionable. A report padded with
+    # work nobody can do is worse than a shorter honest one. D1 also skips
+    # casing-only groups, so these are absent rather than relabelled.
 
     resolved: list[dict] = []
     era_released: list[dict] = []
@@ -120,6 +127,20 @@ def main() -> int:
         mb = MusicBrainz(MB_CACHE, budget=args.budget)
         print(f"* resolving via MusicBrainz (budget {args.budget}, 1 req/s)",
               file=sys.stderr)
+
+        # Era names first: this can only remove or sharpen findings, and it is
+        # cheap relative to the recording lookups. Settles sequel-vs-typo with
+        # evidence rather than play-count guesswork.
+        pending = D.era_verification_plan(issues)
+        if pending:
+            print(f"  checking {len(pending)} era name(s) against MusicBrainz",
+                  file=sys.stderr)
+            for job in pending:
+                mb.release_group_exists(job["artist"], job["title"])
+            issues = D.verify_era_names(
+                issues,
+                lambda a, t: bool(mb.release_group_exists(a, t)))
+
         # Busiest splits first so a capped budget is spent where it matters.
         resolved = D.d0_resolve(splits[:args.budget // 2], mb.recording)
         era_released = D.d14e_released_since(era, mb.recording)
