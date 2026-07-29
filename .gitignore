@@ -3,17 +3,13 @@
 .env.*
 !.env.example
 
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
 
-# Local scratch. The committed artefacts are docs/report.json,
-# data/mb-cache.json and data/history/.
+# Local scratch. Nothing generated is committed: the analysis runs entirely in
+# the visitor's browser and is stored only in their own IndexedDB.
 *.log
 scratch/
+data/

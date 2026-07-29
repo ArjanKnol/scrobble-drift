@@ -31,10 +31,6 @@
   </p>
 
   <div class="nav">
-    <!-- Hidden until docs/report.json actually exists. The monthly Action
-         writes that file; until it has run, this link led to a page that just
-         said "no saved report", which is a dead end offered as navigation. -->
-    <a href="report.html" id="nav-report" class="hide">Saved monthly report</a>
     <a href="https://github.com/ArjanKnol/scrobble-drift">Source</a>
   </div>
 
@@ -300,11 +296,6 @@ npx wrangler deploy</pre></div>
 
 $("stop").onclick = () => { abort = true; $("status").textContent = "stopping…"; };
 
-/* Show the saved-report link only if there is a saved report. HEAD rather than
-   GET so a large committed report is not downloaded just to test for it. */
-fetch("report.json", { method: "HEAD" })
-  .then((r) => { if (r.ok) $("nav-report").classList.remove("hide"); })
-  .catch(() => { /* no report, link stays hidden */ });
 
 /**
  * Collapse whitespace in every tooltip.
