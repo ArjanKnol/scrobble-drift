@@ -1169,9 +1169,35 @@ export function chartImpact(rest, splits, topN = 25) {
                                    w.includes(norm(m.album)))?.album
             ?? null;
     }
-    // Members arrive ranked by plays, so the fallback consolidates into the
-    // variant the user plays most, which is the safest assumption available.
-    if (!target) target = members[0].album;
+    /*
+     * Fallback when MusicBrainz gave no answer, which is common: the lookup can
+     * fail, be skipped by the budget, or simply find nothing.
+     *
+     * This used to be `members[0].album`, the most-played variant. That is
+     * backwards often enough to matter. The premise of the whole tool is that a
+     * single gets absorbed into an album later, so if a track has 20 plays under
+     * "God's Plan - Single" and 5 under "Scorpion", most-played picks the single
+     * and the simulation moves plays OUT of the album. The user then sees their
+     * real albums losing plays to singles, which is the opposite of the advice
+     * the tool exists to give.
+     *
+     * So rank by what the string IS first, and only use plays to break ties
+     * within a tier.
+     */
+    if (!target) {
+      const RANK = {
+        "album": 0,
+        "edition variant": 1,        // a deluxe edition is still the album
+        "compilation": 2,
+        "single or EP": 3,
+        "single (album titled after the track)": 4,
+        "missing": 5,
+      };
+      const tier = (m) => RANK[classifyAlbumString(m.album, issue.track)] ?? 3;
+      // members arrive ranked by plays, so a stable sort on tier alone leaves
+      // the most-played member first within each tier.
+      target = [...members].sort((a, b) => tier(a) - tier(b))[0].album;
+    }
 
     const sink = `${issue.artist}␟${target}`;
     for (const m of members) {

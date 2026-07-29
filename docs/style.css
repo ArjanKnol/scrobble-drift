@@ -128,13 +128,21 @@ button.ghost:hover{background:transparent;color:var(--ink);
    shorthand, so the browser drops the entire declaration. The icon then got no
    sizing at all and the tooltip inherited bold text from whatever it sat next
    to. Longhand cannot fail this way. */
-.i{display:inline-flex;align-items:center;justify-content:center;
+button.i{display:inline-flex;align-items:center;justify-content:center;
   width:15px;height:15px;padding:0;margin:0 3px 0 5px;border-radius:99px;
   background:transparent;border:1px solid var(--dim);color:var(--dim);
   font-family:inherit;font-size:10px;font-weight:600;line-height:1;
   text-transform:none;letter-spacing:0;
   cursor:help;vertical-align:middle;position:relative;flex:0 0 auto}
-.i:hover,.i:focus-visible{background:var(--dim);color:var(--panel);
+/* `button.i:hover:not(:disabled)`, not `.i:hover`.
+ *
+ * The base rule is `button:hover:not(:disabled){background:var(--accent-hover)}`,
+ * whose specificity is (0,2,1): one element plus two pseudo-classes. A plain
+ * `.i:hover` is only (0,2,0), so it LOSES, and the info icon turned bright red
+ * on hover instead of grey. Adding the element and the same :not() puts this at
+ * (0,3,1) and settles it without !important. */
+button.i:hover:not(:disabled),
+button.i:focus-visible{background:var(--dim);color:var(--panel);
   border-color:var(--dim);outline:none}
 
 /* Positioned on a wrapper so the tip is not clipped by the button's own tiny
@@ -215,3 +223,14 @@ html{scroll-behavior:smooth}
 .mv-head{display:flex;gap:12px;align-items:center;padding:0 0 7px;
   margin-bottom:5px;border-bottom:1px solid var(--line);
   font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+
+/* --------------------------------------------------------- phase indicator */
+/* The progress bar fills, resets and fills again across the two steps of a
+   scan. Unlabelled, that reads as "done, then restarted for no reason". */
+.phase{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;
+  margin:14px 0 2px;font-size:13px}
+.phase .step{flex:0 0 auto;font-size:10.5px;font-weight:700;
+  text-transform:uppercase;letter-spacing:.07em;color:var(--accent);
+  border:1px solid var(--accent);border-radius:99px;padding:2px 8px}
+.phase strong{font-weight:600}
+.phase .phase-detail{flex:1 1 100%;color:var(--dim);font-size:12.5px}
