@@ -65,12 +65,24 @@ possible way: `Unreleased (Rodeo Sessions)` was classified as unreleased by the
 **no era name**, so it was invisible to every era check. Tagged, protected, and
 never examined. Silent, and worse than not supporting the form at all.
 
-**The ambiguous case.** A bare `Rodeo Sessions` has no unreleased marker, and
-`Sessions` is also a real album word: *Abbey Road Sessions* and *Spotify
-Sessions* are commercial releases. Classifying those as unreleased would quietly
-exclude them from split detection. So a bare qualifier only counts when **that
-same artist is tagged explicitly somewhere else in the library**, which turns the
-convention into evidence rather than a guess.
+**Markers have two strengths, because some of these words title real albums.**
+
+*Strong* markers are leak-culture vocabulary that essentially never titles a
+commercial release: `unreleased`, `CDQ`, `OG file`, `reference track`. These
+stand alone.
+
+*Weak* markers are ordinary collection nouns: `leak(s)`, `snippet(s)`,
+`outtake(s)`, `leftover(s)`, and a bare `X Sessions` / `X Era`. Lil Baby's
+**The Leaks** is an officially released project. So is *Abbey Road Sessions*, and
+*Spotify Sessions*. A weak marker only counts when **that same artist is strongly
+marked somewhere else in the library**, which turns the convention into evidence
+rather than a guess.
+
+This matters more than a mislabelled row. The era guard **protects** whatever it
+matches, excluding it from D0, D4 and D1 — so a real album classified as
+unreleased silently stops being checked for splits, with no error anywhere. A
+lost finding is worse than a visible mistake, and it is the failure mode this
+whole area keeps producing.
 
 **The single-bucket convention is not a defect.** Many people file everything
 under one `Unreleased` per artist. D14f mentions it, offers the era conventions
