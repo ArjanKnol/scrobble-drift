@@ -34,18 +34,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-node@v4
         with:
-          python-version: "3.12"
+          node-version: "20"
 
-      # No pip install step. The scanner is stdlib-only on purpose: nothing to
-      # pin, nothing to audit, nothing to break in six months.
+      # Node, not Python, and no install step. The scanner imports the detectors
+      # straight from docs/drift.js, so the monthly run and the browser share one
+      # implementation and cannot drift apart. Node 18+ has fetch built in, so
+      # there are no dependencies to pin or audit.
       - name: Scan
         env:
           LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
           LASTFM_USER: ${{ vars.LASTFM_USER || 'ArjanKnol' }}
         run: |
-          python scripts/run.py \
+          node scripts/scan.mjs \
             ${{ (github.event_name == 'schedule' || inputs.resolve) && '--resolve' || '' }} \
             --budget ${{ inputs.budget || 300 }}
 

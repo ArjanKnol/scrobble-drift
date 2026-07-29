@@ -19,6 +19,12 @@ code{font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace}
 .wrap{max-width:1080px;margin:0 auto;padding:40px 20px 40px}
 h1{font-size:32px;margin:0 0 6px;letter-spacing:-.02em;font-weight:800}
 h1 .dot{color:var(--accent)}
+/* The lockup ships as a dark-theme PNG: the original artwork has black ink for
+   light backgrounds, which would be invisible here. width/height are on the
+   img so the header does not reflow while it loads. */
+h1.brand{margin:0 0 14px;line-height:0}
+h1.brand img{width:270px;max-width:72vw;height:auto;display:block}
+@media (max-width:520px){ h1.brand img{width:210px} }
 h2{font-size:13px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);
   margin:38px 0 12px;font-weight:700;
   border-bottom:1px solid var(--line);padding-bottom:8px}
