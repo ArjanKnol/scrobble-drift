@@ -1517,23 +1517,75 @@ export function d14eReleasedSince(era, lookup) {
   for (const rec of [...tracks.values()].sort((a, b) => b.plays - a.plays)) {
     const found = lookup(rec.artist, rec.track);
     if (!found?.groups?.length) continue;
-    const official = found.groups.filter((g) =>
-      g.status === "Official" &&
-      ["Album", "Single", "EP"].includes(g.primary) &&
-      !(g.secondary || []).includes("Bootleg"));
+
+    /*
+     * MusicBrainz is a WEAK source for this one question, and this is the only
+     * detector where that is true.
+     *
+     * MusicBrainz catalogues leaked and bootlegged projects as release groups,
+     * because it documents music rather than commerce. Kanye's `Yandhi` was
+     * never released, yet it exists there, so "a release group with this title
+     * exists" is close to worthless as evidence that a leak came out. The
+     * detector reported "An official Album 'Yandhi' (date unknown) contains a
+     * recording with this title" for a track filed under `Unreleased (Yandhi v2
+     * Era)`, which is circular: it found the leak it was asked about.
+     *
+     * Three guards, cheapest and strongest first.
+     */
+    const eraNames = [...rec.eras.keys()];
+
+    const official = found.groups.filter((g) => {
+      if (g.status !== "Official") return false;
+      if (!["Album", "Single", "EP"].includes(g.primary)) return false;
+      const secondary = g.secondary || [];
+      // Bootleg was already excluded. Demo and Mixtape/Street are how
+      // MusicBrainz files a lot of leaked material.
+      if (secondary.some((t) => /bootleg|demo/i.test(t))) return false;
+
+      // GUARD 1: no release date, no claim. A commercially released album has a
+      // date; leaked material catalogued after the fact frequently does not.
+      // This alone kills the "(date unknown)" findings.
+      if (!g.first_release) return false;
+
+      // GUARD 2: the release must not simply BE the era the user filed this
+      // under. If someone tags a track `Unreleased (Yandhi v2 Era)` and the
+      // match is a release group called `Yandhi`, that is the same unreleased
+      // project under a different name, not proof it came out.
+      const title = norm(g.title);
+      for (const e of eraNames) {
+        const en = norm(e);
+        if (!en) continue;
+        if (title === en || title.includes(en) || en.includes(title)) return false;
+      }
+      return true;
+    });
     if (!official.length) continue;
+
+    // GUARD 3: prefer a Spotify match, and say which source answered. Presence
+    // on Spotify means commercially available today, which is the question the
+    // user actually has. MusicBrainz presence means "documented somewhere".
+    official.sort((a, b) =>
+      (a.source === "spotify" ? 0 : 1) - (b.source === "spotify" ? 0 : 1));
     const best = official[0];
+    const streaming = best.source === "spotify";
     issues.push({
-      detector: "D14e", class: "split", confidence: 0.45,
+      detector: "D14e", class: "split",
+      // Spotify presence is much better evidence than a MusicBrainz entry, so
+      // the two are not reported with the same confidence.
+      confidence: streaming ? 0.6 : 0.35,
       artist: rec.artist,
       title: `Possibly released since: ${rec.artist} - ${rec.track}`,
       plays_affected: rec.plays,
       suggest:
-        `An official ${best.primary} '${best.title}' ` +
-        `(${best.first_release || "date unknown"}) contains a recording with ` +
-        `this title. Verify it is the same version before doing anything: the ` +
-        `leak may be a different mix. Your plays run ${monthName(rec.first)} ` +
-        `to ${monthName(rec.last)}.`,
+        `${best.primary} '${best.title}' (${best.first_release}) contains a ` +
+        `recording with this title` +
+        (streaming
+          ? `, and it is on Spotify now, so it is genuinely available. `
+          : `, according to MusicBrainz. Note MusicBrainz also documents leaked ` +
+            `and bootlegged projects, so this is weaker evidence than it looks. `) +
+        `Verify it is the same version before doing anything: the leak may be a ` +
+        `different mix. Your plays run ${monthName(rec.first)} to ` +
+        `${monthName(rec.last)}.`,
       members: [...rec.eras.entries()].map(([era_, plays]) => ({ era: era_, plays })),
       external: best,
       no_auto_action: true,
