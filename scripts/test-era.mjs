@@ -12,7 +12,7 @@
 
 import {
   isEraTagged, eraName, isUndifferentiated, partitionEra, d14fSingleBucket,
-  d14aFormatVariants, analyse,
+  d14aFormatVariants, analyse, weakEraCandidates, officialKey,
 } from "../docs/drift.js";
 
 let pass = 0, fail = 0;
@@ -135,6 +135,76 @@ console.log("\nweak markers are real album titles too");
   ok(backed.era.some((x) => x.album === "The Leaks"),
      "with explicit era tagging by the same artist, 'The Leaks' IS included");
   eq(d14fSingleBucket(backed.era).length, 1, "and D14f reports the bucket");
+}
+
+{
+  /*
+   * The case the heuristic CANNOT fix, and the reason a lookup is worth doing.
+   *
+   * Lil Baby has a real album called 'The Leaks' AND tags leaks with era names,
+   * so corroboration is satisfied and the real album still gets swallowed.
+   * Whether a release exists is a fact; "does this artist tag leaks elsewhere"
+   * is only a correlation, and here the correlation is misleading.
+   */
+  const mk = (artist, album, track, n) => {
+    const o = [];
+    for (let i = 0; i < n; i++) o.push({ uts: 1600000000 + i, artist, album, track });
+    return o;
+  };
+  let sc = [];
+  for (let i = 0; i < 15; i++) sc = sc.concat(mk("Lil Baby", "The Leaks", `T${i}`, 1));
+  sc = sc.concat(mk("Lil Baby", "Unreleased (4PF Era)", "Some Leak", 5));
+  sc = sc.concat(mk("Lil Baby", "My Turn", "Emotionally Scarred", 20));
+
+  const cands = weakEraCandidates(sc);
+  eq(cands.length, 1, "exactly one album name needs a release lookup");
+  eq(cands[0].album, "The Leaks", "namely 'The Leaks'");
+  ok(!cands.some((c) => c.album === "Unreleased (4PF Era)"),
+     "explicit markers are never looked up, so no budget is wasted");
+  ok(!cands.some((c) => c.album === "My Turn"),
+     "and ordinary albums are not either");
+
+  ok(partitionEra(sc).era.some((x) => x.album === "The Leaks"),
+     "without verification the heuristic still swallows it");
+
+  const official = new Set([officialKey("Lil Baby", "The Leaks")]);
+  const v = partitionEra(sc, { official });
+  ok(!v.era.some((x) => x.album === "The Leaks"),
+     "a verified real release is released from the protected partition");
+  ok(v.rest.some((x) => x.album === "The Leaks"),
+     "so split detection can see it");
+  ok(v.era.some((x) => x.album === "Unreleased (4PF Era)"),
+     "while the genuine leak bucket stays protected");
+  eq(d14fSingleBucket(v.era).length, 0,
+     "and it is no longer reported as an unreleased bucket");
+
+  // analyse() must honour it too, not just partitionEra.
+  const r = analyse(sc, { official });
+  eq(r.issues.filter((i) => i.detector === "D14f" &&
+                            i.album === "The Leaks").length, 0,
+     "analyse() passes the verified set through");
+}
+
+{
+  // A verified release must NOT override a strong marker: un-protecting a real
+  // leak bucket is the more damaging error, and some artists do release records
+  // literally titled 'Unreleased'.
+  const sc = [
+    { uts: 1, artist: "X", album: "Unreleased", track: "A" },
+    { uts: 2, artist: "X", album: "Unreleased", track: "B" },
+  ];
+  const official = new Set([officialKey("X", "Unreleased")]);
+  eq(partitionEra(sc, { official }).era.length, 2,
+     "a strong marker stays protected even when the name exists as a release");
+}
+
+{
+  // Callers that pass nothing must behave exactly as before.
+  const sc = [{ uts: 1, artist: "Y", album: "The Leaks", track: "A" }];
+  eq(partitionEra(sc).era.length, partitionEra(sc, {}).era.length,
+     "omitting the option set changes nothing");
+  eq(partitionEra(sc, { official: null }).era.length, 0,
+     "and a null set is tolerated");
 }
 
 {
