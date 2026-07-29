@@ -234,3 +234,18 @@ html{scroll-behavior:smooth}
   border:1px solid var(--accent);border-radius:99px;padding:2px 8px}
 .phase strong{font-weight:600}
 .phase .phase-detail{flex:1 1 100%;color:var(--dim);font-size:12.5px}
+
+/* Link kind tags. Without them a finding's links read as an undifferentiated
+   list of names, and there was no way to tell a track page from an album page,
+   or to see why two entries looked almost identical (they are the two spellings
+   the finding is about). */
+.links{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center}
+.lk-lead{color:var(--dim);font-size:12px;margin-right:2px}
+.links a{display:inline-flex;align-items:center;gap:6px;border-bottom:0;
+  background:#0c0c0c;border:1px solid var(--line);border-radius:99px;
+  padding:3px 10px 3px 4px;font-size:12px;color:var(--ink)}
+.links a:hover{border-color:var(--accent);color:var(--accent)}
+.lk{display:inline-block;background:var(--line);color:var(--dim);
+  border-radius:99px;padding:1px 6px;font-size:10px;font-weight:700;
+  text-transform:uppercase;letter-spacing:.05em}
+.links a:hover .lk{background:var(--accent);color:#fff}

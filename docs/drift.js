@@ -133,6 +133,23 @@ export function editDistance(a, b, max = 2) {
   return prev[b.length];
 }
 
+/**
+ * Do two names differ ONLY by capitalisation?
+ *
+ * Deliberately narrow. NFC-normalise (so a precomposed 'Ÿ' and a decomposed
+ * 'Y' + combining diaeresis compare equal) then lowercase, and compare nothing
+ * else. Using a looser normaliser here would be a bug: norm() strips
+ * punctuation, so it would call 'Jaÿ-Z' and 'Jaÿ Z' casing-only when the
+ * hyphen-to-space change is something the user CAN make.
+ *
+ *   'Jaÿ-Z' vs 'JAŸ-Z'   -> true,  unfixable, never reported
+ *   'Jaÿ-Z' vs 'Jaÿ Z'   -> false, fixable
+ *   'Jaÿ-Z' vs 'JAY Z'   -> false, fixable
+ */
+export const caseOnly = (a, b) =>
+  String(a ?? "").normalize("NFC").toLowerCase() ===
+  String(b ?? "").normalize("NFC").toLowerCase();
+
 /** Typo budget scaled to name length. One char for short names, two for long. */
 const typoBudget = (a, b) =>
   Math.max(1, Math.floor(Math.max(a.length, b.length) / 10));
@@ -294,7 +311,15 @@ export function d14aFormatVariants(era) {
     if (name) {
       if (!byArtistEra.has(s.artist)) byArtistEra.set(s.artist, new Map());
       const e = byArtistEra.get(s.artist);
-      e.set(name, (e.get(name) || 0) + 1);
+      // Keep the ALBUM STRINGS behind each era name, not just a play count.
+      // The extracted name is what the comparison needs, but it is not what the
+      // user has in their library: reporting 'Eternal Atake OG' when the library
+      // says 'Unreleased (Eternal Atake OG Era)' means they have to work out
+      // which entry is being talked about before they can act on it.
+      const rec = e.get(name) || { plays: 0, albums: new Map() };
+      rec.plays++;
+      rec.albums.set(s.album, (rec.albums.get(s.album) || 0) + 1);
+      e.set(name, rec);
     }
   }
 
@@ -337,20 +362,32 @@ export function d14aFormatVariants(era) {
   // so a deliberate 'V2' project is not mistaken for a misspelling.
   for (const [artist, counts] of byArtistEra) {
     const names = [...counts.keys()];
+    const playsOf = (n) => counts.get(n).plays;
+    // The album string the user actually has for this era. Most-played when an
+    // era is spelled several ways, e.g. both "(Rodeo Era)" and "Rodeo Sessions".
+    const albumOf = (n) => ranked(counts.get(n).albums)[0][0];
+    const albumsOf = (n) => ranked(counts.get(n).albums);
+
     for (let i = 0; i < names.length; i++) {
       for (let j = i + 1; j < names.length; j++) {
         const a = names[i], b = names[j];
         if (norm(a) === norm(b) || similar(norm(a), norm(b)) < 0.82) continue;
-        const [lo, hi] = counts.get(a) <= counts.get(b) ? [a, b] : [b, a];
-        if (counts.get(lo) > Math.max(2, 0.25 * counts.get(hi))) continue;
+        const [lo, hi] = playsOf(a) <= playsOf(b) ? [a, b] : [b, a];
+        if (playsOf(lo) > Math.max(2, 0.25 * playsOf(hi))) continue;
         const sequel = differsOnlyByVersion(lo, hi);
+        const loAlbum = albumOf(lo), hiAlbum = albumOf(hi);
         issues.push({
           detector: "D14a",
           // Sequel-vs-typo cannot be decided from play counts. Marked here so
           // the MusicBrainz phase can settle it with evidence: if both era
           // names exist as real release groups they are separate projects and
           // this is dropped entirely. See verifyEraNames().
-          verify: sequel ? { artist, a: lo, b: hi } : undefined,
+          // a/b stay as ERA NAMES because that is what MusicBrainz is asked
+          // about. The album strings ride along so verifyEraNames can name what
+          // the user actually has when it rewrites these messages.
+          verify: sequel
+            ? { artist, a: lo, b: hi, aAlbum: loAlbum, bAlbum: hiAlbum }
+            : undefined,
           // A trailing number or version token means these are very likely
           // distinct projects, not a misspelling: 'Drip Season' and 'Drip
           // Season 3' are two different Gunna tapes. Play count asymmetry
@@ -360,17 +397,22 @@ export function d14aFormatVariants(era) {
           confidence: sequel ? 0.35 : 0.7,
           artist,
           title: sequel
-            ? `Similar era names for ${artist}: '${lo}' vs '${hi}'`
-            : `Probable era-name typo for ${artist}: '${lo}' vs '${hi}'`,
-          plays_affected: counts.get(lo) + counts.get(hi),
+            ? `Similar era names for ${artist}: '${loAlbum}' vs '${hiAlbum}'`
+            : `Probable era-name typo for ${artist}: '${loAlbum}' vs ` +
+              `'${hiAlbum}'`,
+          plays_affected: playsOf(lo) + playsOf(hi),
           suggest: sequel
             ? `these differ only by a version or sequel marker, so they are ` +
               `probably separate projects rather than a typo. Checking ` +
-              `MusicBrainz to confirm. '${hi}' has ${counts.get(hi)} plays, ` +
-              `'${lo}' has ${counts.get(lo)}.`
-            : `'${hi}' has ${counts.get(hi)} plays against ` +
-              `${counts.get(lo)}, so '${lo}' is likely the typo.`,
-          members: [lo, hi].map((n) => ({ era: n, plays: counts.get(n) })),
+              `MusicBrainz to confirm. '${hiAlbum}' has ${playsOf(hi)} plays, ` +
+              `'${loAlbum}' has ${playsOf(lo)}.`
+            : `'${hiAlbum}' has ${playsOf(hi)} plays against ` +
+              `${playsOf(lo)}, so '${loAlbum}' is likely the typo.`,
+          // Album strings, so the report names what is in the library and the
+          // UI can deep-link straight to those album pages. The era name is
+          // carried too, for the cases where one era has several spellings.
+          members: [lo, hi].flatMap((n) =>
+            albumsOf(n).map(([album, plays]) => ({ album, era: n, plays }))),
         });
       }
     }
@@ -720,23 +762,57 @@ export function d1ArtistVariants(rest) {
   }
 
   const issues = [], seen = new Set();
+
+  /**
+   * Build a variant finding, dropping members that differ from the target by
+   * capitalisation alone.
+   *
+   * Last.fm cannot change just the casing of a name, so those are unactionable
+   * and are deliberately never reported. The group-level skip below catches
+   * groups where EVERY name is casing-equal, but it does nothing for a MIXED
+   * group, and mixed is the common case:
+   *
+   *   'Jaÿ-Z' (142)   the correct spelling
+   *   'JAŸ-Z'  (99)   casing-only, impossible to fix
+   *   'JAY Z'   (4)   missing diaeresis and hyphen, genuinely fixable
+   *
+   * That reported "245 plays" and implied all three could be merged, when only
+   * 4 plays were actionable. Listing work nobody can do next to work they can
+   * makes the whole finding untrustworthy.
+   *
+   * Returns null when nothing actionable survives, so the caller drops it.
+   */
   const variantIssue = (names, why, confidence) => {
     const order = [...names].sort((a, b) => plays.get(b) - plays.get(a));
+    const target = order[0];
+    const keep = order.filter((n) => n === target || !caseOnly(n, target));
+    if (keep.length < 2) return null;
+
+    const moving = keep.slice(1).reduce((n, a) => n + plays.get(a), 0);
     return {
       detector: "D1", class: "split", confidence,
-      title: `Artist variants: ${order.map((n) => `'${n}'`).join(", ")}`,
-      plays_affected: order.reduce((n, a) => n + plays.get(a), 0),
-      suggest: `consolidate to '${order[0]}' (${plays.get(order[0])} plays). ` +
-               `Matched by ${why}.`,
-      members: order.map((a) => ({ artist: a, plays: plays.get(a) })),
+      title: `Artist variants: ${keep.map((n) => `'${n}'`).join(", ")}`,
+      // Only the reported members. Counting the dropped casing variants here
+      // would inflate both the headline number and the hygiene score penalty
+      // with plays that cannot be moved.
+      plays_affected: keep.reduce((n, a) => n + plays.get(a), 0),
+      suggest:
+        `rename ${keep.slice(1).map((n) => `'${n}'`).join(" and ")} to ` +
+        `'${target}', which moves ${moving} play${moving === 1 ? "" : "s"}. ` +
+        `Matched by ${why}.`,
+      members: keep.map((a) => ({ artist: a, plays: plays.get(a) })),
     };
   };
 
   for (const names of buckets.values()) {
     if (names.length < 2) continue;
-    // Casing-only groups belong to D7, which owns the unfixable bucket.
+    // Fast path for groups where EVERY name is casing-equal. variantIssue would
+    // return null for these anyway; this just skips the work and documents it.
     if (new Set(names.map((n) => n.toLowerCase())).size === 1) continue;
-    issues.push(variantIssue(names, "exact match after normalisation", 0.95));
+    const issue = variantIssue(names, "exact match after normalisation", 0.95);
+    if (issue) issues.push(issue);
+    // Marked seen either way, so a dropped casing-only pair is not re-proposed
+    // by the fuzzy pass below.
     seen.add([...names].sort().join("|"));
   }
 
@@ -791,13 +867,16 @@ export function d1ArtistVariants(rest) {
           if (lo > 0.4 * hi) continue;
 
           seen.add(id);
-          issues.push(variantIssue([a, b],
+          const issue = variantIssue([a, b],
             byRatio
               ? `fuzzy match (${(ratio * 100).toFixed(0)}% similar) confirmed by ` +
                 `${shared.length} shared track title(s)`
               : `one-character difference confirmed by ${shared.length} ` +
                 `shared track title(s)`,
-            byRatio ? 0.75 : 0.6));
+            byRatio ? 0.75 : 0.6);
+          // null when the pair turns out to differ by casing alone, which the
+          // fuzzy matcher can reach even though the exact pass skips it.
+          if (issue) issues.push(issue);
         }
       }
     }
@@ -952,6 +1031,10 @@ export function verifyEraNames(issues, exists) {
   for (const issue of issues) {
     if (!issue.verify) { out.push(issue); continue; }
     const { artist, a, b } = issue.verify;
+    // Name the library strings, not the extracted era names. MusicBrainz is
+    // asked about the era name; the user is told about the album they have.
+    const aA = issue.verify.aAlbum || a;
+    const bA = issue.verify.bAlbum || b;
     const hasA = Boolean(exists(artist, a));
     const hasB = Boolean(exists(artist, b));
 
@@ -963,9 +1046,10 @@ export function verifyEraNames(issues, exists) {
       // The common spelling is a real release, the rare one is not.
       out.push({
         ...issue, class: "error", confidence: 0.85, verify: undefined,
-        title: `Era name not found in MusicBrainz for ${artist}: '${a}'`,
-        suggest: `'${b}' exists as a real release for ${artist}; '${a}' does ` +
-                 `not. Likely a typo or a wrong era name.`,
+        title: `Era name not found in MusicBrainz for ${artist}: '${aA}'`,
+        suggest: `'${b}' exists as a real release for ${artist} but '${a}' ` +
+                 `does not, so '${aA}' is likely a typo or the wrong era name. ` +
+                 `Compare it against '${bA}'.`,
       });
       continue;
     }
@@ -973,8 +1057,9 @@ export function verifyEraNames(issues, exists) {
       out.push({
         ...issue, class: "review", confidence: 0.4, verify: undefined,
         suggest: `'${a}' exists as a real release for ${artist} but '${b}' ` +
-                 `does not, which is the opposite of what a typo looks like. ` +
-                 `Worth a look.`,
+                 `does not, which is the opposite of what a typo looks like: ` +
+                 `the rarer spelling is the real one. Worth comparing ` +
+                 `'${aA}' against '${bA}'.`,
       });
       continue;
     }
@@ -984,7 +1069,8 @@ export function verifyEraNames(issues, exists) {
       ...issue, confidence: 0.3, verify: undefined,
       suggest: `neither '${a}' nor '${b}' exists as a release in MusicBrainz, ` +
                `which is normal for unreleased projects. Cannot tell a sequel ` +
-               `from a typo here, so this is informational only.`,
+               `from a typo here, so this is informational only. The two ` +
+               `entries are '${aA}' and '${bA}'.`,
     });
   }
   return out;
