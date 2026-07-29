@@ -1391,6 +1391,26 @@ export function d12Impossible(scrobbles, now = Math.floor(Date.now() / 1000)) {
  * "neither exists" stays a low-confidence review rather than an accusation.
  */
 export function verifyEraNames(issues, exists) {
+  /*
+   * `exists(artist, title)` is THREE-STATE, and that is the whole point.
+   *
+   *   true      the release group exists
+   *   false     it was looked up and genuinely is not there
+   *   null      the lookup did not happen or failed
+   *
+   * It used to be coerced with Boolean(), so a FAILED lookup became "does not
+   * exist" and the tool made a confident claim from missing data. That produced
+   *
+   *   "'Rolling Papers' exists as a real release for Wiz Khalifa but
+   *    'Rolling Papers 2' does not"
+   *
+   * about an album that came out in 2018. The lookup had simply errored.
+   *
+   * This is the third time this exact shape has bitten: Spotify catalogue
+   * caching, fetchCatalogue's error flag, and now here. Absence of an answer is
+   * not a negative answer, and any code that conflates them will eventually
+   * state something false with confidence.
+   */
   const out = [];
   for (const issue of issues) {
     if (!issue.verify) { out.push(issue); continue; }
@@ -1399,8 +1419,25 @@ export function verifyEraNames(issues, exists) {
     // asked about the era name; the user is told about the album they have.
     const aA = issue.verify.aAlbum || a;
     const bA = issue.verify.bAlbum || b;
-    const hasA = Boolean(exists(artist, a));
-    const hasB = Boolean(exists(artist, b));
+    const rawA = exists(artist, a);
+    const rawB = exists(artist, b);
+
+    // Unknown on either side means no asymmetry claim can be made. Keep the
+    // finding as the neutral review it started as, and say why.
+    if (rawA == null || rawB == null) {
+      out.push({
+        ...issue, confidence: 0.25, verify: undefined,
+        suggest: `these differ only by a version or sequel marker, so they are ` +
+                 `probably separate projects rather than a typo. Could not ` +
+                 `check against a release database this run, so this is ` +
+                 `unconfirmed either way. The two entries are '${aA}' and ` +
+                 `'${bA}'.`,
+      });
+      continue;
+    }
+
+    const hasA = rawA === true;
+    const hasB = rawB === true;
 
     if (hasA && hasB) {
       // Both are real projects. Not a typo, and not worth mentioning.

@@ -1166,8 +1166,13 @@ async function resolvePhase(scrobbles, apiKey) {
   // Apply the era ruling straight away: it can only remove or sharpen findings,
   // so the list gets more honest before the slower phase even finishes.
   if (rgCache.size) {
-    report.issues = verifyEraNames(report.issues, (artist, title) =>
-      rgCache.get(key(artist, title))?.exists);
+    report.issues = verifyEraNames(report.issues, (artist, title) => {
+      // THREE-STATE. A cache miss means the lookup failed or never ran, which
+      // is not the same as the database saying no. Returning false here made
+      // the tool claim 'Rolling Papers 2' was not a real release.
+      const r = rgCache.get(key(artist, title));
+      return r ? Boolean(r.exists) : null;
+    });
     render();
   }
 

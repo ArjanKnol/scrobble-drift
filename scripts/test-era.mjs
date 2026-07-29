@@ -12,7 +12,7 @@
 
 import {
   isEraTagged, eraName, isUndifferentiated, partitionEra, d14fSingleBucket,
-  d14aFormatVariants, analyse, weakEraCandidates, officialKey,
+  d14aFormatVariants, analyse, weakEraCandidates, officialKey, verifyEraNames,
 } from "../docs/drift.js";
 
 let pass = 0, fail = 0;
@@ -230,6 +230,75 @@ console.log("\nweak markers are real album titles too");
       { uts: 2, artist: "Some Band", album: "Real Album", track: "B" },
     ]);
     eq(p.era.length, 0, `'${album}' alone is not swept into the era partition`);
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+console.log("\na failed lookup is not a negative answer");
+
+{
+  /*
+   * The reported bug. 'Rolling Papers 2' is a real 2018 Wiz Khalifa album, but
+   * the tool announced it was not a real release. The lookup had failed, and
+   * `Boolean(undefined)` made "no answer" indistinguishable from "no".
+   *
+   * Third occurrence of this exact shape, after the Spotify catalogue cache and
+   * fetchCatalogue's error flag. Absence of an answer is not a negative answer.
+   */
+  const era = []; let uts = 1600000000;
+  const add = (album, n) => {
+    for (let i = 0; i < n; i++)
+      era.push({ uts: uts++, artist: "Wiz Khalifa", album, track: `T${i}` });
+  };
+  add("Unreleased (Rolling Papers Era)", 1);
+  add("Unreleased (Rolling Papers 2 Era)", 9);
+
+  const found = d14aFormatVariants(era)
+    .filter((i) => i.detector === "D14a" && i.verify);
+  eq(found.length, 1, "the sequel-vs-typo finding is produced and needs checking");
+
+  // Both lookups failed: must make NO claim either way.
+  const unknown = verifyEraNames(found, () => null);
+  eq(unknown.length, 1, "the finding survives");
+  ok(/Could not check/.test(unknown[0].suggest),
+     "and says the check did not happen");
+  ok(!/does not/.test(unknown[0].suggest),
+     "never claiming the album is not a real release");
+  ok(unknown[0].confidence <= 0.25,
+     `at minimal confidence (${unknown[0].confidence})`);
+
+  // Half-known is still unknown: an asymmetry claim needs both sides.
+  const half = verifyEraNames(found, (a, t) => t === "Rolling Papers" ? true : null);
+  ok(/Could not check/.test(half[0].suggest),
+     "one failed lookup is enough to withhold the claim");
+
+  // Both verified present: not a typo, dropped entirely. This is the truth for
+  // Wiz Khalifa, and what should have happened.
+  eq(verifyEraNames(found, () => true).length, 0,
+     "two real releases produce no finding at all");
+
+  // A genuine verified asymmetry still gets the confident message.
+  const real = verifyEraNames(found, (a, t) => t === "Rolling Papers");
+  eq(real.length, 1, "a verified asymmetry is still reported");
+  ok(/does not/.test(real[0].suggest),
+     "and does state that the other one is absent");
+  ok(real[0].confidence > 0.25, "at higher confidence than the unknown case");
+}
+
+{
+  // false must still mean false: verified-absent is a real answer.
+  const era = [{ uts: 1, artist: "A", album: "Unreleased (Foo Era)", track: "T" }];
+  for (let i = 0; i < 9; i++)
+    era.push({ uts: 2 + i, artist: "A", album: "Unreleased (Foo 2 Era)", track: `T${i}` });
+  const found = d14aFormatVariants(era)
+    .filter((i) => i.detector === "D14a" && i.verify);
+  if (found.length) {
+    const both = verifyEraNames(found, () => false);
+    eq(both.length, 1, "neither existing is still a finding");
+    ok(/normal for unreleased projects/.test(both[0].suggest),
+       "described as normal for unreleased projects, not as an error");
+  } else {
+    ok(true, "(no verify-flagged pair in this fixture, skipped)");
   }
 }
 
