@@ -9,7 +9,7 @@
   how much they distort your charts.">
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=7">
+<link rel="stylesheet" href="style.css?v=8">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -31,7 +31,10 @@
   </p>
 
   <div class="nav">
-    <a href="report.html">Saved monthly report</a>
+    <!-- Hidden until docs/report.json actually exists. The monthly Action
+         writes that file; until it has run, this link led to a page that just
+         said "no saved report", which is a dead end offered as navigation. -->
+    <a href="report.html" id="nav-report" class="hide">Saved monthly report</a>
     <a href="https://github.com/ArjanKnol/scrobble-drift">Source</a>
   </div>
 
@@ -123,9 +126,12 @@
       <span class="lfm-fallback"><span class="mark" aria-hidden="true">as</span>Last.fm</span>
     </a>
     <span class="sep">|</span>
-    <span>Metadata from
+    <span>Release data from
       <a href="https://musicbrainz.org/" target="_blank"
-         rel="noopener noreferrer">MusicBrainz</a></span>
+         rel="noopener noreferrer">MusicBrainz</a>
+      and
+      <a href="https://developer.spotify.com/documentation/web-api"
+         target="_blank" rel="noopener noreferrer">Spotify</a></span>
     <span class="sep">|</span>
     <span>Not affiliated with Last.fm Ltd.</span>
     <span class="sep">|</span>
@@ -294,6 +300,12 @@ npx wrangler deploy</pre></div>
 
 $("stop").onclick = () => { abort = true; $("status").textContent = "stopping…"; };
 
+/* Show the saved-report link only if there is a saved report. HEAD rather than
+   GET so a large committed report is not downloaded just to test for it. */
+fetch("report.json", { method: "HEAD" })
+  .then((r) => { if (r.ok) $("nav-report").classList.remove("hide"); })
+  .catch(() => { /* no report, link stays hidden */ });
+
 /**
  * Collapse whitespace in every tooltip.
  *
@@ -331,6 +343,36 @@ tidyTips();
  * identically accurate, which is why this defaults to false and never blocks.
  */
 let spotifyOn = false;
+
+/**
+ * What actually happened during a scan.
+ *
+ * A scan can finish four different ways that all previously looked identical: it
+ * completed fully, it completed with Spotify disabled halfway through, it was
+ * stopped, or the release lookups were skipped entirely. The user got no
+ * indication which, so "did that work?" had no answer. This records it, and
+ * scanSummary() renders it.
+ */
+let stats = null;
+const freshStats = () => ({
+  started: Date.now(),
+  ingest_ms: 0,
+  analyse_ms: 0,
+  resolve_ms: 0,
+  scrobbles: 0,
+  pages: 0,
+  resumed: false,
+  resolve_requested: false,
+  spotify_available: false,
+  spotify_gave_up: false,
+  spotify_resolved: 0,
+  spotify_artists: 0,
+  mb_planned: 0,
+  mb_resolved: 0,
+  lookups_failed: 0,
+  from_cache: 0,
+  aborted: false,
+});
 
 (async () => {
   if (!isConfigured() && !localStorage.getItem("drift_api")) return;
@@ -379,8 +421,13 @@ $("f").onsubmit = async (e) => {
     ? `Starting scan of ${N(cap)} scrobbles…`
     : "Starting full history scan. This takes a few minutes on a big library.";
 
+  stats = freshStats();
+
   try {
+    const t0 = Date.now();
     const scrobbles = await fetchAll(user, cap, apiKey);
+    stats.ingest_ms = Date.now() - t0;
+    stats.scrobbles = scrobbles.length;
     if (!scrobbles.length) {
       return fail(abort ? "Stopped before anything was fetched."
                         : "No scrobbles found for that user.");
@@ -394,14 +441,21 @@ $("f").onsubmit = async (e) => {
         `up to 30 seconds and cannot show progress. Do not close it.`
       : `Analysing ${N(scrobbles.length)} scrobbles in your browser…`;
     await sleep(60);                  // let the browser paint before the CPU work
+    const t1 = Date.now();
     report = analyse(scrobbles);
+    stats.analyse_ms = Date.now() - t1;
     report.user = user;
     render();                         // show local findings immediately
 
+    stats.resolve_requested = $("resolve").checked;
     if ($("resolve").checked && !abort) {
+      const t2 = Date.now();
       await resolvePhase(scrobbles, apiKey);
+      stats.resolve_ms = Date.now() - t2;
     }
+    stats.aborted = abort;
     $("prog").classList.add("hide");
+    render();                         // re-render so the summary panel appears
   } catch (err) {
     fail(err.message || String(err));
   } finally {
@@ -409,6 +463,85 @@ $("f").onsubmit = async (e) => {
     $("stop").classList.add("hide");
   }
 };
+
+/** Human duration. Seconds below 90, then minutes, dropping a zero remainder. */
+const dur = (ms) => {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 90) return `${s}s`;
+  const m = Math.floor(s / 60), rem = s % 60;
+  return rem ? `${m} min ${rem}s` : `${m} min`;
+};
+
+/**
+ * The "what just happened" panel.
+ *
+ * Deliberately specific about which source answered what. The whole reason
+ * Spotify exists here is speed, and the only way to know whether it is earning
+ * its place, or silently broken as it was, is to see the split. It also states
+ * plainly when a run was partial, because a stopped scan and a complete one
+ * produced visually identical output before.
+ */
+function scanSummary() {
+  if (!stats) return "";
+  const s = stats;
+  const total = s.ingest_ms + s.analyse_ms + s.resolve_ms;
+
+  const lines = [];
+  lines.push(`Read <strong>${N(s.scrobbles)}</strong> scrobbles` +
+             (s.pages ? ` over ${N(s.pages)} pages` : "") +
+             ` in ${dur(s.ingest_ms)}` +
+             (s.resumed ? ", resuming a saved scan" : "") + ".");
+  lines.push(`Analysed them in your browser in ${dur(s.analyse_ms)}.`);
+
+  if (!s.resolve_requested) {
+    lines.push(`Release lookups were switched off, so no consolidation targets
+                and no "released since" checks. Everything above comes from
+                your own listening data alone.`);
+  } else if (s.spotify_resolved || s.mb_resolved || s.from_cache) {
+    const parts = [];
+    if (s.spotify_resolved) {
+      parts.push(`<strong>${N(s.spotify_resolved)}</strong> from Spotify` +
+                 (s.spotify_artists
+                   ? ` (${N(s.spotify_artists)} artist catalogues)` : ""));
+    }
+    if (s.mb_resolved) parts.push(`<strong>${N(s.mb_resolved)}</strong> from MusicBrainz`);
+    if (s.from_cache) parts.push(`<strong>${N(s.from_cache)}</strong> from this device`);
+    lines.push(`Resolved ${parts.join(", ")} in ${dur(s.resolve_ms)}.`);
+
+    if (s.lookups_failed) {
+      lines.push(`${N(s.lookups_failed)} lookups found nothing. That is normal:
+                  genuinely unreleased material is in no database.`);
+    }
+  } else if (s.resolve_ms) {
+    lines.push(`Release lookups ran but resolved nothing.`);
+  }
+
+  const warn = [];
+  if (s.spotify_gave_up) {
+    warn.push(`Spotify stopped responding partway through, so the rest went to
+               MusicBrainz. The findings are the same, it just took longer.`);
+  } else if (s.resolve_requested && !s.spotify_available) {
+    warn.push(`Spotify was not configured on the server, so everything went to
+               MusicBrainz at one lookup per second. Same findings, slower.`);
+  }
+  if (s.aborted) {
+    warn.push(`<strong>You stopped this scan.</strong> The results below are
+               partial. Running it again resumes rather than starting over.`);
+  }
+
+  return `
+    <div class="panel done">
+      <div class="done-head">
+        <span class="done-mark ${s.aborted ? "part" : "ok"}"
+              aria-hidden="true">${s.aborted ? "!" : "✓"}</span>
+        <strong>${s.aborted ? "Stopped" : "Scan complete"}</strong>
+        <span class="v" style="color:var(--dim)">${dur(total)} total</span>
+      </div>
+      ${lines.map((l) => `<p class="note">${l}</p>`).join("")}
+      ${warn.map((w) => `<p class="note"
+        style="color:var(--warn)">${w}</p>`).join("")}
+    </div>`;
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -434,6 +567,7 @@ async function fetchAll(user, cap, apiKey) {
     if (saved?.length) {
       all = saved;
       from = resumeFrom.nextPage || 1;
+      if (stats) stats.resumed = true;
       $("status").textContent =
         `Resuming: ${N(all.length)} scrobbles already stored, continuing from ` +
         `page ${N(from)}.`;
@@ -514,6 +648,7 @@ async function fetchAll(user, cap, apiKey) {
     }
 
     if (cap && all.length >= cap) { all.length = cap; break; }
+    if (stats) stats.pages = data.next ? data.next - 1 : (data.total_pages || 0);
     if (!data.next) break;
     from = data.next;
   }
@@ -696,6 +831,8 @@ async function resolvePhase(scrobbles, apiKey) {
   let mbPlan = plan;
   let spHits = 0;
 
+  if (stats) stats.spotify_available = spotifyOn;
+
   if (spotifyOn) {
     const artists = byArtist(plan);
     const est = estimate(artists);
@@ -715,6 +852,7 @@ async function resolvePhase(scrobbles, apiKey) {
         // artist on something that is clearly down. Said out loud, because a
         // silent switch to the slow path looks like the scan has hung.
         spotifyOn = false;
+        if (stats) stats.spotify_gave_up = true;
         for (const g of artists.slice(artists.indexOf(group))) misses.push(...g.jobs);
         $("waiting").classList.remove("hide");
         $("waiting").innerHTML =
@@ -749,6 +887,10 @@ async function resolvePhase(scrobbles, apiKey) {
         }
       }
 
+      // Counted here rather than from artists.length, so a give-up or a stop
+      // reports catalogues actually fetched instead of ones merely planned.
+      if (stats) stats.spotify_artists++;
+
       for (const job of group.jobs) {
         const hit = matchTrack(cat, job.track);
         if (hit) {
@@ -767,6 +909,7 @@ async function resolvePhase(scrobbles, apiKey) {
     // holds. Ticking once per resolved track keeps the bar moving smoothly
     // through the fast phase instead of jumping once per artist.
     mbPlan = misses;
+    if (stats) stats.spotify_resolved = spHits;
   }
 
   /* ----------------------------------- Phase B: era names, Spotify then MB */
@@ -815,12 +958,19 @@ async function resolvePhase(scrobbles, apiKey) {
    * set MusicBrainz is better at, so the slow source is spent where it is
    * actually the stronger one.
    */
+  if (stats) stats.mb_planned = mbPlan.length;
+  let mbGot = 0;
   for (const job of mbPlan) {
     if (abort) break;
     const r = await paced("/api/mb/recording",
                           { artist: job.artist, track: job.track }, 3, "rec");
-    if (r) recCache.set(key(job.artist, job.track), r);
+    if (r) { recCache.set(key(job.artist, job.track), r); mbGot++; }
     tick(`Resolving remaining ${N(mbPlan.length)} against MusicBrainz`);
+  }
+  if (stats) {
+    stats.mb_resolved = mbGot;
+    stats.from_cache = cacheHits;
+    stats.lookups_failed = failed;
   }
 
   const cache = recCache;
@@ -909,6 +1059,7 @@ const SUBSCORE_TIPS = {
 function render() {
   const d = report, p = d.profile, h = d.hygiene, era = d.era, im = d.impact;
   $("out").innerHTML = `
+    ${scanSummary()}
     <h2>${esc(d.user)}</h2>
     <div class="grid g2">
       <div class="panel">
