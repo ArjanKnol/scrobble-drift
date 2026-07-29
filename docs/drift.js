@@ -59,6 +59,32 @@ export function normTitle(text) {
 }
 
 /**
+ * Identity key for a TRACK TITLE. Preserves symbols.
+ *
+ * normTitle() replaces every symbol with a space, which is right for fuzzy
+ * matching and wrong for identity. Measured collisions in a real library:
+ *
+ *   '@ MEH'        vs 'Meh'          -> both "meh"
+ *   '$ELF TITLED'  vs 'ELF TITLED'   -> both "elf titled"
+ *
+ * Playboi Carti has both 'Meh' and '@ MEH'; they are different tracks. Merging
+ * them produced a confident "split across 2 album strings" for two songs that
+ * were never the same song. This is the same lesson as the diacritics in
+ * normTitle(): identity normalisation must be conservative, and using one
+ * function for both jobs is the bug.
+ *
+ * Spacing AROUND a symbol is still normalised, so '@ MEH' and '@MEH' agree.
+ * That is a formatting difference; the presence of the '@' is not.
+ */
+export function trackIdentity(text) {
+  if (!text) return "";
+  return text.normalize("NFC").replace(APOSTROPHES, "'")
+    .toLowerCase()
+    .replace(/\s+/g, " ").trim()
+    .replace(/\s*([^\p{L}\p{N}\p{M}\s'])\s*/gu, "$1");
+}
+
+/**
  * Ratcliff/Obershelp similarity, matching Python's SequenceMatcher.ratio().
  *
  * Implemented properly rather than substituting Levenshtein, because every
@@ -622,7 +648,10 @@ function temporalSignature(members, track) {
 export function d4AlbumSplits(rest, minPlays = 2) {
   const groups = new Map();
   for (const s of rest) {
-    const k = `${norm(s.artist)}␟${normTitle(s.track)}`;
+    // trackIdentity, not normTitle: this key decides whether two scrobbles are
+    // THE SAME TRACK, and normTitle deletes symbols, which merged Carti's 'Meh'
+    // with his '@ MEH'.
+    const k = `${norm(s.artist)}␟${trackIdentity(s.track)}`;
     if (!groups.has(k)) {
       groups.set(k, { artist: s.artist, track: s.track, albums: new Map(),
                       first: new Map(), last: new Map() });
@@ -691,19 +720,141 @@ export function baseTitle(track) {
   return out;
 }
 
+/**
+ * The featured artists named in a title's trailing credit clause.
+ *
+ * `Roll in Peace (feat. XXXTENTACION)` -> {"xxxtentacion"}
+ * `Knife Talk (with 21 Savage & Project Pat)` -> {"21 savage", "project pat"}
+ * `Roll in Peace` -> {} (empty, meaning no credit stated)
+ *
+ * Looped, because a title can carry more than one clause.
+ */
+export function featCredits(title) {
+  const names = new Set();
+  let out = title || "", prev = null;
+  while (out !== prev) {
+    prev = out;
+    const m = FEAT_SUFFIX.exec(out);
+    if (!m) break;
+    const inner = m[0]
+      .replace(/^[\s([]*/, "").replace(/[)\]\s]*$/, "")
+      .replace(/^(?:feat\.?|ft\.?|featuring|with|w\/)\s+/i, "");
+    for (const n of inner.split(/\s*(?:,|&|\+|\band\b|\bx\b)\s*/i)) {
+      const k = norm(n);
+      if (k) names.add(k);
+    }
+    out = out.replace(FEAT_SUFFIX, "").trim();
+  }
+  return names;
+}
+
+const isSubset = (a, b) => [...a].every((x) => b.has(x));
+
+/**
+ * Could two credit line-ups describe the SAME recording?
+ *
+ * Yes when one states no credit at all (the bare title), or when one line-up is
+ * a subset of the other, which is the credit-completeness case: `(feat. Drake)`
+ * and `(feat. Drake & Future)` are plausibly the same song tagged with varying
+ * thoroughness.
+ *
+ * No when the line-ups are disjoint. `(feat. XXXTENTACION)` and
+ * `(feat. Travis Scott)` are two different recordings of a song, and merging
+ * them would destroy a real distinction rather than fix a spelling.
+ */
+const creditsCompatible = (a, b) =>
+  !a.size || !b.size || isSubset(a, b) || isSubset(b, a);
+
 export function d8FeatureCredits(rest) {
   const issues = [];
 
   const variants = new Map();
   for (const s of rest) {
-    const k = `${norm(s.artist)}␟${normTitle(baseTitle(s.track))}`;
+    const k = `${norm(s.artist)}␟${trackIdentity(baseTitle(s.track))}`;
     if (!variants.has(k)) variants.set(k, { artist: s.artist, titles: new Map() });
     const v = variants.get(k);
     v.titles.set(s.track, (v.titles.get(s.track) || 0) + 1);
   }
   for (const { artist, titles } of variants.values()) {
     if (titles.size < 2) continue;
+
+    /*
+     * Guard against merging genuinely different recordings.
+     *
+     * baseTitle() strips the whole credit clause, so
+     * 'Roll in Peace (feat. XXXTENTACION)' and
+     * 'Roll In Peace (feat. Travis Scott)' both reduce to 'roll in peace' and
+     * landed in one group. The tool then advised standardising on the more
+     * played one, which would have merged two different songs.
+     *
+     * D8's real premise is narrower than "same base title": it is the same
+     * RECORDING scrobbled with and without its credit. So when the credits name
+     * different artists, this is not a spelling variant and there is nothing to
+     * fix.
+     *
+     * Conservative on purpose. With two conflicting line-ups present, a bare
+     * title cannot be attributed to either, so the whole group is dropped
+     * rather than guessing. That loses a real finding when someone has a bare
+     * title AND two different features, which is rare, and the alternative is a
+     * confident recommendation to merge two distinct tracks.
+     */
     const order = ranked(titles);
+    const credits = order.map(([t]) => featCredits(t));
+    let conflict = false;
+    for (let i = 0; i < credits.length && !conflict; i++) {
+      for (let j = i + 1; j < credits.length; j++) {
+        if (!creditsCompatible(credits[i], credits[j])) { conflict = true; break; }
+      }
+    }
+
+    if (conflict) {
+      /*
+       * Conflicting line-ups. Almost always genuinely different recordings, so
+       * this must NEVER recommend a merge.
+       *
+       * It is still worth mentioning, at the lowest confidence the report has,
+       * for the one case where it is a real finding: a bare title sitting
+       * alongside two different features, where some of those bare plays
+       * probably belong to one of them and there is no way to tell which. That
+       * is unresolvable from the data, so the finding describes the situation
+       * and explicitly says not to merge.
+       *
+       * Silence would be defensible too, but it hides a genuine ambiguity the
+       * user is better placed to resolve than the tool is: they can listen.
+       */
+      const bare = order.filter(([, ], i) => credits[i].size === 0);
+      if (!bare.length) continue;      // only distinct features, nothing to say
+
+      const lineups = order
+        .filter((_, i) => credits[i].size > 0)
+        .map(([t]) => t);
+      issues.push({
+        detector: "D8",
+        class: "review",
+        confidence: 0.2,
+        no_auto_action: true,
+        artist,
+        track: order[0][0],
+        title: `${artist} - '${baseTitle(order[0][0])}' exists as ` +
+               `${lineups.length} different features, plus ` +
+               `${bare.length === 1 ? "an untagged version" : "untagged versions"}`,
+        plays_affected: bare.reduce((n, [, v]) => n + v, 0),
+        suggest:
+          `Do NOT merge these: ${lineups.map((t) => `'${t}'`).join(" and ")} ` +
+          `credit different artists, so they are different recordings. The ` +
+          `only open question is which of them ` +
+          `${bare.map(([t, v]) => `'${t}' (${v} play${v === 1 ? "" : "s"})`)
+              .join(" and ")} belongs to. Your data cannot say, so this is ` +
+          `here for information only. Listening is the only way to tell.`,
+        members: order.map(([track, plays], i) => ({
+          track, plays,
+          looks_like: credits[i].size
+            ? `feat. ${[...credits[i]].join(", ")}` : "no credit stated",
+        })),
+      });
+      continue;
+    }
+
     issues.push({
       detector: "D8", class: "split", confidence: 0.8,
       // The artist is carried AND named in the title. Without it the report
