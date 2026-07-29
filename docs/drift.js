@@ -17,6 +17,12 @@
 
 const APOSTROPHES = /[‘’ʼ`´]/g;
 
+/**
+ * Loose key, for deciding whether two names might be the SAME THING spelled
+ * differently. Strips diacritics, so "Jaÿ-Z" and "Jay-Z" match.
+ *
+ * Do not use this to establish identity. See normTitle().
+ */
 export function norm(text, { dropThe = false } = {}) {
   if (!text) return "";
   let s = text.normalize("NFKD").replace(APOSTROPHES, "'");
@@ -25,6 +31,29 @@ export function norm(text, { dropThe = false } = {}) {
   s = s.replace(/\s+/g, " ").trim();
   if (dropThe && s.startsWith("the ")) s = s.slice(4);
   return s;
+}
+
+/**
+ * Strict key, for deciding whether two titles are the SAME TRACK.
+ *
+ * Identical to norm() except that diacritics are PRESERVED, because artists use
+ * them deliberately. Yeat has both "Back Home" and "Back Homë"; they are
+ * different songs. Folding accents away merged them and produced a confident
+ * recommendation to consolidate two unrelated tracks.
+ *
+ * The lesson generalises: normalisation for fuzzy matching should be
+ * aggressive, normalisation for identity must be conservative. Using one
+ * function for both was the bug.
+ *
+ * NFC rather than NFKD so that a precomposed "ë" (U+00EB) and a decomposed
+ * "e" + combining diaeresis compare equal, without discarding the mark.
+ */
+export function normTitle(text) {
+  if (!text) return "";
+  return text.normalize("NFC").replace(APOSTROPHES, "'")
+    .replace(/[^\p{L}\p{N}\p{M}\s']/gu, " ")
+    .toLowerCase()
+    .replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -61,6 +90,50 @@ function matchingChars(a, b) {
     + matchingChars(a.slice(0, bestI), b.slice(0, bestJ))
     + matchingChars(a.slice(bestI + bestLen), b.slice(bestJ + bestLen));
 }
+
+/**
+ * Levenshtein distance, abandoned early once it exceeds `max`.
+ *
+ * Needed because the similarity ratio alone cannot catch a single-character
+ * typo in a short name: 2M/(n+m) for "yeat" vs "teat" is 0.75, well under the
+ * 0.9 threshold. Measured behaviour of a one-character typo by name length:
+ *
+ *   "Sef" / "Sez"                  0.667  missed
+ *   "Yeat" / "Teat"                0.750  missed
+ *   "Woop" / "Wopp"                0.750  missed
+ *   "Gunna" / "Gunnna"             0.909  caught
+ *   "Playboi Carti" / "...Cartii"  0.963  caught
+ *
+ * So the ratio only works for names of roughly ten characters or more. Short
+ * artist names are common, and a whole class of real typos was invisible.
+ */
+export function editDistance(a, b, max = 2) {
+  if (a === b) return 0;
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(
+        prev[j] + 1,                                    // deletion
+        cur[j - 1] + 1,                                 // insertion
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),   // substitution
+      );
+      if (cur[j] < rowMin) rowMin = cur[j];
+    }
+    if (rowMin > max) return max + 1;                   // cannot recover
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+/** Typo budget scaled to name length. One char for short names, two for long. */
+const typoBudget = (a, b) =>
+  Math.max(1, Math.floor(Math.max(a.length, b.length) / 10));
 
 const counter = (items, keyOf) => {
   const m = new Map();
@@ -138,15 +211,6 @@ export function d14aFormatVariants(era) {
     }
   }
 
-  const shapes = new Map();
-  for (const s of era) {
-    const m = ERA_NAME.exec(s.album || "");
-    if (m) {
-      const tok = m[0].trim().slice(-4, -1);
-      shapes.set(tok, (shapes.get(tok) || 0) + 1);
-    }
-  }
-  const dominant = shapes.size ? ranked(shapes)[0][0] : "Era";
 
   // (a) Whole-string variants. Compares full album strings, not just the
   // extracted era name: ERA_NAME discards the literal "Era" token, so
@@ -161,20 +225,20 @@ export function d14aFormatVariants(era) {
     for (const group of buckets.values()) {
       if (group.length < 2) continue;
       const order = [...group].sort((a, b) => strings.get(b) - strings.get(a));
-      const caseOnly = new Set(group.map((g) => g.toLowerCase())).size === 1;
+      // Casing-only differences are skipped entirely. Last.fm cannot change the
+      // casing of a name, so there is nothing to act on, and a report padded
+      // with impossible work is worse than a shorter honest one. Same reason
+      // D7 is not run.
+      if (new Set(group.map((g) => g.toLowerCase())).size === 1) continue;
       issues.push({
         detector: "D14a",
-        class: caseOnly ? "unfixable" : "split",
+        class: "split",
         confidence: 0.95,
         artist,
         title: `Era tag written ${group.length} ways for ${artist}: ` +
                order.map((g) => `'${g}'`).join(", "),
         plays_affected: group.reduce((n, g) => n + strings.get(g), 0),
-        suggest: caseOnly
-          ? `casing-only difference against your usual '${dominant}' style. ` +
-            `Last.fm cannot change casing, so this is informational rather ` +
-            `than actionable.`
-          : `standardise on '${order[0]}' (${strings.get(order[0])} plays).`,
+        suggest: `standardise on '${order[0]}' (${strings.get(order[0])} plays).`,
         members: order.map((g) => ({ album: g, plays: strings.get(g) })),
       });
     }
@@ -195,6 +259,11 @@ export function d14aFormatVariants(era) {
         const sequel = differsOnlyByVersion(lo, hi);
         issues.push({
           detector: "D14a",
+          // Sequel-vs-typo cannot be decided from play counts. Marked here so
+          // the MusicBrainz phase can settle it with evidence: if both era
+          // names exist as real release groups they are separate projects and
+          // this is dropped entirely. See verifyEraNames().
+          verify: sequel ? { artist, a: lo, b: hi } : undefined,
           // A trailing number or version token means these are very likely
           // distinct projects, not a misspelling: 'Drip Season' and 'Drip
           // Season 3' are two different Gunna tapes. Play count asymmetry
@@ -209,9 +278,9 @@ export function d14aFormatVariants(era) {
           plays_affected: counts.get(lo) + counts.get(hi),
           suggest: sequel
             ? `these differ only by a version or sequel marker, so they are ` +
-              `probably separate projects rather than a typo. Flagged in case ` +
-              `one is wrong. '${hi}' has ${counts.get(hi)} plays, '${lo}' has ` +
-              `${counts.get(lo)}.`
+              `probably separate projects rather than a typo. Checking ` +
+              `MusicBrainz to confirm. '${hi}' has ${counts.get(hi)} plays, ` +
+              `'${lo}' has ${counts.get(lo)}.`
             : `'${hi}' has ${counts.get(hi)} plays against ` +
               `${counts.get(lo)}, so '${lo}' is likely the typo.`,
           members: [lo, hi].map((n) => ({ era: n, plays: counts.get(n) })),
@@ -238,12 +307,26 @@ function differsOnlyByVersion(a, b) {
   return norm(sa) === norm(sb) && (sa !== a || sb !== b);
 }
 
+/**
+ * One track title filed under several eras.
+ *
+ * NOT an error. An earlier version of this claimed "one of these eras is
+ * wrong", which is simply false: songs routinely survive across album eras.
+ * They get recorded for one project, held back, reworked, and considered again
+ * for a later one. Kanye tracks in particular move between projects constantly,
+ * so a title appearing under both BULLY and Cuck is entirely legitimate.
+ *
+ * What IS worth surfacing is that the two entries are indistinguishable in your
+ * own data. If they are different versions, the track titles could say so; if
+ * they are the same file, one era tag is redundant. Both are the listener's
+ * call, so this is reported as review and never as an error.
+ */
 export function d14cTrackInTwoEras(era) {
   const where = new Map();
   for (const s of era) {
     const name = eraName(s.album);
     if (!name) continue;
-    const k = `${s.artist}␟${norm(s.track)}`;
+    const k = `${s.artist}␟${normTitle(s.track)}`;
     if (!where.has(k)) where.set(k, { artist: s.artist, track: s.track, eras: new Map() });
     const e = where.get(k).eras;
     e.set(name, (e.get(name) || 0) + 1);
@@ -251,19 +334,24 @@ export function d14cTrackInTwoEras(era) {
   const issues = [];
   for (const { artist, track, eras } of where.values()) {
     if (eras.size < 2) continue;
+    // A version marker makes a carried-over song even more likely, so it is
+    // reported with lower confidence still.
     const versioned = [...eras.keys()].some((e) => /\bv\d+\b/i.test(e));
     issues.push({
       detector: "D14c",
-      class: versioned ? "review" : "error",
-      confidence: versioned ? 0.5 : 0.8,
+      class: "review",
+      confidence: versioned ? 0.3 : 0.45,
       artist,
-      title: `${artist} - '${track}' appears in ${eras.size} eras: ` +
+      title: `${artist} - '${track}' is filed under ${eras.size} eras: ` +
              [...eras.keys()].sort().join(", "),
       plays_affected: [...eras.values()].reduce((a, b) => a + b, 0),
-      suggest: versioned
-        ? "a V2-style project is involved, so these may be genuinely " +
-          "different versions. Verify before merging."
-        : "one of these eras is wrong. Pick the correct one.",
+      suggest:
+        "Often legitimate: songs get held back and reworked across projects, " +
+        "so the same title can genuinely belong to more than one era" +
+        (versioned ? ", and a version marker here makes that likelier" : "") +
+        ". Nothing to fix if that is the case. If these are different " +
+        "versions, consider putting that in the track title so the two are " +
+        "distinguishable. If they are the same file, one era tag is redundant.",
       members: ranked(eras).map(([era_, plays]) => ({ era: era_, plays })),
     });
   }
@@ -279,7 +367,7 @@ const COMPILATION =
 
 function classifyAlbumString(album, track) {
   if (album === "(no album)") return "missing";
-  if (norm(album) === norm(track)) return "single (album titled after the track)";
+  if (normTitle(album) === normTitle(track)) return "single (album titled after the track)";
   if (/\s*[-–]\s*(single|ep)$/i.test(album)) return "single or EP";
   if (COMPILATION.test(album)) return "compilation";
   if (EDITION.test(album)) return "edition variant";
@@ -292,22 +380,62 @@ function classifyAlbumString(album, track) {
  * releases at a point in time. That is the release history of the record
  * reconstructed from the listener's own history, not a string-similarity guess.
  */
-function temporalSignature(members) {
+/**
+ * Track titles that recur across an artist's albums by design.
+ *
+ * "Intro" on one album and "Intro" on another are two different recordings, not
+ * one track split in two. Grouping on artist plus title cannot tell them apart,
+ * so these are handled separately rather than reported as splits.
+ */
+const STRUCTURAL_TITLE =
+  /^(intro|outro|interlude|skit|prelude|epilogue|intermission|reprise|untitled|hidden track|bonus track|instrumental)\s*\d*$/i;
+
+export const isStructuralTitle = (track) => STRUCTURAL_TITLE.test(normTitle(track));
+
+/**
+ * Could the earlier album string plausibly be a pre-album release of this
+ * track, rather than simply a different album that happens to share a title?
+ *
+ * Needed because a clean chronological handover is not by itself evidence of a
+ * single being absorbed into an album. Two unrelated albums played in sequence
+ * produce the same shape. J. Cole's "Intro" on Cole World and on the 2014
+ * Forest Hills Drive anniversary edition looked like a textbook migration and
+ * is nothing of the kind.
+ */
+function plausiblePreRelease(earlier, later, track) {
+  const e = normTitle(earlier), l = normTitle(later), t = normTitle(track);
+  if (!e || !l) return false;
+  if (e === t || e.includes(t)) return true;              // single named for the track
+  if (/\s[-–]\s(single|ep)$/i.test(earlier)) return true; // explicitly a single or EP
+  if (e.includes(l) || l.includes(e)) return true;        // edition of the same album
+  return similar(norm(earlier), norm(later)) >= 0.6;      // near-identical titles
+}
+
+function temporalSignature(members, track) {
   if (members.length !== 2) return null;
   const [a, b] = [...members].sort((x, y) => x.first - y.first);
   if (a.last > b.first) return null;
+
+  const migration = plausiblePreRelease(a.album, b.album, track);
   return {
-    pattern: "clean_handover",
+    pattern: migration ? "clean_handover" : "sequential_unrelated",
+    migration,
     earlier: a.album, later: b.album, boundary: b.first,
-    note: `every play of '${a.album}' predates every play of '${b.album}'. ` +
-          `Classic single-absorbed-into-album migration around ${monthName(b.first)}.`,
+    note: migration
+      ? `every play of '${a.album}' predates every play of '${b.album}'. ` +
+        `Classic single-absorbed-into-album migration around ${monthName(b.first)}.`
+      // Same chronology, no causal claim: these look like two different
+      // releases rather than one becoming the other.
+      : `every play of '${a.album}' predates every play of '${b.album}' ` +
+        `(${monthName(b.first)}), but the two look like different releases ` +
+        `rather than one absorbing the other.`,
   };
 }
 
 export function d4AlbumSplits(rest, minPlays = 2) {
   const groups = new Map();
   for (const s of rest) {
-    const k = `${norm(s.artist)}␟${norm(s.track)}`;
+    const k = `${norm(s.artist)}␟${normTitle(s.track)}`;
     if (!groups.has(k)) {
       groups.set(k, { artist: s.artist, track: s.track, albums: new Map(),
                       first: new Map(), last: new Map() });
@@ -328,19 +456,35 @@ export function d4AlbumSplits(rest, minPlays = 2) {
       first: g.first.get(album), last: g.last.get(album),
       looks_like: classifyAlbumString(album, g.track),
     }));
-    const temporal = temporalSignature(members);
+    const structural = isStructuralTitle(g.track);
+    const temporal = temporalSignature(members, g.track);
+    const migration = Boolean(temporal?.migration);
+
     issues.push({
-      detector: "D4", class: "split",
-      confidence: temporal ? 0.9 : 0.85,
+      detector: "D4",
+      // A structural title almost certainly means several distinct tracks, so
+      // it is a question rather than a finding.
+      class: structural ? "review" : "split",
+      confidence: structural ? 0.25 : (migration ? 0.9 : 0.7),
       artist: g.artist, track: g.track,
-      title: `${g.artist} - '${g.track}' split across ${g.albums.size} album strings`,
+      title: structural
+        ? `${g.artist} - '${g.track}' appears on ${g.albums.size} albums`
+        : `${g.artist} - '${g.track}' split across ${g.albums.size} album strings`,
       plays_affected: total,
-      suggest: temporal
+      suggest: structural
+        ? `'${g.track}' is a structural track title, so these are almost ` +
+          `certainly different recordings, one per album, rather than one ` +
+          `track split in two. Nothing to fix unless you know otherwise.`
+        : migration
         ? `consolidate to '${temporal.later}': the earlier string looks like ` +
           `the pre-album release.`
-        : `candidate for consolidation. Enable MusicBrainz resolution for a ` +
-          `confirmed target.`,
-      members, temporal,
+        : `candidate for consolidation, but the two album strings do not look ` +
+          `like editions of one release. Enable MusicBrainz resolution to ` +
+          `confirm before merging anything.`,
+      members,
+      // The temporal note is suppressed for structural titles: the chronology
+      // is real but says nothing useful about two different albums.
+      temporal: structural ? undefined : temporal,
     });
   }
   return issues.sort((a, b) => b.plays_affected - a.plays_affected);
@@ -365,17 +509,24 @@ export function d8FeatureCredits(rest) {
 
   const variants = new Map();
   for (const s of rest) {
-    const k = `${norm(s.artist)}␟${norm(baseTitle(s.track))}`;
-    if (!variants.has(k)) variants.set(k, new Map());
-    const m = variants.get(k);
-    m.set(s.track, (m.get(s.track) || 0) + 1);
+    const k = `${norm(s.artist)}␟${normTitle(baseTitle(s.track))}`;
+    if (!variants.has(k)) variants.set(k, { artist: s.artist, titles: new Map() });
+    const v = variants.get(k);
+    v.titles.set(s.track, (v.titles.get(s.track) || 0) + 1);
   }
-  for (const titles of variants.values()) {
+  for (const { artist, titles } of variants.values()) {
     if (titles.size < 2) continue;
     const order = ranked(titles);
     issues.push({
       detector: "D8", class: "split", confidence: 0.8,
-      title: `'${baseTitle(order[0][0])}' scrobbled under ${titles.size} title variants`,
+      // The artist is carried AND named in the title. Without it the report
+      // said things like "'Make It Work' scrobbled under 2 title variants",
+      // which does not identify whose track it is, and left the issue with no
+      // artist for the library deep links to use.
+      artist,
+      track: order[0][0],
+      title: `${artist} - '${baseTitle(order[0][0])}' scrobbled under ` +
+             `${titles.size} title variants`,
       plays_affected: order.reduce((n, [, v]) => n + v, 0),
       suggest: `standardise on '${order[0][0]}' (${order[0][1]} plays). Check ` +
                `the official credit style before assuming 'feat.': many ` +
@@ -414,7 +565,7 @@ export function d1ArtistVariants(rest) {
   const tracks = new Map();
   for (const s of rest) {
     if (!tracks.has(s.artist)) tracks.set(s.artist, new Set());
-    tracks.get(s.artist).add(norm(s.track));
+    tracks.get(s.artist).add(normTitle(s.track));
   }
   const buckets = new Map();
   for (const artist of plays.keys()) {
@@ -447,20 +598,61 @@ export function d1ArtistVariants(rest) {
   // Fuzzy matches are gated on a shared track title: the same artist
   // misspelled will share tracks, two different artists will not. Without the
   // gate this produces confident nonsense.
-  const keys = [...buckets.keys()].sort();
+  //
+  // ACCURACY OVER SPEED: this compares EVERY pair. An earlier version blocked
+  // candidates by first character, which was 25x faster but silently stopped
+  // catching typos in the first character. Full comparison is ~10s for 5,000
+  // artists; the caller yields between chunks so the tab stays responsive, and
+  // correctness is not traded away for a progress bar.
+  //
+  // The length gate below is not a heuristic, it is implied by the threshold:
+  // Ratcliff/Obershelp similarity is 2M/(n+m) with M <= min(n,m), so a pair
+  // whose lengths differ by more than 3 cannot reach 0.9 at these string
+  // lengths. Skipping them loses nothing.
+  const keys = [...buckets.keys()];
   for (let i = 0; i < keys.length; i++) {
     for (let j = i + 1; j < keys.length; j++) {
-      if (Math.abs(keys[i].length - keys[j].length) > 3) continue;
-      if (similar(keys[i], keys[j]) < 0.9) continue;
-      for (const a of buckets.get(keys[i])) {
-        for (const b of buckets.get(keys[j])) {
+      const ka = keys[i], kb = keys[j];
+      if (Math.abs(ka.length - kb.length) > 3) continue;
+
+      // Two independent candidate rules. The ratio catches reorderings and
+      // longer-name noise; the edit distance catches short-name typos the ratio
+      // structurally cannot reach. Confidence differs so the weaker signal is
+      // labelled as such rather than presented as equally certain.
+      const ratio = similar(ka, kb);
+      const byRatio = ratio >= 0.9;
+      const byEdit = !byRatio &&
+        editDistance(ka, kb, typoBudget(ka, kb)) <= typoBudget(ka, kb);
+      if (!byRatio && !byEdit) continue;
+
+      for (const a of buckets.get(ka)) {
+        for (const b of buckets.get(kb)) {
           const id = [a, b].sort().join("|");
           if (seen.has(id)) continue;
+
+          // Gate 1: they must share a track title. The same artist misspelled
+          // will; two different artists will not.
           const shared = [...tracks.get(a)].filter((t) => tracks.get(b).has(t));
           if (!shared.length) continue;
+
+          // Gate 2: play-count asymmetry. A typo gets scrobbled a handful of
+          // times; two genuinely different artists have comparable presence.
+          // This matters most for short names, where edit distance alone would
+          // pair up unrelated artists that happen to share a generic title
+          // like "Intro". Exact-normalisation matches skip this gate, since
+          // those are not judgement calls.
+          const lo = Math.min(plays.get(a), plays.get(b));
+          const hi = Math.max(plays.get(a), plays.get(b));
+          if (lo > 0.4 * hi) continue;
+
           seen.add(id);
           issues.push(variantIssue([a, b],
-            `fuzzy match confirmed by ${shared.length} shared track titles`, 0.75));
+            byRatio
+              ? `fuzzy match (${(ratio * 100).toFixed(0)}% similar) confirmed by ` +
+                `${shared.length} shared track title(s)`
+              : `one-character difference confirmed by ${shared.length} ` +
+                `shared track title(s)`,
+            byRatio ? 0.75 : 0.6));
         }
       }
     }
@@ -490,7 +682,8 @@ export function d6Duplicates(scrobbles, windowSec = 30) {
   for (let i = 1; i < ordered.length; i++) {
     const p = ordered[i - 1], c = ordered[i];
     if (c.uts - p.uts <= windowSec &&
-        norm(c.track) === norm(p.track) && norm(c.artist) === norm(p.artist)) {
+        normTitle(c.track) === normTitle(p.track) &&
+        norm(c.artist) === norm(p.artist)) {
       dupes.push(c);
     }
   }
@@ -590,6 +783,201 @@ export function d12Impossible(scrobbles, now = Math.floor(Date.now() / 1000)) {
   return issues;
 }
 
+/**
+ * Settle sequel-vs-typo era pairs with MusicBrainz instead of guessing.
+ *
+ * Play-count asymmetry cannot tell "Drip Season" and "Drip Season 3" (two real
+ * Gunna tapes) apart from "Yandhi" and "Yhandi" (a typo). Asking whether each
+ * name exists as a release group can.
+ *
+ * `exists(artist, title)` must return a truthy value only on an EXACT title
+ * match after normalisation. MusicBrainz search is fuzzy and returns
+ * "Drip Season 3" when asked for "Drip Season", so counting results would
+ * confirm everything.
+ *
+ * Returns a new issue array with verified pairs dropped or sharpened.
+ *
+ * Honest caveat: absence from MusicBrainz is weak evidence. Era names in leak
+ * culture routinely refer to projects that were never released and so have no
+ * release group at all. Only the asymmetric case gets promoted to an error;
+ * "neither exists" stays a low-confidence review rather than an accusation.
+ */
+export function verifyEraNames(issues, exists) {
+  const out = [];
+  for (const issue of issues) {
+    if (!issue.verify) { out.push(issue); continue; }
+    const { artist, a, b } = issue.verify;
+    const hasA = Boolean(exists(artist, a));
+    const hasB = Boolean(exists(artist, b));
+
+    if (hasA && hasB) {
+      // Both are real projects. Not a typo, and not worth mentioning.
+      continue;
+    }
+    if (hasB && !hasA) {
+      // The common spelling is a real release, the rare one is not.
+      out.push({
+        ...issue, class: "error", confidence: 0.85, verify: undefined,
+        title: `Era name not found in MusicBrainz for ${artist}: '${a}'`,
+        suggest: `'${b}' exists as a real release for ${artist}; '${a}' does ` +
+                 `not. Likely a typo or a wrong era name.`,
+      });
+      continue;
+    }
+    if (hasA && !hasB) {
+      out.push({
+        ...issue, class: "review", confidence: 0.4, verify: undefined,
+        suggest: `'${a}' exists as a real release for ${artist} but '${b}' ` +
+                 `does not, which is the opposite of what a typo looks like. ` +
+                 `Worth a look.`,
+      });
+      continue;
+    }
+    // Neither found. Common for genuinely unreleased projects, so this stays a
+    // weak review rather than becoming a claim.
+    out.push({
+      ...issue, confidence: 0.3, verify: undefined,
+      suggest: `neither '${a}' nor '${b}' exists as a release in MusicBrainz, ` +
+               `which is normal for unreleased projects. Cannot tell a sequel ` +
+               `from a typo here, so this is informational only.`,
+    });
+  }
+  return out;
+}
+
+/** Era-name pairs awaiting MusicBrainz verification, flattened to lookups. */
+export function eraVerificationPlan(issues) {
+  const jobs = new Map();
+  for (const i of issues) {
+    if (!i.verify) continue;
+    for (const title of [i.verify.a, i.verify.b]) {
+      jobs.set(`${i.verify.artist}␟${title}`.toLowerCase(),
+               { artist: i.verify.artist, title });
+    }
+  }
+  return [...jobs.values()];
+}
+
+/* ------------------------------------ D0 and D14e: MusicBrainz resolution */
+
+/**
+ * Which tracks need a MusicBrainz lookup, busiest first.
+ *
+ * Returned as a plan so the caller can pace, show progress, persist results
+ * and resume, none of which belongs inside a detector.
+ */
+export function resolutionPlan(scrobbles, { budget = 3000 } = {}) {
+  const { era, rest } = partitionEra(scrobbles);
+  const splits = d4AlbumSplits(rest);
+
+  const jobs = new Map();   // key -> {artist, track, plays, kind}
+  const add = (artist, track, plays, kind) => {
+    if (!artist || !track) return;
+    const k = `${artist}␟${track}`.toLowerCase();
+    const cur = jobs.get(k);
+    if (cur) { cur.plays += plays; return; }
+    jobs.set(k, { artist, track, plays, kind });
+  };
+
+  for (const s of splits) add(s.artist, s.track, s.plays_affected, "split");
+
+  // D14e works per track, not per album string.
+  const eraTracks = new Map();
+  for (const s of era) {
+    const k = `${s.artist}␟${s.track}`;
+    const cur = eraTracks.get(k) || { artist: s.artist, track: s.track, plays: 0 };
+    cur.plays++;
+    eraTracks.set(k, cur);
+  }
+  for (const t of eraTracks.values()) add(t.artist, t.track, t.plays, "era");
+
+  return [...jobs.values()]
+    .sort((a, b) => b.plays - a.plays)   // spend a capped budget where it counts
+    .slice(0, budget);
+}
+
+/**
+ * Pick a consolidation target for each split, using MusicBrainz.
+ *
+ * Target = earliest release group of primary type Album without a Compilation
+ * secondary type. One rule handles both directions: singles resolve forward
+ * into their album, compilations resolve back to the original studio release.
+ */
+export function d0Resolve(splits, lookup) {
+  const out = [];
+  for (const issue of splits) {
+    const found = lookup(issue.artist, issue.track);
+    if (!found?.groups?.length) continue;
+    const groups = found.groups;
+    const albums = groups.filter((g) =>
+      g.primary === "Album" && !(g.secondary || []).includes("Compilation"));
+    const target = (albums[0] || groups[0]);
+    out.push({
+      ...issue,
+      detector: "D0",
+      confidence: issue.temporal ? 0.9 : 0.75,
+      suggest: `consolidate to '${target.title}' (${target.primary}, ` +
+               `${target.first_release || "date unknown"})`,
+      external: target,
+      candidates: groups.slice(0, 8),
+    });
+  }
+  return out;
+}
+
+/**
+ * Unreleased material that now has an official release.
+ *
+ * Deliberately does NOT recommend consolidation. A leak is frequently a
+ * different recording from the official release, so the pre/post split may be
+ * correct rather than accidental. Title matching is also weaker here than
+ * anywhere else: leaks circulate under working titles and get released under
+ * different ones, with no duration or fingerprint fallback. Precision over
+ * recall, always "verify".
+ */
+export function d14eReleasedSince(era, lookup) {
+  const tracks = new Map();
+  for (const s of era) {
+    const k = `${s.artist}␟${s.track}`;
+    const rec = tracks.get(k) ||
+      { artist: s.artist, track: s.track, plays: 0, first: s.uts, last: s.uts, eras: new Map() };
+    rec.plays++;
+    rec.first = Math.min(rec.first, s.uts);
+    rec.last = Math.max(rec.last, s.uts);
+    const name = eraName(s.album);
+    if (name) rec.eras.set(name, (rec.eras.get(name) || 0) + 1);
+    tracks.set(k, rec);
+  }
+
+  const issues = [];
+  for (const rec of [...tracks.values()].sort((a, b) => b.plays - a.plays)) {
+    const found = lookup(rec.artist, rec.track);
+    if (!found?.groups?.length) continue;
+    const official = found.groups.filter((g) =>
+      g.status === "Official" &&
+      ["Album", "Single", "EP"].includes(g.primary) &&
+      !(g.secondary || []).includes("Bootleg"));
+    if (!official.length) continue;
+    const best = official[0];
+    issues.push({
+      detector: "D14e", class: "split", confidence: 0.45,
+      artist: rec.artist,
+      title: `Possibly released since: ${rec.artist} - ${rec.track}`,
+      plays_affected: rec.plays,
+      suggest:
+        `An official ${best.primary} '${best.title}' ` +
+        `(${best.first_release || "date unknown"}) contains a recording with ` +
+        `this title. Verify it is the same version before doing anything: the ` +
+        `leak may be a different mix. Your plays run ${monthName(rec.first)} ` +
+        `to ${monthName(rec.last)}.`,
+      members: [...rec.eras.entries()].map(([era_, plays]) => ({ era: era_, plays })),
+      external: best,
+      no_auto_action: true,
+    });
+  }
+  return issues;
+}
+
 /* -------------------------------------------- impact and hygiene score */
 
 /**
@@ -680,13 +1068,21 @@ export function analyse(scrobbles) {
     ...d1ArtistVariants(rest),
     ...d5MissingAlbum(rest),
     ...d6Duplicates(scrobbles),
-    ...d7Casing(rest),
     ...d11VariousArtists(rest),
     ...d12Impossible(scrobbles),
   ];
-  // D2 (canonical-name divergence) is intentionally absent. It would compare
-  // stored names against Last.fm's canonical forms and call the difference an
-  // error, which is backwards for anyone with autocorrect off.
+  // Two detectors are deliberately NOT run, and both stay in this file so the
+  // reasoning survives and re-enabling is one line.
+  //
+  // D2 (canonical-name divergence) would compare stored names against
+  // Last.fm's canonical forms and call the difference an error, which is
+  // backwards for anyone with autocorrect off.
+  //
+  // D7 (casing-only variants) finds real duplicates, but Last.fm cannot change
+  // the casing of a name, so every finding is unactionable. A report padded
+  // with work nobody can do is worse than a shorter honest one. Note D1 also
+  // skips casing-only groups, so these are now absent entirely rather than
+  // reported under a different detector.
 
   issues.sort((a, b) => (b.plays_affected || 0) - (a.plays_affected || 0));
 

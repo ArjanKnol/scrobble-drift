@@ -22,6 +22,8 @@ h1 .dot{color:var(--accent)}
 h2{font-size:13px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);
   margin:38px 0 12px;font-weight:700;
   border-bottom:1px solid var(--line);padding-bottom:8px}
+/* Full content width, matching the panels below it, rather than a narrow
+   measure. */
 .lede{color:var(--dim);margin:0 0 26px}
 .sub{color:var(--dim);font-size:13px;margin-bottom:26px}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px}
@@ -66,6 +68,9 @@ button.ghost:hover{background:transparent;color:var(--ink);
 .issue .mem{margin-top:9px;font-size:12px;color:var(--dim);
   font-variant-numeric:tabular-nums}
 .issue .mem code{background:#0c0e12;padding:1px 5px;border-radius:4px;color:var(--ink)}
+.issue .links{margin-top:7px;padding-top:7px;border-top:1px solid var(--line)}
+.issue .links a{color:var(--accent);border-bottom:0;font-size:12px}
+.issue .links a:hover{border-bottom:1px solid var(--accent)}
 .mv{display:flex;gap:9px;font-size:13px;padding:5px 0;border-bottom:1px solid var(--line)}
 .up{color:var(--good)} .down{color:var(--bad)}
 .err{border-color:var(--bad);color:var(--bad)}
@@ -89,8 +94,11 @@ button.ghost:hover{background:transparent;color:var(--ink);
   letter-spacing:-.02em;color:var(--ink);font-size:14px;line-height:1}
 .lfm:hover{color:var(--ink);opacity:.85}
 
-/* The official asset is the 1200x630 social share image: the red wordmark
-   block sits inside dark padding. Shown whole rather than cropped: a crop needs hard-coded pixel offsets into someone else's export, which break silently if they ever re-export it. The padding is near-black and blends into --bg anyway. */
+/* The official asset is the 1200x630 social share image, so the red wordmark
+   sits inside dark padding. Shown whole rather than cropped: a crop needs
+   hard-coded pixel offsets into someone else's file, which silently breaks if
+   they ever re-export it. The padding is near-black and blends into --bg, so
+   there is nothing to gain from the fragile version. */
 .lfm-logo{display:block;width:96px;height:auto;line-height:0}
 .lfm-logo img{display:block;width:100%;height:auto;border-radius:2px}
 
