@@ -36,7 +36,7 @@ Python copy before it.
 | **D14** | Unreleased material, protected from every other detector |
 | **D14a** | Inconsistent spelling of your own era convention |
 | **D14c** | One track title filed under several eras (informational) |
-| **D14e** | Unreleased material that now has an official release |
+| **D14e** | Unreleased material that now has an official release (see caveat below) |
 | **D14f** | A whole artist's unreleased output in one undifferentiated bucket (informational, unscored) |
 | **D1 / D3** | Artist name variants, MusicBrainz ID conflicts |
 | **D5 / D6 / D11 / D12** | Missing albums, duplicate scrobbles, Various Artists, impossible timestamps |
@@ -83,6 +83,24 @@ matches, excluding it from D0, D4 and D1 — so a real album classified as
 unreleased silently stops being checked for splits, with no error anywhere. A
 lost finding is worse than a visible mistake, and it is the failure mode this
 whole area keeps producing.
+
+**MusicBrainz is a weak source for "has this leak been released", and only for
+that question.** It documents music rather than commerce, so it catalogues leaked
+and bootlegged projects as release groups. Kanye's `Yandhi` was never released
+and is in there, so the detector once reported *"An official Album 'Yandhi'
+(date unknown) contains a recording with this title"* for a track filed under
+`Unreleased (Yandhi v2 Era)`. That is circular: it found the leak it was asked
+about. Three guards:
+
+1. **A release date is required.** Commercial releases have dates; leaked
+   material catalogued after the fact often does not. This alone removes every
+   `(date unknown)` finding.
+2. **The match must not be the era itself.** If a track is filed under
+   `Unreleased (Yandhi v2 Era)` and the match is a release group called `Yandhi`,
+   that is the same unreleased project, not proof it came out.
+3. **Spotify outranks MusicBrainz here.** Presence on Spotify means commercially
+   available today, which is the question actually being asked; the two are
+   reported at different confidence and the wording says which source answered.
 
 **The single-bucket convention is not a defect.** Many people file everything
 under one `Unreleased` per artist. D14f mentions it, offers the era conventions
