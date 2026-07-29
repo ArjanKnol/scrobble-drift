@@ -351,7 +351,8 @@ async function main() {
     ].sort((a, b) => (b.plays_affected ?? 0) - (a.plays_affected ?? 0));
 
     report.impact = chartImpact(rest, resolved.length ? resolved : splits);
-    report.hygiene = hygieneScore(scrobbles.length, report.issues);
+    report.hygiene = hygieneScore(scrobbles.length, report.issues,
+                                  report.profile.distinct_albums);
     report.resolved = true;
 
     await mb.save();
