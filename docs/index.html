@@ -9,12 +9,19 @@
   how much they distort your charts.">
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=4">
+<link rel="stylesheet" href="style.css?v=5">
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="theme-color" content="#131313">
 </head>
 <body>
 <div class="wrap">
 
-  <h1>Scrobble Drift<span class="dot">.</span></h1>
+  <h1 class="brand">
+    <img src="logo.png" alt="Scrobble Drift" width="1044" height="361">
+  </h1>
   <p class="lede">
     Your Last.fm metadata degrades on its own. A single you played on release
     gets absorbed into an album months later, so your plays end up split across
@@ -60,9 +67,16 @@
     </div>
 
     <p class="note">
-      Read-only, and nothing is stored. Your scrobbles are fetched straight into
-      this browser tab and vanish when you close it. No account, no login, no
-      database, no analytics.
+      Read-only: this never edits or deletes anything on Last.fm. There is no
+      account, no login, no server-side database and no analytics.
+    </p>
+    <p class="note">
+      <strong>Saved on this device.</strong> Your scrobbles and the MusicBrainz
+      answers are kept in this browser's own storage so an interrupted scan can
+      pick up where it left off, and so a repeat scan does not spend another
+      hour re-asking MusicBrainz the same questions. Nothing is uploaded
+      anywhere and there is nowhere for it to be uploaded to.
+      <a href="#" id="clear-data">Clear stored data</a><span id="usage"></span>
     </p>
     <p class="note">
       Everyone shares one Last.fm API key, so deep scans are rate limited to
@@ -70,6 +84,8 @@
       <a href="#" id="ownkey-toggle">Use your own API key</a> to skip the queue
       entirely.
     </p>
+
+    <div id="resume" class="hide" style="margin-top:12px"></div>
 
     <div id="ownkey" class="hide" style="margin-top:10px">
       <input id="apikey" placeholder="Your 32-character Last.fm API key"
@@ -117,6 +133,7 @@ import {
   eraVerificationPlan, verifyEraNames, hygieneScore, chartImpact,
 } from "./drift.js";
 import { apiBase, isConfigured } from "./config.js";
+import * as store from "./store.js";
 
 const $ = (id) => document.getElementById(id);
 const N = (n) => (n ?? 0).toLocaleString();
@@ -190,6 +207,62 @@ $("ownkey-toggle").onclick = (e) => {
   $("ownkey").classList.toggle("hide");
   if (!$("ownkey").classList.contains("hide")) $("apikey").focus();
 };
+
+/* ------------------------------------------------- local storage controls */
+
+async function showUsage() {
+  const [cached, u] = await Promise.all([store.countLookups(), store.usage()]);
+  const bits = [];
+  if (cached) bits.push(`${N(cached)} MusicBrainz answers cached`);
+  if (u?.used) bits.push(store.humanBytes(u.used));
+  $("usage").textContent = bits.length ? ` — currently ${bits.join(", ")}.` : "";
+}
+
+$("clear-data").onclick = async (e) => {
+  e.preventDefault();
+  const ok = await store.clearAll();
+  $("usage").textContent = ok
+    ? " — cleared."
+    : " — nothing to clear, or storage is unavailable.";
+  $("resume").classList.add("hide");
+};
+
+/**
+ * Offer to resume an interrupted scan.
+ *
+ * A full-history scan can run for an hour, most of it waiting on MusicBrainz.
+ * Losing it to a reload was the single worst failure mode this tool had.
+ */
+(async () => {
+  showUsage();
+  const st = await store.loadState();
+  if (!st?.user || !st.total) return;
+  const age = Math.round((Date.now() - (st.saved || 0)) / 60000);
+  $("resume").classList.remove("hide");
+  $("resume").innerHTML = `
+    <div class="panel" style="border-color:var(--accent)">
+      <strong>Unfinished scan for ${esc(st.user)}.</strong>
+      <p class="note">${N(st.total)} scrobbles already fetched${
+        st.nextPage ? `, stopped at page ${N(st.nextPage)}` : ""
+      }${age < 2880 ? `, ${age < 60 ? age + " minutes" : Math.round(age / 60) + " hours"} ago` : ""}.
+      Resuming skips the fetching you have already done.</p>
+      <button id="do-resume" type="button">Resume</button>
+      <button id="drop-resume" class="ghost" type="button">Start fresh</button>
+    </div>`;
+  $("drop-resume").onclick = async () => {
+    await store.clearState();
+    $("resume").classList.add("hide");
+  };
+  $("do-resume").onclick = async () => {
+    $("user").value = st.user;
+    $("depth").value = String(st.cap ?? 0);
+    $("resume").classList.add("hide");
+    resumeFrom = st;
+    $("f").requestSubmit();
+  };
+})();
+
+let resumeFrom = null;
 
 // Fail loudly and usefully rather than throwing a CORS error at whoever opens
 // the page before the Worker exists.
@@ -313,8 +386,22 @@ async function waitVisibly(seconds, why) {
 
 async function fetchAll(user, cap, apiKey) {
   const base = apiBase().replace(/\/+$/, "");
-  const all = [];
-  let from = 1, totalPages = null, totalScrobbles = null, attempt = 0;
+  let all = [], from = 1;
+
+  // Resume: reuse what is already on disk rather than re-fetching it.
+  if (resumeFrom?.user === user) {
+    const saved = await store.loadScrobbles(user);
+    if (saved?.length) {
+      all = saved;
+      from = resumeFrom.nextPage || 1;
+      $("status").textContent =
+        `Resuming: ${N(all.length)} scrobbles already stored, continuing from ` +
+        `page ${N(from)}.`;
+    }
+    resumeFrom = null;
+  }
+
+  let totalPages = null, totalScrobbles = null, attempt = 0, sinceSave = 0;
 
   while (!abort) {
     const qs = new URLSearchParams({
@@ -376,15 +463,33 @@ async function fetchAll(user, cap, apiKey) {
       (data.shared_key === false ? " (your own key)" : "") +
       ` · page ${N(from)} of ${N(totalPages)}`;
 
+    // Checkpoint periodically rather than every batch: writing 100MB on each
+    // page would be slower than the network. Best-effort throughout, so a
+    // storage failure never stops a working scan.
+    sinceSave += data.scrobbles.length;
+    if (sinceSave >= 20000) {
+      sinceSave = 0;
+      await store.saveScrobbles(user, all);
+      await store.saveState({ user, cap, nextPage: data.next, total: all.length });
+    }
+
     if (cap && all.length >= cap) { all.length = cap; break; }
     if (!data.next) break;
     from = data.next;
   }
 
-  if (abort && all.length) {
+  // Final checkpoint. On a clean finish the state is cleared so the resume
+  // prompt does not offer to continue something that already completed.
+  await store.saveScrobbles(user, all);
+  if (abort) {
+    await store.saveState({ user, cap, nextPage: from, total: all.length });
     $("status").textContent =
-      `Stopped early. Analysing the ${N(all.length)} scrobbles fetched.`;
+      `Stopped. ${N(all.length)} scrobbles kept on this device, analysing them ` +
+      `now. You can resume later.`;
+  } else {
+    await store.clearState();
   }
+  showUsage();
   return all;
 }
 
@@ -413,7 +518,7 @@ async function resolvePhase(scrobbles, apiKey) {
   const recCache = new Map();
   const rgCache = new Map();
   const key = (a, t) => `${a}␟${t}`.toLowerCase();
-  let done = 0, failed = 0;
+  let done = 0, failed = 0, cacheHits = 0;
   const started = Date.now();
 
   const tick = (label) => {
@@ -423,6 +528,7 @@ async function resolvePhase(scrobbles, apiKey) {
     const left = Math.round((elapsed / done) * (total - done));
     $("status").textContent =
       `${label}: ${N(done)} of ${N(total)} lookups` +
+      (cacheHits ? ` · ${N(cacheHits)} from local cache` : "") +
       (failed ? ` (${N(failed)} not found)` : "") +
       ` · about ${left > 90 ? Math.round(left / 60) + " min" : left + "s"} left`;
 
@@ -444,7 +550,16 @@ async function resolvePhase(scrobbles, apiKey) {
    * next job, silently losing that finding. Now the wait is followed by another
    * attempt, so a rate limit costs time rather than accuracy.
    */
-  async function paced(path, params, attempts = 3) {
+  async function paced(path, params, attempts = 3, cacheKind = null) {
+    // Answers already on disk cost nothing and never go stale: release groups,
+    // types and dates are historical facts. This is what makes a repeat scan
+    // instant instead of another hour of one-per-second lookups.
+    const ck = cacheKind && [params.artist, params.track || params.title];
+    if (ck) {
+      const hit = await store.getLookup(cacheKind, ck[0], ck[1]);
+      if (hit) { cacheHits++; return hit; }
+    }
+
     for (let attempt = 1; attempt <= attempts; attempt++) {
       if (abort) return null;
       const t0 = Date.now();
@@ -455,6 +570,7 @@ async function resolvePhase(scrobbles, apiKey) {
           retryIn = Number(res.headers.get("Retry-After") || 30);
         } else if (res.ok) {
           const out = await res.json();
+          if (ck) await store.putLookup(cacheKind, ck[0], ck[1], out);
           const spent = Date.now() - t0;
           if (spent < 1000) await sleep(1000 - spent);   // pace the next call
           return out;
@@ -481,7 +597,7 @@ async function resolvePhase(scrobbles, apiKey) {
   for (const job of eraJobs) {
     if (abort) break;
     const r = await paced("/api/mb/release-group",
-                          { artist: job.artist, title: job.title });
+                          { artist: job.artist, title: job.title }, 3, "rg");
     if (r) rgCache.set(key(job.artist, job.title), r);
     tick("Checking era names against MusicBrainz");
   }
@@ -497,7 +613,7 @@ async function resolvePhase(scrobbles, apiKey) {
   for (const job of plan) {
     if (abort) break;
     const r = await paced("/api/mb/recording",
-                          { artist: job.artist, track: job.track });
+                          { artist: job.artist, track: job.track }, 3, "rec");
     if (r) recCache.set(key(job.artist, job.track), r);
     tick("Resolving releases against MusicBrainz");
   }

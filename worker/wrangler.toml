@@ -27,7 +27,11 @@ preview_urls = false
 #
 # Never use "*" on a deployed Worker. This one spends a real API key, and an
 # open CORS policy lets any website on the internet spend it for you.
-ALLOWED_ORIGINS = "https://arjanknol.github.io,http://localhost:8000,http://127.0.0.1:8000"
+# scrobble-drift.pages.dev is the public URL (no personal name in it).
+# arjanknol.github.io stays listed so the older link keeps working.
+# Cloudflare Pages also serves every branch at <hash>.scrobble-drift.pages.dev;
+# those are NOT listed, deliberately, so preview builds cannot spend the key.
+ALLOWED_ORIGINS = "https://scrobble-drift.pages.dev,https://arjanknol.github.io,http://localhost:8000,http://127.0.0.1:8000"
 
 # ---------------------------------------------------------------------------
 # Rate limiting

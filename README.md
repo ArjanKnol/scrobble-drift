@@ -112,9 +112,26 @@ It cannot be GitHub-only. Not a limitation of Pages, a property of Last.fm: no
 CORS headers means no browser calls, full stop. Something server-side has to sit
 in between, and the Worker free tier does it at no cost.
 
-The upside of that split is that **nothing is ever stored**. The Worker proxies
-and forgets; analysis happens in the visitor's tab and dies with it. No data at
-rest means no retention policy, no deletion endpoint and no breach surface.
+**Nothing is stored server-side.** The Worker proxies and forgets: it never
+writes a scrobble anywhere, and analysis happens entirely in the visitor's
+browser. There is no database to breach and no retention policy to write.
+
+**Some things are stored client-side**, in the visitor's own browser via
+IndexedDB, and the UI says so plainly rather than claiming otherwise:
+
+| Stored | Why |
+|---|---|
+| Fetched scrobbles | So an interrupted scan resumes instead of starting over |
+| MusicBrainz answers | Release dates and types are historical facts, so a repeat scan is instant rather than another hour at one lookup per second |
+| Scan position | Which user, how deep, which page to continue from |
+
+The API key is **never** persisted, even when a visitor supplies their own. A
+"Clear stored data" link wipes everything and reports current usage.
+
+`localStorage` was not an option: it caps around 5MB and a 139,000-scrobble
+history is closer to 100MB. Every storage call is best-effort, so a quota
+failure or private-browsing mode degrades to an in-memory scan rather than
+breaking it.
 
 ### Enabling Pages
 
