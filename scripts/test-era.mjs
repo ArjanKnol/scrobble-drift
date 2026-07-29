@@ -188,5 +188,54 @@ console.log("\nmixed conventions still group correctly");
 }
 
 /* ------------------------------------------------------------------------- */
-console.log(`\n${pass} passed, ${fail} failed\n`);
+/* ------------------------------------------------------------------------- */
+/* Appended: era findings must name the album string in the library, not the  */
+/* extracted era name. Reporting 'Eternal Atake OG' when the library says    */
+/* 'Unreleased (Eternal Atake OG Era)' forces the reader to work out which    */
+/* entry is meant before they can act on it.                                 */
+console.log("\nera findings name the library's album string");
+
+{
+  const { d14aFormatVariants: d14a, verifyEraNames: verify,
+          eraVerificationPlan: plan } = await import("../docs/drift.js");
+  const era = []; let uts = 1600000000;
+  const add = (artist, album, track, n) => {
+    for (let i = 0; i < n; i++) era.push({ uts: uts++, artist, album, track });
+  };
+  add("Lil Uzi Vert", "Unreleased (Eternal Atake Era)", "Leak A", 5);
+  add("Lil Uzi Vert", "Unreleased (Eternal Atake OG Era)", "Leak B", 92);
+
+  const found = d14a(era).filter((i) => i.detector === "D14a");
+  eq(found.length, 1, "one similar-era finding");
+  const i = found[0];
+
+  ok(i.title.includes("Unreleased (Eternal Atake Era)"),
+     "the title shows the full album string");
+  ok(i.title.includes("Unreleased (Eternal Atake OG Era)"),
+     "for both entries");
+  ok(!/: 'Eternal Atake' vs/.test(i.title),
+     "and not the bare extracted era name");
+  ok(i.suggest.includes("Unreleased (Eternal Atake OG Era)"),
+     "the suggestion names the album string too");
+
+  eq(i.members.length, 2, "two members");
+  ok(i.members.every((m) => m.album?.startsWith("Unreleased (")),
+     "members carry album strings, so the UI can deep-link to them");
+  ok(i.members.every((m) => m.era), "and keep the era name for context");
+
+  // MusicBrainz must still be asked about the ERA NAME, not the album string:
+  // 'Unreleased (Eternal Atake Era)' is not a release anyone has ever put out.
+  const jobs = plan(found);
+  ok(jobs.some((j) => j.title === "Eternal Atake"),
+     "MusicBrainz is queried for the era name, not the album string");
+  ok(!jobs.some((j) => j.title.includes("Unreleased")),
+     "no lookup is wasted on an album string that cannot exist as a release");
+
+  // And after the ruling the rewritten message still names the library entry.
+  const ruled = verify(found, (a, t) => t === "Eternal Atake");
+  ok(ruled[0].suggest.includes("Unreleased (Eternal Atake Era)"),
+     "the post-MusicBrainz message names the library entry as well");
+}
+
+console.log(`\n${pass} passed, ${fail} failed (including appended block)\n`);
 process.exit(fail ? 1 : 0);

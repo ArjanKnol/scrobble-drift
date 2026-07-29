@@ -9,7 +9,7 @@
   how much they distort your charts.">
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=11">
+<link rel="stylesheet" href="style.css?v=12">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -178,27 +178,45 @@ function libUrl(user, artist, { album, track } = {}) {
 }
 
 /** Links for one issue, derived from whichever fields it carries. */
+/**
+ * Deep links for one finding, each labelled by what it points at.
+ *
+ * Two problems this fixes. The track label used to be `open '<track>'`, which
+ * rendered under the section's own "Open in your library:" heading as
+ * "Open in your library: open 'BUTTERFLY EFFECT'". And every link was a bare
+ * name, so a list like
+ *
+ *   BUTTERFLY EFFECT · ASTROWORLD · Butterfly Effect
+ *
+ * gave no clue that the first and third are track pages and the middle one is an
+ * album, nor why two of them look almost the same. The kind tag is what makes
+ * that list readable: those two ARE the finding, being the two spellings to
+ * compare.
+ */
 function issueLinks(issue, user) {
   const out = [];
   const artist = issue.artist;
   const seen = new Set();
-  const push = (label, href) => {
+  const push = (kind, label, href) => {
     if (!href || seen.has(href)) return;
     seen.add(href);
-    out.push(`<a href="${href}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`);
+    out.push(`<a href="${href}" target="_blank" rel="noopener noreferrer">` +
+             `<span class="lk">${kind}</span>${esc(label)}</a>`);
   };
 
-  if (issue.track && artist) push(`open '${issue.track}'`, libUrl(user, artist, { track: issue.track }));
+  if (issue.track && artist) {
+    push("track", issue.track, libUrl(user, artist, { track: issue.track }));
+  }
   for (const m of issue.members || []) {
     if (m.album && artist && m.album !== "(no album)") {
-      push(m.album, libUrl(user, artist, { album: m.album }));
+      push("album", m.album, libUrl(user, artist, { album: m.album }));
     } else if (m.artist) {
-      push(m.artist, libUrl(user, m.artist));
+      push("artist", m.artist, libUrl(user, m.artist));
     } else if (m.track && artist) {
-      push(m.track, libUrl(user, artist, { track: m.track }));
+      push("track", m.track, libUrl(user, artist, { track: m.track }));
     }
   }
-  if (!out.length && artist) push(artist, libUrl(user, artist));
+  if (!out.length && artist) push("artist", artist, libUrl(user, artist));
   return out.slice(0, 6);
 }
 const col = (v) => v >= 85 ? "var(--good)" : v >= 60 ? "var(--warn)" : "var(--bad)";
@@ -1383,7 +1401,8 @@ function issues() {
       ${(() => {
         const links = issueLinks(i, report.user);
         return links.length
-          ? `<div class="mem links">Open in your library: ${links.join(" &nbsp;·&nbsp; ")}</div>`
+          ? `<div class="mem links"><span class="lk-lead">Open in your
+              library</span>${links.join("")}</div>`
           : "";
       })()}
     </div>`).join("") : `<div class="panel">Nothing matches that filter.</div>`;
