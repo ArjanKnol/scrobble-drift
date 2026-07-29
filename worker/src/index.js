@@ -48,6 +48,8 @@
 
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";
+const SPOTIFY_TOKEN = "https://accounts.spotify.com/api/token";
+const SPOTIFY_API = "https://api.spotify.com/v1";
 
 // Only read methods. An allowlist, not a denylist: a proxy that forwards
 // arbitrary methods is an open relay for someone else's credentials, and
@@ -87,6 +89,7 @@ export default {
         return json({
           ok: true,
           configured: Boolean(env.LASTFM_API_KEY),
+          spotify: Boolean(env.SPOTIFY_CLIENT_ID && env.SPOTIFY_CLIENT_SECRET),
           limiters: {
             burst: Boolean(env.RL_BURST),
             pages: Boolean(env.RL_PAGES),
@@ -104,6 +107,14 @@ export default {
       if (url.pathname === "/api/mb/release-group") {
         return mbReleaseGroup(url, cors);
       }
+
+      if (url.pathname === "/api/spotify/artist-albums") {
+        return spArtistAlbums(url, env, cors);
+      }
+      if (url.pathname === "/api/spotify/album-tracks") {
+        return spAlbumTracks(url, env, cors);
+      }
+      if (url.pathname === "/api/spotify/album") return spAlbum(url, env, cors);
 
       return json({ error: "not found" }, 404, cors);
     } catch (err) {
@@ -503,4 +514,297 @@ async function mbRecording(url, cors) {
     (a, b) => (a.first_release || "9999").localeCompare(b.first_release || "9999"),
   );
   return json({ groups }, 200, { ...cors, "Cache-Control": "public, max-age=86400" });
+}
+
+/* ---------------------------------------------------------------- Spotify */
+/**
+ * Why Spotify at all, when MusicBrainz already answers these questions?
+ *
+ * Throughput, and nothing else. MusicBrainz enforces a hard 1 request/second
+ * with IP blocking, so a library with 4,000 distinct unreleased tracks needs
+ * over an hour of wall clock just to ask "has this been released yet". Spotify
+ * tolerates roughly two orders of magnitude more, and it answers by CATALOGUE
+ * rather than by track: one artist fetch returns every title that artist has
+ * officially released, so all 300 of a given artist's tracks resolve from a
+ * handful of calls instead of 300.
+ *
+ * MusicBrainz is still the authority and still runs. The chain is:
+ *
+ *   Spotify says released   -> done, no MusicBrainz call
+ *   Spotify says not found  -> ask MusicBrainz, which catalogues bootlegs,
+ *                              regional releases and pre-streaming material
+ *                              that Spotify has never had
+ *
+ * That ordering matters and is not interchangeable. Spotify's absence is weak
+ * evidence (it has no bootlegs, loses tracks to licensing, and is missing much
+ * of pre-2000 music), so absence must never be treated as a verdict. Spotify's
+ * PRESENCE is strong evidence, and presence is the only thing we act on.
+ *
+ * Two accuracy caveats encoded below:
+ *
+ *  1. `release_date` on Spotify is the date of THAT edition, not the earliest
+ *     release of the work. A 2015 album reissued in 2021 reports 2021. We
+ *     therefore collapse editions by normalised title and keep the earliest
+ *     date seen, and we never present a Spotify date as authoritative when
+ *     MusicBrainz has an opinion.
+ *  2. Search is fuzzy in both directions. Asking for artist "Sef" returns
+ *     "Sefyu". Every artist match is verified by exact normalised name, and
+ *     callers get `exact` flags rather than result counts.
+ */
+
+const SP_TOKEN_CACHE = "https://scrobble-drift.internal/spotify-token";
+const SP_ALBUM_CAP = 100;    // albums per artist, keeps subrequests bounded
+const SP_TTL = 604800;       // 7 days. Catalogues change; release dates do not.
+
+/**
+ * Client-credentials token, cached at the edge.
+ *
+ * Client credentials grant no user scope whatsoever: this token can read the
+ * public catalogue and nothing else. It cannot see or touch any Spotify
+ * account, which keeps it in the same read-only category as everything else
+ * here. Cached because the token endpoint is itself rate limited and a fresh
+ * token per request would be the bottleneck.
+ */
+async function spotifyToken(env) {
+  if (!env.SPOTIFY_CLIENT_ID || !env.SPOTIFY_CLIENT_SECRET) {
+    throw new Error("spotify credentials not configured");
+  }
+  const key = new Request(SP_TOKEN_CACHE);
+  const hit = await caches.default.match(key);
+  if (hit) return (await hit.json()).access_token;
+
+  const res = await fetch(SPOTIFY_TOKEN, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      // btoa is fine here: these are ASCII credentials.
+      authorization: "Basic " +
+        btoa(`${env.SPOTIFY_CLIENT_ID}:${env.SPOTIFY_CLIENT_SECRET}`),
+    },
+    body: "grant_type=client_credentials",
+  });
+  if (!res.ok) throw new Error(`spotify token http ${res.status}`);
+  const data = await res.json();
+  if (!data.access_token) throw new Error("spotify token missing");
+
+  // Expire a minute early so an in-flight request never uses a dead token.
+  const ttl = Math.max(60, Number(data.expires_in || 3600) - 60);
+  await caches.default.put(
+    key,
+    new Response(JSON.stringify({ access_token: data.access_token }), {
+      headers: {
+        "content-type": "application/json",
+        "Cache-Control": `max-age=${ttl}`,
+      },
+    }),
+  );
+  return data.access_token;
+}
+
+async function spFetch(path, env) {
+  const token = await spotifyToken(env);
+  const res = await fetch(`${SPOTIFY_API}${path}`, {
+    headers: { authorization: `Bearer ${token}` },
+    cf: { cacheTtl: SP_TTL, cacheEverything: true },
+  });
+  if (res.status === 429) {
+    // Spotify always sends Retry-After on 429. Honour it exactly rather than
+    // guessing, and do NOT trip the Last.fm breaker: these are separate quotas
+    // and stalling scrobble fetching over a Spotify limit would be wrong.
+    const wait = Number(res.headers.get("Retry-After") || 5);
+    throw new Retryable("Spotify is rate limiting us.", Math.min(wait, 60));
+  }
+  if (res.status === 401) {
+    // Token rejected despite the cache. Drop it so the next call re-mints.
+    await caches.default.delete(new Request(SP_TOKEN_CACHE));
+    throw new Error("spotify token rejected");
+  }
+  if (!res.ok) throw new Error(`spotify http ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Normalise for comparison. Mirrors norm() in docs/drift.js deliberately.
+ *
+ * Exported, along with spAlbumToGroup, purely so scripts/test-worker.mjs can
+ * assert them without duplicating the logic. Cloudflare only reads the default
+ * export, so extra named exports cost nothing at runtime, and the alternative
+ * (a second copy of the release-type rules living in a test file) is exactly the
+ * duplication this project already removed once.
+ */
+export const spNorm = (s) => (s || "").toLowerCase()
+  .normalize("NFKD").replace(/\p{M}/gu, "")
+  .replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+
+/**
+ * Map a Spotify album object onto the MusicBrainz release-group shape.
+ *
+ * The whole point: the detectors in docs/drift.js consume ONE shape. Adapting
+ * at the boundary means d0Resolve and d14eReleasedSince need no knowledge of
+ * where an answer came from, and adding a third source later touches only this
+ * function. The alternative, branching on source inside the detectors, would
+ * duplicate the release-type logic per source and rot immediately.
+ *
+ * The mapping is lossy in one direction worth naming: Spotify's "single"
+ * album_type covers both singles and EPs, since it has no EP type at all. A
+ * 5-track "single" is an EP in every sense MusicBrainz recognises, so track
+ * count is used to recover the distinction. It is a heuristic, and it is marked
+ * as one via `source`.
+ */
+export function spAlbumToGroup(al) {
+  const type = al.album_type || "album";
+  const n = Number(al.total_tracks || 0);
+  let primary = "Album";
+  const secondary = [];
+  if (type === "single") primary = n >= 4 && n <= 8 ? "EP" : "Single";
+  else if (type === "compilation") secondary.push("Compilation");
+
+  return {
+    rg_id: `spotify:${al.id}`,
+    title: al.title ?? al.name,
+    primary,
+    secondary,
+    first_release: al.release_date || null,
+    // Everything on Spotify is a licensed commercial release. That is exactly
+    // what MusicBrainz means by Official, and it is what D14e filters on.
+    status: "Official",
+    total_tracks: n || null,
+    url: al.external_urls?.spotify || null,
+    source: "spotify",
+  };
+}
+
+/**
+ * Resolve an artist name to their album list.
+ *
+ * Two subrequests in the common case (search, then one album page), never more
+ * than five, which keeps this far inside the free plan's 50-subrequest ceiling
+ * and its 10ms CPU budget. Tracklists are deliberately NOT fetched here: doing
+ * both in one request would blow the CPU budget on JSON parsing for prolific
+ * artists. The browser pipelines the two calls instead.
+ */
+async function spArtistAlbums(url, env, cors) {
+  const artist = (url.searchParams.get("artist") || "").slice(0, 200);
+  if (!artist) return json({ error: "artist required" }, 400, cors);
+
+  const found = await spFetch(
+    `/search?type=artist&limit=5&q=${encodeURIComponent(artist)}`, env);
+
+  const want = spNorm(artist);
+  const items = found.artists?.items || [];
+  // Exact normalised match only. Spotify happily returns "Sefyu" for "Sef",
+  // and silently analysing the wrong artist's catalogue is worse than no
+  // answer at all: it would produce confident, wrong "already released" claims.
+  const hit = items.find((a) => spNorm(a.name) === want);
+  if (!hit) {
+    return json({ found: false, artist, near: items.slice(0, 3).map((a) => a.name) },
+                200, { ...cors, "Cache-Control": "public, max-age=86400" });
+  }
+
+  const albums = [];
+  let next = `/artists/${hit.id}/albums` +
+             `?include_groups=album,single,compilation&limit=50`;
+  // `appears_on` is excluded on purpose. It pulls in every playlist-style
+  // compilation and other artists' records that merely feature this artist,
+  // which would make almost any track look "officially released".
+  while (next && albums.length < SP_ALBUM_CAP) {
+    const page = await spFetch(next, env);
+    for (const al of page.items || []) {
+      albums.push({
+        id: al.id,
+        name: al.name,
+        album_type: al.album_type,
+        total_tracks: al.total_tracks,
+        release_date: al.release_date,
+        url: al.external_urls?.spotify || null,
+      });
+    }
+    next = page.next ? page.next.replace(SPOTIFY_API, "") : null;
+  }
+
+  return json({
+    found: true,
+    artist_id: hit.id,
+    artist_name: hit.name,
+    albums,
+    truncated: albums.length >= SP_ALBUM_CAP,
+  }, 200, { ...cors, "Cache-Control": "public, max-age=86400" });
+}
+
+/**
+ * Tracklists for up to 20 albums in ONE upstream call.
+ *
+ * This is where the throughput comes from. An artist with 40 releases needs two
+ * calls to yield every title they have ever officially put out, and that single
+ * answer resolves every one of that artist's tracks in the library at once. The
+ * per-track search approach would have cost one call per track.
+ */
+async function spAlbumTracks(url, env, cors) {
+  const ids = (url.searchParams.get("ids") || "")
+    .split(",").map((s) => s.trim()).filter((s) => /^[A-Za-z0-9]{10,30}$/.test(s));
+  if (!ids.length) return json({ error: "ids required" }, 400, cors);
+  if (ids.length > 20) return json({ error: "max 20 ids" }, 400, cors);
+
+  const data = await spFetch(`/albums?ids=${ids.join(",")}`, env);
+
+  const out = [];
+  for (const al of data.albums || []) {
+    if (!al) continue;                       // Spotify returns null for bad ids
+    const group = spAlbumToGroup(al);
+    for (const t of al.tracks?.items || []) {
+      out.push({
+        title: t.name,
+        // Carried so the caller can tell "Drake feat. 21 Savage" apart from a
+        // Drake solo cut without a second lookup. D8 needs exactly this.
+        artists: (t.artists || []).map((a) => a.name),
+        disc: t.disc_number || 1,
+        n: t.track_number || null,
+        album: group,
+      });
+    }
+  }
+  // The album endpoint caps embedded tracklists at 50 per album. Beyond that a
+  // separate paginated call would be needed; flagged rather than silently
+  // truncating, because a missing track would read as "never released".
+  const partial = (data.albums || []).some(
+    (al) => al && Number(al.total_tracks || 0) > (al.tracks?.items?.length || 0));
+
+  return json({ tracks: out, partial }, 200,
+              { ...cors, "Cache-Control": "public, max-age=86400" });
+}
+
+/**
+ * Does an album with this title exist for this artist?
+ *
+ * The Spotify-side answer to the same question mbReleaseGroup answers, used
+ * first when settling era names like "Drip Season" versus "Drip Season 3".
+ * Same contract, same `exists` / `matches` / `near` shape, so the caller can
+ * treat the two sources interchangeably and fall through on a miss.
+ */
+async function spAlbum(url, env, cors) {
+  const artist = (url.searchParams.get("artist") || "").slice(0, 200);
+  const title = (url.searchParams.get("title") || "").slice(0, 200);
+  if (!artist || !title) {
+    return json({ error: "artist and title required" }, 400, cors);
+  }
+
+  const q = `album:${JSON.stringify(title)} artist:${JSON.stringify(artist)}`;
+  const data = await spFetch(
+    `/search?type=album&limit=20&q=${encodeURIComponent(q)}`, env);
+
+  const wantTitle = spNorm(title);
+  const wantArtist = spNorm(artist);
+  const groups = (data.albums?.items || []).map((al) => ({
+    ...spAlbumToGroup(al),
+    // Both must match. Title alone is not enough: a search for a rare era name
+    // can surface a same-titled record by a different artist entirely.
+    exact: spNorm(al.name) === wantTitle &&
+           (al.artists || []).some((a) => spNorm(a.name) === wantArtist),
+  }));
+
+  return json({
+    exists: groups.some((g) => g.exact),
+    matches: groups.filter((g) => g.exact).slice(0, 5),
+    near: groups.filter((g) => !g.exact).slice(0, 5),
+  }, 200, { ...cors, "Cache-Control": "public, max-age=86400" });
 }

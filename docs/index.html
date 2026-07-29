@@ -53,11 +53,12 @@
            align-items:flex-start;color:var(--dim);font-size:12.5px">
       <input type="checkbox" id="resolve" checked
              style="min-width:auto;width:auto;margin-top:2px">
-      <span>Resolve against MusicBrainz. Adds the consolidation target for each
+      <span>Look up real release data. Adds the consolidation target for each
       split album, and checks whether any of your unreleased material has since
-      had an official release. Accurate but slow: MusicBrainz allows one lookup
-      per second, so this can add several minutes. Results appear before this
-      runs and update as it finishes.</span>
+      had an official release. Spotify is checked first because it answers a
+      whole artist at once; anything it has never had falls through to
+      MusicBrainz, which is slower but knows about bootlegs and pre-streaming
+      releases. Results appear before this runs and update as it finishes.</span>
     </label>
 
     <div id="prog" class="hide">
@@ -134,6 +135,7 @@ import {
 } from "./drift.js";
 import { apiBase, isConfigured } from "./config.js";
 import * as store from "./store.js";
+import { fetchCatalogue, matchTrack, byArtist, estimate } from "./spotify.js";
 
 const $ = (id) => document.getElementById(id);
 const N = (n) => (n ?? 0).toLocaleString();
@@ -293,12 +295,23 @@ $("stop").onclick = () => { abort = true; $("status").textContent = "stopping…
  * deployment looks identical to a protected one. That is the wrong failure to
  * discover after posting the link somewhere busy, so surface it loudly here.
  */
+/**
+ * Whether the Worker has Spotify credentials.
+ *
+ * Not a feature flag anyone chooses: Spotify is a pure speed optimisation over
+ * the MusicBrainz path and produces the same findings either way, so there is
+ * nothing for a visitor to decide. If it is unavailable the scan is slower and
+ * identically accurate, which is why this defaults to false and never blocks.
+ */
+let spotifyOn = false;
+
 (async () => {
   if (!isConfigured() && !localStorage.getItem("drift_api")) return;
   try {
     const res = await fetch(`${apiBase().replace(/\/+$/, "")}/api/health`);
     if (!res.ok) return;
     const h = await res.json();
+    spotifyOn = Boolean(h.spotify);
     const off = Object.entries(h.limiters || {})
       .filter(([, on]) => !on).map(([k]) => k);
     if (!off.length) return;
@@ -513,12 +526,12 @@ async function resolvePhase(scrobbles, apiKey) {
   // Era names awaiting a sequel-vs-typo ruling are looked up too, so those
   // findings get settled by evidence rather than dropped as guesses.
   const eraJobs = eraVerificationPlan(report.issues);
-  const total = plan.length + eraJobs.length;
 
   const recCache = new Map();
   const rgCache = new Map();
   const key = (a, t) => `${a}␟${t}`.toLowerCase();
   let done = 0, failed = 0, cacheHits = 0;
+  let total = plan.length + eraJobs.length;
   const started = Date.now();
 
   const tick = (label) => {
@@ -592,14 +605,156 @@ async function resolvePhase(scrobbles, apiKey) {
     return null;
   }
 
+  /**
+   * One Spotify call. Same retry logic, an eighth of the pacing.
+   *
+   * 130ms rather than 1000ms because Spotify's limit is roughly two orders of
+   * magnitude above MusicBrainz's, and unlike MusicBrainz it tells us exactly
+   * how long to wait via Retry-After instead of blocking the IP.
+   */
+  // If Spotify is broken rather than merely unhelpful, stop paying for it. A
+  // missing credential or a rejected token fails identically to "artist not
+  // found" from the caller's point of view, and without this a broken Spotify
+  // would add one wasted round trip per artist on top of the full MusicBrainz
+  // run. Reset on any success, so a transient blip does not disable it.
+  let spFails = 0;
+  const SP_GIVE_UP = 5;
+
+  async function spPaced(path, attempts = 3) {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      if (abort) return null;
+      const t0 = Date.now();
+      let retryIn = 0;
+      try {
+        const res = await fetch(`${base}${path}`);
+        if (res.status === 429) {
+          const b = await res.json().catch(() => ({}));
+          retryIn = Number(res.headers.get("Retry-After") || b.retry_after || 5);
+        } else if (res.ok) {
+          const out = await res.json();
+          spFails = 0;
+          const spent = Date.now() - t0;
+          if (spent < 130) await sleep(130 - spent);
+          return out;
+        } else if (res.status >= 500) {
+          retryIn = 2 * attempt;
+        } else {
+          spFails++;
+          return null;                                    // 4xx: will not fix
+        }
+      } catch {
+        retryIn = 2 * attempt;
+      }
+      if (attempt === attempts) { spFails++; return null; }
+      await waitVisibly(retryIn, retryIn >= 10
+        ? "Spotify asked us to slow down." : "Lookup failed, retrying.");
+    }
+    return null;
+  }
+
   $("fill").style.width = "0";
 
+  /* ------------------------------------------- Phase A: Spotify catalogues */
+  /*
+   * Ask Spotify per ARTIST, not per track. One artist's catalogue answers every
+   * one of their tracks at once, so a library of 4,000 era tracks across 250
+   * artists costs ~800 calls at 5/s rather than 4,000 at 1/s. Anything Spotify
+   * has never heard of falls through to MusicBrainz below, unchanged: Spotify's
+   * silence is not evidence, only its confirmation is.
+   */
+  let mbPlan = plan;
+  let spHits = 0;
+
+  if (spotifyOn) {
+    const artists = byArtist(plan);
+    const est = estimate(artists);
+    total = artists.length + eraJobs.length + plan.length;
+
+    $("status").textContent =
+      `Checking ${N(est.tracks)} tracks across ${N(est.artists)} artists ` +
+      `against Spotify first (about ${est.seconds > 90
+        ? Math.round(est.seconds / 60) + " min" : est.seconds + "s"})…`;
+
+    const misses = [];
+    for (const group of artists) {
+      if (abort) break;
+
+      if (spFails >= SP_GIVE_UP) {
+        // Hand the rest straight to MusicBrainz rather than burning a call per
+        // artist on something that is clearly down.
+        spotifyOn = false;
+        for (const g of artists.slice(artists.indexOf(group))) misses.push(...g.jobs);
+        break;
+      }
+
+      // Catalogues are cached on disk under their own kind, so a rescan or a
+      // resumed scan re-reads them for free. Release history is immutable.
+      let cat = await store.getLookup("spcat", group.artist, "*");
+      if (cat) {
+        // Maps do not survive JSON, so the index is rehydrated on read.
+        cat = { ...cat, titles: new Map(cat.titles || []) };
+        cacheHits++;
+      } else {
+        cat = await fetchCatalogue(group.artist, spPaced);
+        // Never persist a failed call. fetchCatalogue flags the difference
+        // between "Spotify has no such artist" (an answer, worth caching) and
+        // "the call failed" (not an answer). Caching the latter would write a
+        // permanent false negative for an artist who is on Spotify.
+        if (!cat.error) {
+          await store.putLookup("spcat", group.artist, "*",
+                                { ...cat, titles: [...cat.titles] });
+        }
+      }
+
+      for (const job of group.jobs) {
+        const hit = matchTrack(cat, job.track);
+        if (hit) {
+          recCache.set(key(job.artist, job.track), hit);
+          spHits++;
+          done++;                       // this track needs no MusicBrainz call
+        } else {
+          misses.push(job);
+        }
+      }
+      tick(`Spotify: ${N(spHits)} of ${N(plan.length)} tracks resolved`);
+    }
+
+    // No re-baseline needed: every job is either a hit or a miss, so
+    // spHits + misses.length === plan.length and the total set above already
+    // holds. Ticking once per resolved track keeps the bar moving smoothly
+    // through the fast phase instead of jumping once per artist.
+    mbPlan = misses;
+  }
+
+  /* ----------------------------------- Phase B: era names, Spotify then MB */
   for (const job of eraJobs) {
     if (abort) break;
-    const r = await paced("/api/mb/release-group",
-                          { artist: job.artist, title: job.title }, 3, "rg");
+    let r = null;
+
+    // Era names are album titles, so Spotify's album search answers the same
+    // question. Only a positive is usable: an era name absent from Spotify is
+    // the overwhelmingly common case for unreleased projects, and MusicBrainz
+    // is the one that catalogues those.
+    if (spotifyOn) {
+      // Cached under its own kind so a rescan skips it. Only positives are
+      // cached: a negative must stay re-askable, because it is not an answer.
+      const hit = await store.getLookup("spalb", job.artist, job.title);
+      if (hit) { r = hit; cacheHits++; }
+      else {
+        const sp = await spPaced("/api/spotify/album?" + new URLSearchParams(
+          { artist: job.artist, title: job.title }));
+        if (sp?.exists) {
+          r = sp;
+          await store.putLookup("spalb", job.artist, job.title, sp);
+        }
+      }
+    }
+    if (!r) {
+      r = await paced("/api/mb/release-group",
+                      { artist: job.artist, title: job.title }, 3, "rg");
+    }
     if (r) rgCache.set(key(job.artist, job.title), r);
-    tick("Checking era names against MusicBrainz");
+    tick("Checking era names");
   }
 
   // Apply the era ruling straight away: it can only remove or sharpen findings,
@@ -610,12 +765,19 @@ async function resolvePhase(scrobbles, apiKey) {
     render();
   }
 
-  for (const job of plan) {
+  /* --------------------------------- Phase C: MusicBrainz on the residual */
+  /*
+   * Only the tracks Spotify could not confirm. This is the genuinely unreleased
+   * material plus anything Spotify has lost to licensing, which is exactly the
+   * set MusicBrainz is better at, so the slow source is spent where it is
+   * actually the stronger one.
+   */
+  for (const job of mbPlan) {
     if (abort) break;
     const r = await paced("/api/mb/recording",
                           { artist: job.artist, track: job.track }, 3, "rec");
     if (r) recCache.set(key(job.artist, job.track), r);
-    tick("Resolving releases against MusicBrainz");
+    tick(`Resolving remaining ${N(mbPlan.length)} against MusicBrainz`);
   }
 
   const cache = recCache;
@@ -645,7 +807,9 @@ async function resolvePhase(scrobbles, apiKey) {
   report.hygiene = hygieneScore(report.profile.scrobbles_ingested, report.issues);
   report.impact = chartImpact(rest, resolved.length ? resolved : splits);
   report.resolved = true;
-  report.musicbrainz_lookups = done;
+  report.lookups = done;
+  report.spotify_resolved = spHits;
+  report.musicbrainz_lookups = mbPlan.length;
   render();
 }
 
