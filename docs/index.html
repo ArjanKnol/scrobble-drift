@@ -33,22 +33,56 @@
       <input id="user" placeholder="Last.fm username" autocomplete="off"
              spellcheck="false" required>
       <select id="depth">
-        <option value="10000" selected>Last 10,000 scrobbles</option>
-        <option value="2000">Last 2,000 (quick look)</option>
-        <option value="0">Entire history (slow)</option>
+        <option value="2000" selected>Last 2,000 scrobbles (~15s)</option>
+        <option value="10000">Last 10,000 (~1 min)</option>
+        <option value="50000">Last 50,000 (~5 min)</option>
+        <option value="0">Entire history (10 min or more)</option>
       </select>
       <button id="go">Scan</button>
       <button id="stop" class="ghost hide" type="button">Stop</button>
     </form>
+
+    <label class="chk" style="margin-top:11px;display:flex;gap:7px;
+           align-items:flex-start;color:var(--dim);font-size:12.5px">
+      <input type="checkbox" id="resolve" checked
+             style="min-width:auto;width:auto;margin-top:2px">
+      <span>Resolve against MusicBrainz. Adds the consolidation target for each
+      split album, and checks whether any of your unreleased material has since
+      had an official release. Accurate but slow: MusicBrainz allows one lookup
+      per second, so this can add several minutes. Results appear before this
+      runs and update as it finishes.</span>
+    </label>
+
     <div id="prog" class="hide">
       <div class="bar"><i id="fill" style="width:0"></i></div>
       <div class="note" id="status"></div>
+      <div class="note hide" id="waiting"></div>
     </div>
+
     <p class="note">
       Read-only, and nothing is stored. Your scrobbles are fetched straight into
       this browser tab and vanish when you close it. No account, no login, no
       database, no analytics.
     </p>
+    <p class="note">
+      Everyone shares one Last.fm API key, so deep scans are rate limited to
+      keep it alive for everybody.
+      <a href="#" id="ownkey-toggle">Use your own API key</a> to skip the queue
+      entirely.
+    </p>
+
+    <div id="ownkey" class="hide" style="margin-top:10px">
+      <input id="apikey" placeholder="Your 32-character Last.fm API key"
+             autocomplete="off" spellcheck="false" style="min-width:330px">
+      <p class="note">
+        Get one free in two minutes at
+        <a href="https://www.last.fm/api/account/create" target="_blank"
+           rel="noopener noreferrer">last.fm/api/account/create</a>.
+        Paste the <strong>API key</strong>, not the shared secret. It is used
+        for this scan only: never stored, never logged, and gone when you close
+        the tab. Only the key field is needed.
+      </p>
+    </div>
   </div>
 
   <div id="out"></div>
@@ -78,7 +112,10 @@
 </div>
 
 <script type="module">
-import { analyse } from "./drift.js";
+import {
+  analyse, partitionEra, resolutionPlan, d0Resolve, d14eReleasedSince,
+  eraVerificationPlan, verifyEraNames, hygieneScore, chartImpact,
+} from "./drift.js";
 import { apiBase, isConfigured } from "./config.js";
 
 const $ = (id) => document.getElementById(id);
@@ -86,9 +123,73 @@ const N = (n) => (n ?? 0).toLocaleString();
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const KEY = (s) => esc(String(s).replace("␟", " — "));
+
+/**
+ * Deep links into the scanned user's own Last.fm library.
+ *
+ * The structure is stable and fully derivable, so no lookups are needed:
+ *   /user/<user>/library/music/<artist>
+ *   /user/<user>/library/music/<artist>/<album>
+ *   /user/<user>/library/music/<artist>/_/<track>     ("_" stands in for album)
+ *
+ * Last.fm uses "+" for spaces in these paths rather than %20, and everything
+ * else is percent-encoded. encodeURIComponent leaves some characters alone that
+ * do need escaping here, so they are handled explicitly.
+ */
+const lfmSeg = (s) => encodeURIComponent(String(s ?? "").trim())
+  .replace(/%20/g, "+")
+  .replace(/'/g, "%27").replace(/\(/g, "%28").replace(/\)/g, "%29")
+  .replace(/\*/g, "%2A").replace(/!/g, "%21").replace(/~/g, "%7E");
+
+function libUrl(user, artist, { album, track } = {}) {
+  if (!user || !artist) return null;
+  const base = `https://www.last.fm/user/${lfmSeg(user)}/library/music/${lfmSeg(artist)}`;
+  if (track) return `${base}/_/${lfmSeg(track)}`;
+  if (album) return `${base}/${lfmSeg(album)}`;
+  return base;
+}
+
+/** Links for one issue, derived from whichever fields it carries. */
+function issueLinks(issue, user) {
+  const out = [];
+  const artist = issue.artist;
+  const seen = new Set();
+  const push = (label, href) => {
+    if (!href || seen.has(href)) return;
+    seen.add(href);
+    out.push(`<a href="${href}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`);
+  };
+
+  if (issue.track && artist) push(`open '${issue.track}'`, libUrl(user, artist, { track: issue.track }));
+  for (const m of issue.members || []) {
+    if (m.album && artist && m.album !== "(no album)") {
+      push(m.album, libUrl(user, artist, { album: m.album }));
+    } else if (m.artist) {
+      push(m.artist, libUrl(user, m.artist));
+    } else if (m.track && artist) {
+      push(m.track, libUrl(user, artist, { track: m.track }));
+    }
+  }
+  if (!out.length && artist) push(artist, libUrl(user, artist));
+  return out.slice(0, 6);
+}
 const col = (v) => v >= 85 ? "var(--good)" : v >= 60 ? "var(--warn)" : "var(--bad)";
 
 let abort = false, report = null, fDet = "", fCls = "";
+
+// Pages per request. Kept small on purpose: each page is 200 scrobbles, and a
+// Worker on the free plan gets 10ms CPU per request. Parsing 8 pages (1,600
+// track objects) stays well inside that. At 15 a deep scan would intermittently
+// trip the limit, and Cloudflare's resource-limit error page carries no CORS
+// headers, so the browser reports it as an unreachable proxy rather than what
+// it is. Smaller batches, more of them.
+const PAGES_PER_REQUEST = 8;
+
+$("ownkey-toggle").onclick = (e) => {
+  e.preventDefault();
+  $("ownkey").classList.toggle("hide");
+  if (!$("ownkey").classList.contains("hide")) $("apikey").focus();
+};
 
 // Fail loudly and usefully rather than throwing a CORS error at whoever opens
 // the page before the Worker exists.
@@ -112,26 +213,81 @@ npx wrangler deploy</pre></div>
 
 $("stop").onclick = () => { abort = true; $("status").textContent = "stopping…"; };
 
+/**
+ * Ask the Worker whether its rate limiters are actually live.
+ *
+ * The Worker fails OPEN when a limiter binding is absent, so an unprotected
+ * deployment looks identical to a protected one. That is the wrong failure to
+ * discover after posting the link somewhere busy, so surface it loudly here.
+ */
+(async () => {
+  if (!isConfigured() && !localStorage.getItem("drift_api")) return;
+  try {
+    const res = await fetch(`${apiBase().replace(/\/+$/, "")}/api/health`);
+    if (!res.ok) return;
+    const h = await res.json();
+    const off = Object.entries(h.limiters || {})
+      .filter(([, on]) => !on).map(([k]) => k);
+    if (!off.length) return;
+    $("out").insertAdjacentHTML("beforebegin", `
+      <div class="panel" style="margin-top:16px;border-color:var(--warn)">
+        <strong>Rate limiting is not active (${esc(off.join(", "))}).</strong>
+        <p class="note">The Worker allows unlimited requests in this state, so
+        the shared Last.fm key is unprotected. Fine for testing, but do not
+        share this link publicly until the limiter bindings are deployed. Run
+        <code>npx wrangler deploy</code> from <code>worker/</code> and reload.</p>
+      </div>`);
+  } catch { /* health check is advisory; never block the UI on it */ }
+})();
+
 $("f").onsubmit = async (e) => {
   e.preventDefault();
   const user = $("user").value.trim();
   if (!/^[A-Za-z0-9_.-]{2,20}$/.test(user)) {
     return fail("That does not look like a Last.fm username.");
   }
+  const apiKey = $("apikey").value.trim();
+  if (apiKey && !/^[a-f0-9]{32}$/i.test(apiKey)) {
+    return fail("That API key does not look right. It should be 32 characters, " +
+                "digits and letters a to f. Make sure you pasted the API key " +
+                "and not the shared secret.");
+  }
+
   abort = false;
   $("go").disabled = true;
   $("stop").classList.remove("hide");
   $("prog").classList.remove("hide");
+  $("waiting").classList.add("hide");
   $("out").innerHTML = "";
+  $("fill").style.width = "0";
+
+  const cap = Number($("depth").value);
+  $("status").textContent = cap
+    ? `Starting scan of ${N(cap)} scrobbles…`
+    : "Starting full history scan. This takes a few minutes on a big library.";
+
   try {
-    const cap = Number($("depth").value);
-    const scrobbles = await fetchAll(user, cap);
-    if (!scrobbles.length) return fail("No scrobbles found for that user.");
-    $("status").textContent = `analysing ${N(scrobbles.length)} scrobbles…`;
-    await new Promise((r) => setTimeout(r, 30));   // let the browser paint
+    const scrobbles = await fetchAll(user, cap, apiKey);
+    if (!scrobbles.length) {
+      return fail(abort ? "Stopped before anything was fetched."
+                        : "No scrobbles found for that user.");
+    }
+    // The analysis is one synchronous pass and cannot show progress from
+    // inside. On a full 139k history it is ~16 seconds of blocked main thread,
+    // mostly the all-pairs artist comparison, which is deliberately not
+    // shortcut for accuracy. Warn plainly so it does not look like a crash.
+    $("status").textContent = scrobbles.length > 40000
+      ? `Analysing ${N(scrobbles.length)} scrobbles. This blocks the tab for ` +
+        `up to 30 seconds and cannot show progress. Do not close it.`
+      : `Analysing ${N(scrobbles.length)} scrobbles in your browser…`;
+    await sleep(60);                  // let the browser paint before the CPU work
     report = analyse(scrobbles);
     report.user = user;
-    render();
+    render();                         // show local findings immediately
+
+    if ($("resolve").checked && !abort) {
+      await resolvePhase(scrobbles, apiKey);
+    }
     $("prog").classList.add("hide");
   } catch (err) {
     fail(err.message || String(err));
@@ -141,47 +297,250 @@ $("f").onsubmit = async (e) => {
   }
 };
 
-async function fetchAll(user, cap) {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Visible countdown, so a wait never looks like a hang. */
+async function waitVisibly(seconds, why) {
+  const box = $("waiting");
+  box.classList.remove("hide");
+  for (let s = seconds; s > 0 && !abort; s--) {
+    box.innerHTML = `<strong style="color:var(--warn)">${esc(why)}</strong><br>
+      Retrying in ${s}s. Your progress so far is kept.`;
+    await sleep(1000);
+  }
+  box.classList.add("hide");
+}
+
+async function fetchAll(user, cap, apiKey) {
   const base = apiBase().replace(/\/+$/, "");
   const all = [];
-  let from = 1, totalPages = null, totalScrobbles = null;
+  let from = 1, totalPages = null, totalScrobbles = null, attempt = 0;
 
   while (!abort) {
+    const qs = new URLSearchParams({
+      user, from: String(from), count: String(PAGES_PER_REQUEST),
+    });
+    if (apiKey) qs.set("key", apiKey);
+
     let res;
     try {
-      res = await fetch(
-        `${base}/api/scrobbles?user=${encodeURIComponent(user)}&from=${from}&count=15`);
+      res = await fetch(`${base}/api/scrobbles?${qs}`);
     } catch {
-      throw new Error("Could not reach the API proxy. Is the Worker deployed, " +
-                      "and is this origin in its ALLOWED_ORIGINS?");
+      // A thrown fetch means no readable response. Usually the Worker itself
+      // failed: an exception or a resource-limit error page, neither of which
+      // carries CORS headers, so the browser cannot show us the real status.
+      // Retry a few times before blaming the deployment.
+      if (++attempt <= 3) {
+        await waitVisibly(4 * attempt, "Hit a snag talking to the server.");
+        continue;
+      }
+      throw new Error(
+        "Could not reach the API. Either the Worker is not deployed, this " +
+        "origin is missing from its ALLOWED_ORIGINS, or it is failing. " +
+        (all.length ? `Kept the ${N(all.length)} scrobbles fetched so far.` : ""));
     }
+
     if (res.status === 404) throw new Error("No such Last.fm user.");
-    if (res.status === 429) throw new Error("Rate limited. Try again in a while.");
+
+    if (res.status === 429) {
+      const body = await res.json().catch(() => ({}));
+      const wait = Number(res.headers.get("Retry-After") || body.retry_after || 60);
+      if (++attempt <= 4) {
+        await waitVisibly(wait, body.error || "Rate limited.");
+        continue;
+      }
+      throw new Error((body.error || "Rate limited.") +
+        (all.length ? ` Kept the ${N(all.length)} scrobbles fetched so far.` : ""));
+    }
+
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
+      if (++attempt <= 3) {
+        await waitVisibly(4 * attempt, body.error || `Server error ${res.status}.`);
+        continue;
+      }
       throw new Error(body.error || `Request failed (${res.status}).`);
     }
+
+    attempt = 0;                       // a clean response resets the budget
     const data = await res.json();
     totalPages ??= data.total_pages;
     totalScrobbles ??= data.total_scrobbles;
     all.push(...data.scrobbles);
 
     const target = cap ? Math.min(cap, totalScrobbles) : totalScrobbles;
-    $("fill").style.width =
-      Math.min(100, (all.length / Math.max(target, 1)) * 100) + "%";
+    const pct = Math.min(100, (all.length / Math.max(target, 1)) * 100);
+    $("fill").style.width = pct + "%";
     $("status").textContent =
-      `${N(all.length)} of ${N(target)} scrobbles… (page ${from} of ${N(totalPages)})`;
+      `Fetching ${N(all.length)} of ${N(target)} scrobbles` +
+      (data.shared_key === false ? " (your own key)" : "") +
+      ` · page ${N(from)} of ${N(totalPages)}`;
 
     if (cap && all.length >= cap) { all.length = cap; break; }
     if (!data.next) break;
     from = data.next;
   }
+
+  if (abort && all.length) {
+    $("status").textContent =
+      `Stopped early. Analysing the ${N(all.length)} scrobbles fetched.`;
+  }
   return all;
+}
+
+/**
+ * MusicBrainz resolution phase.
+ *
+ * Runs AFTER the local findings are already on screen, so the page is useful
+ * immediately and improves as this completes. Sequential by necessity:
+ * MusicBrainz allows one request per second and blocks IPs that ignore it.
+ *
+ * Pacing comes mostly from the round trip itself rather than a timer, which
+ * matters because Chrome clamps timers to once per minute in tabs hidden for
+ * over five minutes. Network latency is not throttled, so a backgrounded tab
+ * slows down instead of stalling. It still warns, because slow is confusing.
+ */
+async function resolvePhase(scrobbles, apiKey) {
+  const base = apiBase().replace(/\/+$/, "");
+  const plan = resolutionPlan(scrobbles);
+  if (!plan.length) return;
+
+  // Era names awaiting a sequel-vs-typo ruling are looked up too, so those
+  // findings get settled by evidence rather than dropped as guesses.
+  const eraJobs = eraVerificationPlan(report.issues);
+  const total = plan.length + eraJobs.length;
+
+  const recCache = new Map();
+  const rgCache = new Map();
+  const key = (a, t) => `${a}␟${t}`.toLowerCase();
+  let done = 0, failed = 0;
+  const started = Date.now();
+
+  const tick = (label) => {
+    done++;
+    $("fill").style.width = ((done / total) * 100) + "%";
+    const elapsed = (Date.now() - started) / 1000;
+    const left = Math.round((elapsed / done) * (total - done));
+    $("status").textContent =
+      `${label}: ${N(done)} of ${N(total)} lookups` +
+      (failed ? ` (${N(failed)} not found)` : "") +
+      ` · about ${left > 90 ? Math.round(left / 60) + " min" : left + "s"} left`;
+
+    if (document.hidden) {
+      $("waiting").classList.remove("hide");
+      $("waiting").innerHTML =
+        `<strong style="color:var(--warn)">This tab is in the background.</strong>
+         Browsers throttle background tabs, so this will crawl until you come
+         back to it. Nothing is lost.`;
+    } else {
+      $("waiting").classList.add("hide");
+    }
+  };
+
+  /**
+   * One paced MusicBrainz call, retried on rate limits and transient errors.
+   *
+   * Earlier this abandoned the lookup on a 429: it waited, then moved to the
+   * next job, silently losing that finding. Now the wait is followed by another
+   * attempt, so a rate limit costs time rather than accuracy.
+   */
+  async function paced(path, params, attempts = 3) {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      if (abort) return null;
+      const t0 = Date.now();
+      let retryIn = 0;
+      try {
+        const res = await fetch(`${base}${path}?` + new URLSearchParams(params));
+        if (res.status === 429) {
+          retryIn = Number(res.headers.get("Retry-After") || 30);
+        } else if (res.ok) {
+          const out = await res.json();
+          const spent = Date.now() - t0;
+          if (spent < 1000) await sleep(1000 - spent);   // pace the next call
+          return out;
+        } else if (res.status >= 500) {
+          retryIn = 3 * attempt;                          // transient upstream
+        } else {
+          failed++;                                       // 4xx: will not fix
+          return null;
+        }
+      } catch {
+        retryIn = 3 * attempt;                            // network blip
+      }
+
+      if (attempt === attempts) { failed++; return null; }
+      await waitVisibly(retryIn,
+        retryIn >= 20 ? "MusicBrainz asked us to slow down."
+                      : "Lookup failed, retrying.");
+    }
+    return null;
+  }
+
+  $("fill").style.width = "0";
+
+  for (const job of eraJobs) {
+    if (abort) break;
+    const r = await paced("/api/mb/release-group",
+                          { artist: job.artist, title: job.title });
+    if (r) rgCache.set(key(job.artist, job.title), r);
+    tick("Checking era names against MusicBrainz");
+  }
+
+  // Apply the era ruling straight away: it can only remove or sharpen findings,
+  // so the list gets more honest before the slower phase even finishes.
+  if (rgCache.size) {
+    report.issues = verifyEraNames(report.issues, (artist, title) =>
+      rgCache.get(key(artist, title))?.exists);
+    render();
+  }
+
+  for (const job of plan) {
+    if (abort) break;
+    const r = await paced("/api/mb/recording",
+                          { artist: job.artist, track: job.track });
+    if (r) recCache.set(key(job.artist, job.track), r);
+    tick("Resolving releases against MusicBrainz");
+  }
+
+  const cache = recCache;
+  if (!cache.size && !rgCache.size) return;
+
+  // Merge the resolved findings back in, then recompute the parts that depend
+  // on them. D4 splits are replaced by their resolved D0 equivalents.
+  const lookup = (a, t) => cache.get(key(a, t));
+  const { era, rest } = partitionEra(scrobbles);
+  const splits = report.issues.filter((i) => i.detector === "D4");
+  const resolved = d0Resolve(splits, lookup);
+  const released = d14eReleasedSince(era, lookup);
+
+  const resolvedIds = new Set(resolved.map((i) => i.title));
+  report.issues = [
+    ...report.issues.filter((i) => !(i.detector === "D4" && resolvedIds.has(i.title))),
+    ...resolved, ...released,
+  ].sort((a, b) => (b.plays_affected || 0) - (a.plays_affected || 0));
+
+  report.summary_by_detector = {};
+  for (const i of report.issues) {
+    report.summary_by_detector[i.detector] ??= { count: 0, plays_affected: 0 };
+    report.summary_by_detector[i.detector].count++;
+    report.summary_by_detector[i.detector].plays_affected += i.plays_affected || 0;
+  }
+  report.issues_total = report.issues.length;
+  report.hygiene = hygieneScore(report.profile.scrobbles_ingested, report.issues);
+  report.impact = chartImpact(rest, resolved.length ? resolved : splits);
+  report.resolved = true;
+  report.musicbrainz_lookups = done;
+  render();
 }
 
 function fail(msg) {
   $("prog").classList.add("hide");
-  $("out").innerHTML = `<div class="panel err" style="margin-top:16px">${esc(msg)}</div>`;
+  $("out").innerHTML = `
+    <div class="panel err" style="margin-top:16px">
+      ${esc(msg)}
+      <p class="note" style="color:var(--dim)">If this keeps happening, try a
+      shallower scan, or use your own Last.fm API key.</p>
+    </div>`;
 }
 
 const metric = (n, l, c) =>
@@ -284,6 +643,12 @@ function issues() {
         return `<code>${esc(label)}</code>${n !== null ? " " + N(n) : ""}${
           m.looks_like ? ` <span style="opacity:.65">(${esc(m.looks_like)})</span>` : ""}`;
       }).join(" &nbsp;·&nbsp; ")}</div>` : ""}
+      ${(() => {
+        const links = issueLinks(i, report.user);
+        return links.length
+          ? `<div class="mem links">Open in your library: ${links.join(" &nbsp;·&nbsp; ")}</div>`
+          : "";
+      })()}
     </div>`).join("") : `<div class="panel">Nothing matches that filter.</div>`;
 }
 </script>
