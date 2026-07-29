@@ -95,6 +95,46 @@ MusicBrainz enforces **1 request per second** with IP blocking for abuse. The
 limiter is not optional, and lookups are cached permanently in
 `data/mb-cache.json` because release dates do not change.
 
+### Spotify first, MusicBrainz second
+
+That 1/s limit is the slowest thing in a full scan by an order of magnitude:
+4,000 distinct unreleased tracks is 67 minutes of wall clock. Spotify fixes it,
+not by being faster per call, but by answering a **better-shaped question**.
+
+MusicBrainz is asked per track. Spotify will hand over an artist's entire
+official catalogue in two calls, so 4,000 tracks across 250 artists becomes
+~800 calls instead of 4,000, at ~5/s instead of 1/s. Minutes, not hours.
+
+The ordering is not interchangeable, and the asymmetry is the whole design:
+
+| | Meaning | Action |
+|---|---|---|
+| **Present** in Spotify | Strong evidence it was released | Accept, skip MusicBrainz |
+| **Absent** from Spotify | No evidence at all | Ask MusicBrainz |
+
+Spotify's catalogue is a licensing artefact, not a discography: no bootlegs, no
+unofficial releases, patchy pre-2000 coverage, and tracks vanish when a licence
+lapses. Treating absence as a verdict would silently mark released tracks as
+unreleased, which is worse than being slow. So absence is never acted on, and
+the residual that reaches MusicBrainz is small precisely because it is the
+genuinely unreleased material, which is exactly what MusicBrainz is better at.
+
+Two accuracy caveats, both handled in code:
+
+- Spotify's `release_date` is the date of **that edition**, not of the work. A
+  2015 album reissued in 2021 reports 2021. Editions are collapsed by title with
+  the edition qualifier stripped, and the earliest date within a group wins.
+- Spotify has **no EP type**; EPs arrive as `album_type: "single"`. Track count
+  recovers the distinction, which matters because `EP` is one of the three
+  primary types the "released since" detector accepts as official.
+
+Spotify albums are adapted into the MusicBrainz release-group shape **inside the
+Worker**, so the detectors consume one contract and neither knows nor cares
+where an answer came from. Adding a third source touches one function.
+
+Spotify is optional. Without credentials the scan is slower and produces
+identical findings.
+
 ---
 
 ## Hosting
@@ -123,7 +163,12 @@ IndexedDB, and the UI says so plainly rather than claiming otherwise:
 |---|---|
 | Fetched scrobbles | So an interrupted scan resumes instead of starting over |
 | MusicBrainz answers | Release dates and types are historical facts, so a repeat scan is instant rather than another hour at one lookup per second |
+| Spotify catalogues | One artist's full title index, reused across every one of their tracks and across rescans |
 | Scan position | Which user, how deep, which page to continue from |
+
+Catalogue indexes store each album **once** and reference it by index from the
+title map. Inlining the album onto every track measured near 150MB total, which
+competes with the scrobble data for the same quota and fails a large scan.
 
 The API key is **never** persisted, even when a visitor supplies their own. A
 "Clear stored data" link wipes everything and reports current usage.
@@ -148,6 +193,21 @@ cd worker
 npx wrangler secret put LASTFM_API_KEY     # paste the key, never commit it
 npx wrangler deploy
 ```
+
+Optional, for the faster resolution path. Without these the scan is slower and
+produces identical findings, so they are safe to skip:
+
+```bash
+npx wrangler secret put SPOTIFY_CLIENT_ID
+npx wrangler secret put SPOTIFY_CLIENT_SECRET
+npx wrangler deploy
+```
+
+Get them from <https://developer.spotify.com/dashboard>. The Worker uses the
+**client-credentials** flow, which grants no user scope at all: the token can
+read the public catalogue and cannot see or touch any Spotify account. There is
+no redirect URI to configure and no user ever logs in. `/api/health` reports
+whether the frontend can see them.
 
 Paste the URL it prints into `docs/config.js`, replacing the
 `YOUR-SUBDOMAIN` placeholder. Until you do, the site loads and explains exactly
@@ -178,6 +238,7 @@ Everything is free tier, with no card required:
 | Cloudflare Cache API | Free | Used for the circuit breaker |
 | Last.fm API | Free | Contact partners@last.fm before commercial or large-scale use |
 | MusicBrainz | Free | 1 request/second, IP blocking for abuse |
+| Spotify Web API | Free | Client-credentials only, no user scope. No published rate number; 429 carries `Retry-After` |
 
 **Deliberately avoided:** Durable Objects (Workers Paid for the KV-backed
 kind) and Workers KV (its 1,000 writes/day free ceiling made it useless for a
@@ -269,25 +330,38 @@ Actions → **scan** → Run workflow. Or wait for the 1st of the month.
 
 ## Running locally
 
-Python 3.12, no dependencies. Stdlib only, on purpose: nothing to pin, nothing
-to audit, nothing to break in six months.
+Node 20, **zero dependencies**. Nothing to pin, nothing to audit, nothing to
+break in six months. `fetch` is built in.
 
 ```bash
 cp .env.example .env      # then put your key in it, it is git-ignored
-python scripts/run.py                      # local detectors only, ~3 min
-python scripts/run.py --resolve            # also resolve via MusicBrainz
-python scripts/run.py --limit 5000         # quick smoke test
+node scripts/scan.mjs                      # local detectors only, ~3 min
+node scripts/scan.mjs --resolve            # also resolve via MusicBrainz
+node scripts/scan.mjs --resolve --budget 300
+node scripts/scan.mjs --limit 5000         # quick smoke test
 ```
 
-Then open `docs/index.html`, or serve it:
+The scanner **imports its detectors straight from `docs/drift.js`**, the same
+file the browser loads. There is one implementation, so the monthly run and the
+web app cannot disagree. An earlier version kept a parallel Python copy and they
+drifted within days: a bug fixed in one stayed live in the other.
+
+Tests, also no dependencies and no network:
 
 ```bash
-python -m http.server -d docs 8000
+node scripts/test-spotify.mjs   # catalogue indexing, match tiers, editions
+node scripts/test-worker.mjs    # release-type mapping, normaliser agreement
 ```
 
-The first `--resolve` run is the slow one because the MusicBrainz cache is
-empty. `--budget` caps lookups per run, and the busiest issues are resolved
-first so a small budget still lands where it matters.
+Then serve the frontend:
+
+```bash
+npx http-server docs -p 8000    # or any static server
+```
+
+The first `--resolve` run is the slow one because the lookup cache is empty.
+`--budget` caps lookups per run, and the busiest issues are resolved first so a
+small budget still lands where it matters.
 
 ---
 
