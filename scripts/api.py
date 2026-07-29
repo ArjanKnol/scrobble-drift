@@ -14,8 +14,10 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import re
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -227,6 +229,55 @@ class MusicBrainz:
                                    key=lambda g: g["first_release"] or "9999")}
         self.cache[key] = result
         return result
+
+
+    def release_group_exists(self, artist: str, title: str) -> bool | None:
+        """Does a release group with this exact title exist for this artist?
+
+        Used to settle era-name disputes with evidence rather than a heuristic:
+        "Drip Season" and "Drip Season 3" are both real Gunna tapes, whereas
+        "Yhandi" is a typo of "Yandhi", and play counts cannot separate those.
+
+        CRITICAL: MusicBrainz search is fuzzy and will return "Drip Season 3"
+        when asked for "Drip Season", so a non-empty result set is NOT evidence
+        of existence. Only an exact title match after normalisation counts.
+
+        Returns None when the budget is spent, so callers can distinguish
+        "does not exist" from "not checked".
+        """
+        key = f"rg::{artist.lower()}::{title.lower()}"
+        if key in self.cache:
+            return self.cache[key]
+        if self.exhausted:
+            return None
+
+        query = f'artist:"{_lucene(artist)}" AND releasegroup:"{_lucene(title)}"'
+        url = (f"{MB_ROOT}/release-group?query={urllib.parse.quote(query)}"
+               f"&fmt=json&limit=25")
+        self.limiter.wait()
+        self.spent += 1
+        try:
+            data = _get_json(url)
+        except Exception as exc:
+            print(f"  MB release-group lookup failed for {artist} - {title}: {exc}",
+                  file=sys.stderr)
+            return None
+
+        want = _norm_title(title)
+        found = any(_norm_title(g.get("title", "")) == want
+                    for g in data.get("release-groups", []))
+        self.cache[key] = found
+        return found
+
+
+_TITLE_PUNCT = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def _norm_title(text: str) -> str:
+    """Match the normalisation the detectors use, so comparisons agree."""
+    text = unicodedata.normalize("NFKD", text or "")
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", _TITLE_PUNCT.sub(" ", text.lower())).strip()
 
 
 def _lucene(text: str) -> str:
