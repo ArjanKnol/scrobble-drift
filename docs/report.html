@@ -6,7 +6,7 @@
 <title>Scrobble Drift — saved report</title>
 <!-- Version query busts the GitHub Pages asset cache. Keep in step with
      index.html when style.css changes. -->
-<link rel="stylesheet" href="style.css?v=4">
+<link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
 <div class="wrap">
@@ -30,9 +30,12 @@
       <span class="lfm-fallback"><span class="mark" aria-hidden="true">as</span>Last.fm</span>
     </a>
     <span class="sep">|</span>
-    <span>Metadata from
+    <span>Release data from
       <a href="https://musicbrainz.org/" target="_blank"
-         rel="noopener noreferrer">MusicBrainz</a></span>
+         rel="noopener noreferrer">MusicBrainz</a>
+      and
+      <a href="https://developer.spotify.com/documentation/web-api"
+         target="_blank" rel="noopener noreferrer">Spotify</a></span>
     <span class="sep">|</span>
     <span>Not affiliated with Last.fm Ltd.</span>
   </footer>
@@ -59,11 +62,19 @@ fetch('report.json?' + Date.now())
     document.getElementById('app').innerHTML = `
       <div class="panel">
         <strong>No saved report yet.</strong>
-        <p class="note">The monthly scan writes <code>docs/report.json</code>.
-        Run it from Actions → <em>scan</em> → Run workflow, or locally:</p>
-        <div class="setup"><pre>python scripts/run.py --resolve</pre></div>
-        <p class="note">Or <a href="./">scan any library live</a> instead, which
-        needs no saved file.</p>
+        <p class="note">This page is the <em>monitor</em> half of Scrobble Drift.
+        Metadata rot is not a one-off problem: singles keep getting absorbed into
+        albums and catalogues keep getting repackaged, on someone else's
+        schedule. So a scheduled scan runs on the 1st of each month, commits its
+        result to <code>docs/report.json</code>, and this page renders it. The
+        point is the <em>diff</em>: three new things to fix each month is a
+        five-minute job, where a 500-item backlog never gets opened twice.</p>
+        <p class="note">Nothing has been generated yet. Trigger it from
+        Actions → <em>scan</em> → Run workflow, or run it locally:</p>
+        <div class="setup"><pre>node scripts/scan.mjs --resolve</pre></div>
+        <p class="note">You do not need this page at all to use the tool.
+        <a href="./">Scanning a library live</a> needs no saved file and gives
+        the same findings.</p>
       </div>`;
   });
 
@@ -74,7 +85,9 @@ function render() {
   document.getElementById('app').innerHTML = `
     <div class="sub">${esc(d.user)} · ${N(p.scrobbles_ingested)} scrobbles ·
       generated ${when} UTC · ${d.resolved
-        ? `${N(d.musicbrainz_lookups)} MusicBrainz lookups`
+        ? [d.spotify_resolved ? `${N(d.spotify_resolved)} via Spotify` : '',
+           d.musicbrainz_lookups ? `${N(d.musicbrainz_lookups)} via MusicBrainz` : '']
+            .filter(Boolean).join(' · ') || 'release data resolved'
         : 'local detectors only'}</div>
 
     <div class="grid g2">
