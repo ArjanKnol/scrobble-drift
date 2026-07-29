@@ -123,10 +123,16 @@ button.ghost:hover{background:transparent;color:var(--ink);
    and a button is keyboard-focusable so the content is reachable without a
    mouse. The tip lives in a data attribute rather than a hidden element so the
    markup stays a single tag. */
+/* Longhand, not the `font` shorthand. `font:600 10px/1 inherit` looks
+   reasonable and is INVALID: `inherit` is not a legal font-family inside the
+   shorthand, so the browser drops the entire declaration. The icon then got no
+   sizing at all and the tooltip inherited bold text from whatever it sat next
+   to. Longhand cannot fail this way. */
 .i{display:inline-flex;align-items:center;justify-content:center;
-  width:15px;height:15px;padding:0;margin-left:5px;border-radius:99px;
+  width:15px;height:15px;padding:0;margin:0 3px 0 5px;border-radius:99px;
   background:transparent;border:1px solid var(--dim);color:var(--dim);
-  font:600 10px/1 inherit;text-transform:none;letter-spacing:0;
+  font-family:inherit;font-size:10px;font-weight:600;line-height:1;
+  text-transform:none;letter-spacing:0;
   cursor:help;vertical-align:middle;position:relative;flex:0 0 auto}
 .i:hover,.i:focus-visible{background:var(--dim);color:var(--panel);
   border-color:var(--dim);outline:none}
@@ -136,7 +142,8 @@ button.ghost:hover{background:transparent;color:var(--ink);
 .i::after{content:attr(data-tip);position:absolute;left:50%;bottom:calc(100% + 8px);
   transform:translateX(-50%);width:max-content;max-width:min(300px,72vw);
   background:#0a0a0a;color:var(--ink);border:1px solid var(--line);
-  border-radius:7px;padding:9px 11px;font:400 12.5px/1.5 inherit;
+  border-radius:7px;padding:10px 12px;
+  font-family:inherit;font-size:12.5px;font-weight:400;line-height:1.55;
   text-transform:none;letter-spacing:0;text-align:left;white-space:normal;
   opacity:0;visibility:hidden;transition:opacity .12s;z-index:50;
   box-shadow:0 8px 24px rgba(0,0,0,.55);pointer-events:none}
@@ -159,9 +166,12 @@ button.ghost:hover{background:transparent;color:var(--ink);
   border-top-color:transparent;border-bottom-color:var(--line)}
 
 /* Compact fact row, replacing three stacked paragraphs of disclosure copy. */
-.facts{display:flex;flex-wrap:wrap;gap:6px 20px;align-items:center}
-.facts>span{display:inline-flex;align-items:center;gap:2px}
-.facts a{font-size:12.5px}
+.facts{display:flex;flex-wrap:wrap;gap:8px 22px;align-items:center}
+/* baseline, not center: the icon is vertically centred against the text by its
+   own vertical-align, and flex centring fought that and shifted it up a pixel. */
+.facts>span{display:inline-flex;align-items:baseline;flex-wrap:wrap}
+.facts a{font-size:12.5px;margin-left:6px}
+.facts #usage{margin-left:0}
 
 /* --------------------------------------------------------- jump to issues */
 .jump{display:inline-flex;align-items:center;gap:8px;margin-top:14px;

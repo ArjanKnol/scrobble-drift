@@ -9,7 +9,7 @@
   how much they distort your charts.">
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=6">
+<link rel="stylesheet" href="style.css?v=7">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -23,12 +23,11 @@
     <img src="logo.png" alt="Scrobble Drift" width="1044" height="361">
   </h1>
   <p class="lede">
-    Your Last.fm metadata degrades on its own, and it distorts your charts.
-    <button type="button" class="i" data-tip="A single you played on release gets
-      absorbed into an album months later, so your plays end up split across two
-      album strings that share no characters. Catalogues get repackaged. Leaks
-      quietly get official releases. None of it is your fault, and no existing
-      tool catches it.">i</button>
+    Your Last.fm metadata degrades on its own. A single you played on release
+    gets absorbed into an album months later, so your plays end up split across
+    two album strings that share no characters. Catalogues get repackaged.
+    Leaks quietly get official releases. None of it is your fault, and no
+    existing tool catches it.
   </p>
 
   <div class="nav">
@@ -51,9 +50,9 @@
     </form>
 
     <label class="chk" style="margin-top:11px;display:flex;gap:7px;
-           align-items:center;color:var(--dim);font-size:12.5px">
+           align-items:baseline;color:var(--dim);font-size:12.5px">
       <input type="checkbox" id="resolve" checked
-             style="min-width:auto;width:auto">
+             style="min-width:auto;width:auto;position:relative;top:2px">
       <span>Look up real release data
         <button type="button" class="i" data-tip="Adds the consolidation target
           for each split album, and checks whether any of your unreleased
@@ -83,7 +82,8 @@
           resumes where it left off and a repeat scan does not spend another hour
           re-asking the same questions. Nothing is uploaded anywhere and there is
           nowhere for it to be uploaded to. Your API key is never stored.">i</button>
-        <a href="#" id="clear-data">clear</a><span id="usage"></span></span>
+        <a href="#" id="clear-data">clear</a><span id="usage"></span>
+      </span>
       <span>Shared API key, rate limited
         <button type="button" class="i" data-tip="Everyone uses one Last.fm API
           key, so deep scans are paced to keep it alive for everybody. Supplying
@@ -674,7 +674,11 @@ async function resolvePhase(scrobbles, apiKey) {
       }
       if (attempt === attempts) { spFails++; return null; }
       await waitVisibly(retryIn, retryIn >= 10
-        ? "Spotify asked us to slow down." : "Lookup failed, retrying.");
+        ? "Spotify asked us to slow down."
+        // Names the source. "Lookup failed" alone gave no clue which of three
+        // upstreams was struggling, which made this impossible to diagnose from
+        // a screenshot.
+        : "Spotify lookup failed, retrying.");
     }
     return null;
   }
@@ -708,15 +712,27 @@ async function resolvePhase(scrobbles, apiKey) {
 
       if (spFails >= SP_GIVE_UP) {
         // Hand the rest straight to MusicBrainz rather than burning a call per
-        // artist on something that is clearly down.
+        // artist on something that is clearly down. Said out loud, because a
+        // silent switch to the slow path looks like the scan has hung.
         spotifyOn = false;
         for (const g of artists.slice(artists.indexOf(group))) misses.push(...g.jobs);
+        $("waiting").classList.remove("hide");
+        $("waiting").innerHTML =
+          `<strong style="color:var(--warn)">Spotify is not responding.</strong>
+           Falling back to MusicBrainz for the remaining
+           ${N(misses.length)} tracks. Same findings, just slower.`;
         break;
       }
 
       // Catalogues are cached on disk under their own kind, so a rescan or a
       // resumed scan re-reads them for free. Release history is immutable.
-      let cat = await store.getLookup("spcat", group.artist, "*");
+      //
+      // The "2" is a cache version. The first release could store a catalogue
+      // that had been built from failed tracklist calls, i.e. an artist marked
+      // as resolved with zero titles. Those entries are permanently wrong and
+      // would be trusted forever, so the key was bumped to orphan them rather
+      // than asking everyone to clear their stored data.
+      let cat = await store.getLookup("spcat2", group.artist, "*");
       if (cat) {
         // Maps do not survive JSON, so the index is rehydrated on read.
         cat = { ...cat, titles: new Map(cat.titles || []) };
@@ -728,7 +744,7 @@ async function resolvePhase(scrobbles, apiKey) {
         // "the call failed" (not an answer). Caching the latter would write a
         // permanent false negative for an artist who is on Spotify.
         if (!cat.error) {
-          await store.putLookup("spcat", group.artist, "*",
+          await store.putLookup("spcat2", group.artist, "*",
                                 { ...cat, titles: [...cat.titles] });
         }
       }

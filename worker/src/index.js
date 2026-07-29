@@ -555,6 +555,25 @@ async function mbRecording(url, cors) {
 const SP_TOKEN_CACHE = "https://scrobble-drift.internal/spotify-token";
 const SP_ALBUM_CAP = 100;    // albums per artist, keeps subrequests bounded
 const SP_TTL = 604800;       // 7 days. Catalogues change; release dates do not.
+const SP_BATCH = 10;         // albums per tracklist call, see SP_MARKET below
+
+/**
+ * Every Spotify request pins a market, and this is not about regional content.
+ *
+ * Spotify omits the `available_markets` array from a response whenever a market
+ * is specified. That array is ~180 country codes PER TRACK, so a 20-album batch
+ * carries roughly 200,000 redundant strings, and JSON.parse on that alone
+ * exceeded the free plan's 10ms CPU budget. The Worker threw, returned 500, and
+ * the frontend logged "Lookup failed, retrying" forever while resolving zero
+ * tracks. Pinning a market shrinks the payload by well over an order of
+ * magnitude and is the difference between this working and not.
+ *
+ * The cost is that a track unavailable in this market is reported as absent,
+ * which is safe here: absence from Spotify is never acted on, it only routes the
+ * track to MusicBrainz. NL because the deployment is Dutch; any single market
+ * would do.
+ */
+const SP_MARKET = "NL";
 
 /**
  * Client-credentials token, cached at the edge.
@@ -688,7 +707,8 @@ async function spArtistAlbums(url, env, cors) {
   if (!artist) return json({ error: "artist required" }, 400, cors);
 
   const found = await spFetch(
-    `/search?type=artist&limit=5&q=${encodeURIComponent(artist)}`, env);
+    `/search?type=artist&limit=5&market=${SP_MARKET}` +
+    `&q=${encodeURIComponent(artist)}`, env);
 
   const want = spNorm(artist);
   const items = found.artists?.items || [];
@@ -703,7 +723,8 @@ async function spArtistAlbums(url, env, cors) {
 
   const albums = [];
   let next = `/artists/${hit.id}/albums` +
-             `?include_groups=album,single,compilation&limit=50`;
+             `?include_groups=album,single,compilation&limit=50` +
+             `&market=${SP_MARKET}`;
   // `appears_on` is excluded on purpose. It pulls in every playlist-style
   // compilation and other artists' records that merely feature this artist,
   // which would make almost any track look "officially released".
@@ -743,9 +764,12 @@ async function spAlbumTracks(url, env, cors) {
   const ids = (url.searchParams.get("ids") || "")
     .split(",").map((s) => s.trim()).filter((s) => /^[A-Za-z0-9]{10,30}$/.test(s));
   if (!ids.length) return json({ error: "ids required" }, 400, cors);
-  if (ids.length > 20) return json({ error: "max 20 ids" }, 400, cors);
+  if (ids.length > SP_BATCH) {
+    return json({ error: `max ${SP_BATCH} ids` }, 400, cors);
+  }
 
-  const data = await spFetch(`/albums?ids=${ids.join(",")}`, env);
+  const data = await spFetch(
+    `/albums?ids=${ids.join(",")}&market=${SP_MARKET}`, env);
 
   const out = [];
   for (const al of data.albums || []) {
@@ -790,7 +814,8 @@ async function spAlbum(url, env, cors) {
 
   const q = `album:${JSON.stringify(title)} artist:${JSON.stringify(artist)}`;
   const data = await spFetch(
-    `/search?type=album&limit=20&q=${encodeURIComponent(q)}`, env);
+    `/search?type=album&limit=20&market=${SP_MARKET}&q=${encodeURIComponent(q)}`,
+    env);
 
   const wantTitle = spNorm(title);
   const wantArtist = spNorm(artist);
