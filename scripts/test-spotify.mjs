@@ -194,22 +194,48 @@ console.log("\nmatchTrack: safety");
 }
 
 {
-  // Partial failure: artist resolves, tracklist call dies. Must not be cached
-  // as an empty catalogue either, or the artist is permanently unresolvable.
-  let n = 0;
-  const flaky = async (path) => {
-    n++;
-    if (path.includes("artist-albums")) {
-      return { found: true, artist_name: "Travis Scott",
-               albums: [{ id: "al0zzzzzzzzzzzzzzzzzzz", name: "Rodeo" }] };
-    }
-    return null;
-  };
+  // THE bug that shipped. Artist resolves, tracklist calls die (the Worker was
+  // returning 500 because parsing Spotify's available_markets arrays blew its
+  // 10ms CPU budget). The result was found:true with zero titles, which the
+  // frontend then cached as a valid empty catalogue: every future scan trusted
+  // it and reported the artist as having released nothing, forever.
+  const flaky = async (path) =>
+    path.includes("artist-albums")
+      ? { found: true, artist_name: "Travis Scott",
+          albums: [{ id: "al0zzzzzzzzzzzzzzzzzzz", name: "Rodeo" }] }
+      : null;
+
   const half = await fetchCatalogue("Travis Scott", flaky);
   eq(half.titles.size, 0, "a dead tracklist call yields no titles");
   ok(half.found, "the artist still resolved");
+  ok(half.error, "and error IS set, so the caller must not cache this");
+  eq(half.failed_batches, 1, "reporting how many batches were lost");
   ok(matchTrack(half, "Antidote") === null,
-     "so nothing matches, and MusicBrainz gets the track");
+     "nothing matches, so MusicBrainz gets the track");
+}
+
+{
+  // The success path must NOT set error, or nothing would ever be cached and
+  // every rescan would pay full price.
+  const good = await fetchCatalogue("Travis Scott",
+                                    fakeApi({ "Travis Scott": travis }).api);
+  ok(!good.error, "a fully successful catalogue is cacheable");
+  eq(good.failed_batches, 0, "with no failed batches");
+}
+
+{
+  // Batches are 10, not 20: at 20 the Worker response was large enough to
+  // exceed its CPU budget. 25 albums must therefore cost 3 tracklist calls.
+  const many = Array.from({ length: 25 }, (_, i) =>
+    ({ name: `Album ${i}`, primary: "Album", date: "2020-01-01",
+       tracks: [`Track ${i}`] }));
+  const { api, calls } = fakeApi({ "Prolific": many });
+  await fetchCatalogue("Prolific", api);
+  const trackCalls = calls.filter((c) => c.includes("album-tracks"));
+  eq(trackCalls.length, 3, "25 albums batch into 3 calls of at most 10");
+  for (const c of trackCalls) {
+    ok(c.split(",").length <= 10, `  batch of ${c.split(",").length} ids is within 10`);
+  }
 }
 
 /* ------------------------------------------------------------------------- */

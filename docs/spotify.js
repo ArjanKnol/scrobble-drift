@@ -80,11 +80,21 @@ export async function fetchCatalogue(artist, api) {
   const seen = new Map();     // rg_id -> index into albums
   const titles = new Map();   // match key -> [album index]
   let partial = false;
+  let failed = 0;
 
-  for (let i = 0; i < ids.length; i += 20) {
-    const batch = ids.slice(i, i + 20);
+  // 10, matching SP_BATCH in the Worker. Was 20, which made the response large
+  // enough that parsing it exceeded the Worker's 10ms CPU budget and every call
+  // returned 500.
+  for (let i = 0; i < ids.length; i += 10) {
+    const batch = ids.slice(i, i + 10);
     const res = await api(`/api/spotify/album-tracks?ids=${batch.join(",")}`);
-    if (res?.partial) partial = true;
+
+    // A failed batch is missing evidence, not an empty catalogue. Counted so the
+    // caller can refuse to cache a half-built index: the artist resolved, so
+    // `found` is true, and without this flag a transient failure would be stored
+    // as "this artist has no tracks" and every future scan would trust it.
+    if (res == null) { failed++; continue; }
+    if (res.partial) partial = true;
 
     for (const t of res?.tracks || []) {
       const al = t.album;
@@ -122,6 +132,9 @@ export async function fetchCatalogue(artist, api) {
     releases: ids.length,
     truncated: Boolean(found.truncated),
     partial,
+    // Any failed batch makes this index incomplete and therefore uncacheable.
+    error: failed > 0,
+    failed_batches: failed,
   };
 }
 
