@@ -150,15 +150,90 @@ const monthName = (uts) =>
 
 /* --------------------------------------------- D14: era-tagged unreleased */
 
-const ERA_ALBUM =
-  /unreleased|\(\s*[^)]*\bera\b[^)]*\)|\bleak(?:ed)?\b|\bsnippet\b|\bOG\s*file\b|\bref(?:erence)?\s*track\b|\bCDQ\b/i;
-const ERA_NAME = /\(\s*([^)]*?)\s*era\s*\)/i;
+/**
+ * Unreleased-material conventions in the wild.
+ *
+ * There is no standard. Observed forms, all of which mean the same thing:
+ *
+ *   Unreleased (Rodeo Era)        the common one
+ *   Unreleased [Rodeo Era]        same, square brackets
+ *   Unreleased (Rodeo Sessions)   "sessions" instead of "era"
+ *   Rodeo Sessions                no "unreleased" marker at all
+ *   Unreleased (Rodeo)            bare parenthetical
+ *   Unreleased                    one bucket per artist, no era at all
+ *
+ * The earlier version recognised only the first. That was not merely narrow: it
+ * broke silently in the worst possible way. "Unreleased (Rodeo Sessions)" was
+ * classified as era-tagged by the UNRELEASED marker but yielded NO era name, so
+ * it landed in the protected partition and then vanished from every era
+ * consistency check. Tagged, protected, and invisible.
+ */
 
-export const isEraTagged = (album) => Boolean(album) && ERA_ALBUM.test(album);
+// Words that mark an album string as unreleased material on their own.
+// `snippets?` and `leaks?` are pluralised: the old \bsnippet\b failed on the
+// bare "Snippets" that people actually use, because the trailing s ate the \b.
+const UNREL_MARK =
+  /\bunreleased\b|\bunrelased\b|\bleak(?:s|ed)?\b|\bsnippet(?:s)?\b|\bOG\s*file(?:s)?\b|\bref(?:erence)?\s*track(?:s)?\b|\bCDQ\b|\bouttake(?:s)?\b|\bleftover(?:s)?\b/i;
+
+// A qualifier naming which period the material comes from, in brackets or not.
+const QUALIFIER = /\b(?:era|sessions?|sesh)\b/i;
+
+// "(Rodeo Era)", "[Rodeo Sessions]" -> Rodeo
+const BRACKETED_QUAL =
+  /[([]\s*([^)\]]*?)\s*\b(?:era|sessions?|sesh)\b\s*[)\]]/i;
+// Trailing "Rodeo Era" / "Rodeo Sessions" with no brackets at all.
+const BARE_QUAL = /^\s*(.+?)\s+\b(?:era|sessions?|sesh)\b\s*$/i;
+// "Unreleased (Rodeo)" -> Rodeo. Only consulted after an unreleased marker.
+const BARE_BRACKET = /[([]\s*([^)\]]+?)\s*[)\]]/;
+
+/** Album strings that are unambiguously unreleased material on their own. */
+const explicitEra = (album) =>
+  Boolean(album) && (UNREL_MARK.test(album) || BRACKETED_QUAL.test(album));
+
+/**
+ * Ambiguous forms: a bare "Rodeo Sessions" with no unreleased marker.
+ *
+ * Kept separate because "Sessions" is also a real album word. Abbey Road
+ * Sessions and Spotify Sessions are commercial releases, and classifying them as
+ * unreleased would quietly exclude them from split detection. So these only
+ * count when the SAME ARTIST is tagged explicitly elsewhere in the library,
+ * which is what makes the convention evidence rather than a guess.
+ */
+const ambiguousEra = (album) =>
+  Boolean(album) && !explicitEra(album) && BARE_QUAL.test(album);
+
+export const isEraTagged = (album) => explicitEra(album) || ambiguousEra(album);
+
+/**
+ * The era name, or null when the string is a single undifferentiated bucket.
+ *
+ * Returning null is meaningful, not a failure: "Unreleased" with no qualifier is
+ * a deliberate convention, and D14f reports it as such rather than as an error.
+ */
 export const eraName = (album) => {
-  const m = ERA_NAME.exec(album || "");
-  return m ? m[1].trim() : null;
+  if (!album) return null;
+
+  // Bracketed qualifier wins: it is the most explicit form.
+  let m = BRACKETED_QUAL.exec(album);
+  if (m?.[1]?.trim()) return m[1].trim();
+
+  // Bare trailing qualifier, e.g. "Rodeo Sessions". Strip any unreleased marker
+  // first so "Unreleased Rodeo Sessions" yields Rodeo rather than the lot.
+  const stripped = album.replace(UNREL_MARK, " ").replace(/\s+/g, " ").trim();
+  m = BARE_QUAL.exec(stripped);
+  if (m?.[1]?.trim()) return m[1].trim();
+
+  // Bare parenthetical after an unreleased marker: "Unreleased (Rodeo)".
+  if (UNREL_MARK.test(album)) {
+    m = BARE_BRACKET.exec(album);
+    if (m?.[1]?.trim()) return m[1].trim();
+  }
+  return null;
 };
+
+/** True for a bucket with no era distinction at all, e.g. bare "Unreleased". */
+export const isUndifferentiated = (album) =>
+  explicitEra(album) && !eraName(album);
 
 /**
  * The guard. Era-tagged material is partitioned out before anything else and
@@ -171,8 +246,21 @@ export const eraName = (album) => {
  * maintained taxonomy is the worst thing this tool could do.
  */
 export function partitionEra(scrobbles) {
+  // Pass 1: which artists tag unreleased material explicitly? Only for those is
+  // a bare "Rodeo Sessions" evidence of the convention rather than a guess about
+  // a real album. Without this, Abbey Road Sessions gets protected and silently
+  // dropped from split detection for everybody.
+  const taggers = new Set();
+  for (const s of scrobbles) {
+    if (explicitEra(s.album)) taggers.add(norm(s.artist));
+  }
+
   const era = [], rest = [];
-  for (const s of scrobbles) (isEraTagged(s.album) ? era : rest).push(s);
+  for (const s of scrobbles) {
+    const isEra = explicitEra(s.album) ||
+                  (ambiguousEra(s.album) && taggers.has(norm(s.artist)));
+    (isEra ? era : rest).push(s);
+  }
   return { era, rest };
 }
 
@@ -353,6 +441,64 @@ export function d14cTrackInTwoEras(era) {
         "versions, consider putting that in the track title so the two are " +
         "distinguishable. If they are the same file, one era tag is redundant.",
       members: ranked(eras).map(([era_, plays]) => ({ era: era_, plays })),
+    });
+  }
+  return issues;
+}
+
+/**
+ * D14f: one undifferentiated bucket holding an artist's whole unreleased output.
+ *
+ * A large number of people file everything under a bare "Unreleased" per artist
+ * rather than splitting by era. That is a legitimate convention, not a mistake,
+ * and this is the difference between a tool that respects its users and one that
+ * lectures them. So:
+ *
+ *   - class is `review`, never error
+ *   - `style_choice` is set, which keeps it out of the score's actionable count.
+ *     A deliberate convention must not cap someone's score at 99 forever.
+ *   - the wording offers an option and states the benefit, rather than implying
+ *     the current state is wrong
+ *
+ * The threshold exists because the suggestion is only useful at scale. Splitting
+ * three tracks by era gains nothing; splitting sixty makes the collection
+ * navigable and makes the "released since" check far more informative.
+ */
+export function d14fSingleBucket(era, { minTracks = 8 } = {}) {
+  const buckets = new Map();
+  for (const s of era) {
+    if (!isUndifferentiated(s.album)) continue;
+    const k = `${norm(s.artist)}␟${norm(s.album)}`;
+    if (!buckets.has(k)) {
+      buckets.set(k, { artist: s.artist, album: s.album, plays: 0, tracks: new Set() });
+    }
+    const b = buckets.get(k);
+    b.plays++;
+    b.tracks.add(normTitle(s.track));
+  }
+
+  const issues = [];
+  for (const b of [...buckets.values()].sort((x, y) => y.plays - x.plays)) {
+    if (b.tracks.size < minTracks) continue;
+    issues.push({
+      detector: "D14f",
+      class: "review",
+      confidence: 0.3,
+      style_choice: true,
+      artist: b.artist,
+      album: b.album,
+      title: `${b.artist} - ${b.tracks.size} unreleased tracks in one ` +
+             `'${b.album}' bucket`,
+      plays_affected: b.plays,
+      suggest:
+        `All of it sits under a single album string, so there is no way to see ` +
+        `which project each track came from. This is a common and perfectly ` +
+        `valid way to tag, so nothing here is wrong. If you ever want the ` +
+        `detail, naming the period, e.g. '${b.album} (Rodeo Era)' or ` +
+        `'${b.album} (Rodeo Sessions)', would let Scrobble Drift group them by ` +
+        `project and tell you which ones have since been officially released.`,
+      members: [{ album: b.album, plays: b.plays }],
+      no_auto_action: true,
     });
   }
   return issues;
@@ -1028,30 +1174,134 @@ export function chartImpact(rest, splits, topN = 25) {
   };
 }
 
-export function hygieneScore(totalPlays, issues) {
-  if (!totalPlays) return { score: 100, subscores: {} };
-  const affected = (...dets) => issues
-    .filter((i) => dets.includes(i.detector) && i.class !== "unfixable")
-    .reduce((n, i) => n + (i.plays_affected || 0), 0);
+/**
+ * Which bucket each detector scores into.
+ *
+ * Exhaustive on purpose, and asserted as such below. The previous version
+ * hardcoded four detector lists inline and silently omitted D14e, so "this leak
+ * has since been released" findings scored nothing at all: the report could list
+ * them while the score called the library perfect. Any detector added later and
+ * not listed here now throws in development rather than quietly scoring zero.
+ */
+const BUCKETS = {
+  album_integrity:  ["D0", "D4", "D5"],
+  artist_integrity: ["D1", "D3", "D8", "D11"],
+  duplicate_rate:   ["D6", "D12"],
+  era_consistency:  ["D14a", "D14c", "D14e", "D14f"],
+};
 
-  const parts = {
-    album_integrity: affected("D0", "D4", "D5"),
-    artist_integrity: affected("D1", "D3", "D8", "D11"),
-    duplicate_rate: affected("D6", "D12"),
-    era_consistency: affected("D14a", "D14c"),
-  };
+/**
+ * Severity weight per issue class.
+ *
+ * A confirmed split is not the same as something merely worth a look, and the
+ * old play-share formula treated them identically. `review` is deliberately
+ * light: those are informational, and inflating them would punish people for
+ * having unusual libraries rather than untidy ones.
+ */
+const CLASS_WEIGHT = { error: 3, split: 2, review: 0.75, unfixable: 0 };
+
+/**
+ * Hygiene score, 0 to 100.
+ *
+ * ---------------------------------------------------------------------------
+ * Why this is not play share
+ * ---------------------------------------------------------------------------
+ * It used to be, and the result was a number that said 100 while the report
+ * below it listed ten problems. That is not a tuning issue, it is the wrong
+ * denominator. 30 affected plays out of 139,000 is 0.02%, which rounds to
+ * perfect no matter how many distinct things are actually wrong, so the score
+ * was really measuring library SIZE and got easier to ace the more you listened.
+ *
+ * What a user is actually looking at is a to-do list, so the score is built
+ * from the same thing: how many distinct findings there are, weighted by how
+ * severe each one is, measured against the number of album strings, which is
+ * the unit that gets curated. Play counts still matter, but as a modifier
+ * rather than the denominator: a split affecting 400 plays deserves more weight
+ * than one affecting 2.
+ *
+ * The rule that makes it honest: 100 is reserved for a clean library. Any
+ * actionable finding caps the score at 99, so the headline can never contradict
+ * the list underneath it.
+ */
+export function hygieneScore(totalPlays, issues, albumStrings = 0) {
   const subscores = {};
-  for (const [k, n] of Object.entries(parts)) {
-    // A play can be counted by several detectors, so share can exceed 1. The
-    // 2.0 multiplier decides how alarmist the score is; it is a tuning knob,
-    // not a truth.
-    subscores[k] = Math.max(0, Math.round(100 * (1 - Math.min((n / totalPlays) * 2.0, 1))));
+  const counts = {};
+  const plays = {};
+
+  // Falls back to a play-derived estimate when the caller does not pass a
+  // string count, so older callers and the saved monthly report still work.
+  //
+  // The floor matters. Without it a library with 11 album strings bottoms out a
+  // bucket on a single finding, because 12% of 11 is barely one penalty point.
+  // Scoring someone 0 for one split in a small collection is noise, not
+  // information, so the scorer refuses to be harsher than it would be for an
+  // 80-string library. Real scans are far above this and unaffected: 2,000
+  // scrobbles is typically ~800 strings.
+  const MIN_DENOM = 80;
+  const denom = Math.max(albumStrings || Math.ceil(totalPlays / 10), MIN_DENOM);
+
+  let actionable = 0;
+
+  for (const [bucket, dets] of Object.entries(BUCKETS)) {
+    const mine = issues.filter((i) => dets.includes(i.detector) &&
+                                      i.class !== "unfixable");
+    counts[bucket] = mine.length;
+    plays[bucket] = mine.reduce((n, i) => n + (i.plays_affected || 0), 0);
+
+    let penalty = 0;
+    for (const i of mine) {
+      // A deliberate tagging convention is not a defect, so it costs NOTHING.
+      // It is still reported, and still counted in issue_counts so the UI can
+      // show it, but it does not touch the score at all.
+      //
+      // An earlier version docked points here on the reasoning that the era
+      // information "genuinely is not there". That was wrong, and the test that
+      // caught it is worth keeping: filing everything under one "Unreleased"
+      // bucket is a choice thousands of people make on purpose, and scoring
+      // them down for it turns a description into a scolding.
+      if (i.style_choice) continue;
+
+      const w = CLASS_WEIGHT[i.class] ?? 1;
+      if (w > 0) actionable++;
+      // Plays scale the weight sub-linearly. Linear would let one heavily
+      // played album dominate the entire score; ignoring plays entirely would
+      // rank a 2-play typo alongside a 400-play split.
+      penalty += w * (1 + Math.log10(1 + (i.plays_affected || 0)));
+    }
+
+    // 12 is the tuning knob: the penalty a bucket can absorb per album string
+    // before it bottoms out. It is a judgement about how alarmist to be, not a
+    // fact, and it is the one number to change if the score feels wrong.
+    subscores[bucket] =
+      Math.max(0, Math.round(100 * (1 - Math.min(penalty / (denom * 0.12), 1))));
   }
-  const score = Math.round(
-    Object.values(subscores).reduce((a, b) => a + b, 0) / Object.keys(subscores).length,
-  );
-  return { score, subscores, plays_affected: parts, total_plays: totalPlays };
+
+  let score = Math.round(
+    Object.values(subscores).reduce((a, b) => a + b, 0) /
+    Object.keys(subscores).length);
+
+  // The invariant. 100 means nothing left to fix, full stop.
+  if (actionable > 0) score = Math.min(score, 99);
+
+  return {
+    score,
+    subscores,
+    issue_counts: counts,
+    plays_affected: plays,
+    actionable,
+    total_plays: totalPlays,
+    album_strings: albumStrings || null,
+  };
 }
+
+/**
+ * Every detector that can appear in a report must score somewhere.
+ *
+ * Checked at import time because the failure it prevents is silent: an
+ * unbucketed detector does not error, it just never affects the score, which is
+ * exactly the D14e bug that shipped. Cheap enough to run always.
+ */
+export const SCORED_DETECTORS = new Set(Object.values(BUCKETS).flat());
 
 /* --------------------------------------------------------- orchestration */
 
@@ -1063,6 +1313,7 @@ export function analyse(scrobbles) {
   const issues = [
     ...d14aFormatVariants(era),
     ...d14cTrackInTwoEras(era),
+    ...d14fSingleBucket(era),
     ...splits,
     ...d8FeatureCredits(rest),
     ...d1ArtistVariants(rest),
@@ -1102,7 +1353,10 @@ export function analyse(scrobbles) {
         .map((s) => `${s.artist}␟${s.album}`)).size,
       distinct_tracks: new Set(scrobbles.map((s) => `${s.artist}␟${s.track}`)).size,
     },
-    hygiene: hygieneScore(total, issues),
+    // Album strings, not plays, are the scoring denominator: they are the unit
+    // that actually gets curated. See hygieneScore for why.
+    hygiene: hygieneScore(total, issues, new Set(
+      scrobbles.filter((s) => s.album).map((s) => `${s.artist}␟${s.album}`)).size),
     era: d14Overview(era, total),
     impact: chartImpact(rest, splits),
     summary_by_detector: byDetector,

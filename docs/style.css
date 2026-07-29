@@ -116,3 +116,70 @@ button.ghost:hover{background:transparent;color:var(--ink);
   width:22px;height:22px;border-radius:3px;background:var(--accent);
   color:#fff;font-size:10px;font-weight:800;letter-spacing:-.04em}
 .attrib .sep{color:var(--line)}
+
+/* ------------------------------------------------------------------ tooltips */
+/* A real <button>, not a <span title="...">, for three reasons: native titles
+   are unstyleable and slow to appear, they never show on touch devices at all,
+   and a button is keyboard-focusable so the content is reachable without a
+   mouse. The tip lives in a data attribute rather than a hidden element so the
+   markup stays a single tag. */
+.i{display:inline-flex;align-items:center;justify-content:center;
+  width:15px;height:15px;padding:0;margin-left:5px;border-radius:99px;
+  background:transparent;border:1px solid var(--dim);color:var(--dim);
+  font:600 10px/1 inherit;text-transform:none;letter-spacing:0;
+  cursor:help;vertical-align:middle;position:relative;flex:0 0 auto}
+.i:hover,.i:focus-visible{background:var(--dim);color:var(--panel);
+  border-color:var(--dim);outline:none}
+
+/* Positioned on a wrapper so the tip is not clipped by the button's own tiny
+   box, and so transform-centring is relative to the icon. */
+.i::after{content:attr(data-tip);position:absolute;left:50%;bottom:calc(100% + 8px);
+  transform:translateX(-50%);width:max-content;max-width:min(300px,72vw);
+  background:#0a0a0a;color:var(--ink);border:1px solid var(--line);
+  border-radius:7px;padding:9px 11px;font:400 12.5px/1.5 inherit;
+  text-transform:none;letter-spacing:0;text-align:left;white-space:normal;
+  opacity:0;visibility:hidden;transition:opacity .12s;z-index:50;
+  box-shadow:0 8px 24px rgba(0,0,0,.55);pointer-events:none}
+.i::before{content:"";position:absolute;left:50%;bottom:calc(100% + 3px);
+  transform:translateX(-50%);border:5px solid transparent;
+  border-top-color:var(--line);opacity:0;visibility:hidden;
+  transition:opacity .12s;z-index:51;pointer-events:none}
+.i:hover::after,.i:hover::before,
+.i:focus-visible::after,.i:focus-visible::before{opacity:1;visibility:visible}
+
+/* Near the left or right edge the centred tip would overflow the viewport.
+   Nudged rather than flipped: a flip needs measurement in JS, and these tips
+   are short enough that a fixed nudge is sufficient and cannot jitter. */
+.i.tip-l::after{left:0;transform:none}
+.i.tip-r::after{left:auto;right:0;transform:none}
+
+/* Below-the-icon variant, for tips on the top row where there is no room above. */
+.i.tip-below::after{bottom:auto;top:calc(100% + 8px)}
+.i.tip-below::before{bottom:auto;top:calc(100% + 3px);
+  border-top-color:transparent;border-bottom-color:var(--line)}
+
+/* Compact fact row, replacing three stacked paragraphs of disclosure copy. */
+.facts{display:flex;flex-wrap:wrap;gap:6px 20px;align-items:center}
+.facts>span{display:inline-flex;align-items:center;gap:2px}
+.facts a{font-size:12.5px}
+
+/* --------------------------------------------------------- jump to issues */
+.jump{display:inline-flex;align-items:center;gap:8px;margin-top:14px;
+  background:transparent;border:1px solid var(--accent);color:var(--accent);
+  border-radius:99px;padding:9px 17px;font-weight:700;font-size:12.5px;
+  cursor:pointer;text-transform:uppercase;letter-spacing:.04em}
+.jump:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
+.jump .arr{font-size:15px;line-height:1;transform:translateY(1px)}
+
+/* Respects a reduced-motion preference: smooth scrolling is set here rather
+   than inline so the media query can switch it off, which an inline
+   behavior:"smooth" in JS could not. */
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  .i::after,.i::before{transition:none}
+}
+
+/* Anchor offset so the heading is not flush against the viewport top after a
+   jump. */
+#issues-anchor{scroll-margin-top:22px}

@@ -26,12 +26,51 @@ never gets touched.
 | **D0** | Consolidation target for split tracks, resolved via MusicBrainz |
 | **D4** | One track's plays spread across several album strings |
 | **D8** | Feature-credit splits (`Knife Talk` vs `Knife Talk (with …)`) and artist fields polluted with features |
-| **D14** | Era-tagged unreleased material, protected from every other detector |
+| **D14** | Unreleased material, protected from every other detector |
 | **D14a** | Inconsistent spelling of your own era convention |
 | **D14c** | One track title filed under several eras (informational) |
 | **D14e** | Unreleased material that now has an official release |
+| **D14f** | A whole artist's unreleased output in one undifferentiated bucket (informational, unscored) |
 | **D1 / D3** | Artist name variants, MusicBrainz ID conflicts |
 | **D5 / D6 / D11 / D12** | Missing albums, duplicate scrobbles, Various Artists, impossible timestamps |
+
+---
+
+## Unreleased tagging: there is no standard
+
+People tag unreleased music in at least six ways, and all of them are correct:
+
+```
+Unreleased (Rodeo Era)        the most common
+Unreleased [Rodeo Era]        same, square brackets
+Unreleased (Rodeo Sessions)   "sessions" instead of "era"
+Rodeo Sessions                no "unreleased" marker at all
+Unreleased (Rodeo)            bare parenthetical
+Unreleased                    one bucket per artist, no era at all
+```
+
+All six are recognised, and the first five all resolve to the era name `Rodeo`
+so they group together.
+
+An earlier version understood only the first, and it failed in the worst
+possible way: `Unreleased (Rodeo Sessions)` was classified as unreleased by the
+`Unreleased` marker, so it was protected from every other detector, but yielded
+**no era name**, so it was invisible to every era check. Tagged, protected, and
+never examined. Silent, and worse than not supporting the form at all.
+
+**The ambiguous case.** A bare `Rodeo Sessions` has no unreleased marker, and
+`Sessions` is also a real album word: *Abbey Road Sessions* and *Spotify
+Sessions* are commercial releases. Classifying those as unreleased would quietly
+exclude them from split detection. So a bare qualifier only counts when **that
+same artist is tagged explicitly somewhere else in the library**, which turns the
+convention into evidence rather than a guess.
+
+**The single-bucket convention is not a defect.** Many people file everything
+under one `Unreleased` per artist. D14f mentions it, offers the era conventions
+as an option, and states plainly that nothing is wrong. It is marked
+`style_choice`, which excludes it from the score entirely: a deliberate
+convention must never cap someone's score, and an earlier draft that docked
+points for it was wrong.
 
 **Two detectors are deliberately not run.** Both remain in the code so the
 reasoning survives and re-enabling is one line.
@@ -50,6 +89,48 @@ relabelled.
 There is a community workaround if you ever want one of these badly enough:
 rename the artist to something different, then rename it back with the casing
 you want. Two edits, fiddly, and not worth automating.
+
+---
+
+## The hygiene score
+
+**100 is reserved for a library with nothing left to fix.** Any actionable
+finding caps it at 99. A headline number that says *perfect* above a list of ten
+problems is not a tuning problem, it is a broken claim, and that is exactly what
+shipped in the first version.
+
+Two things were wrong with the original formula:
+
+**It was play share.** 30 affected plays out of 139,000 is 0.02%, which rounds to
+perfect no matter how many distinct things are actually wrong. So the score was
+really measuring library *size*, and got easier to ace the more you listened.
+
+**One detector was omitted.** D14e findings fell into no bucket, so "this leak
+has since been released" scored nothing at all. That omission was silent, which
+is why `SCORED_DETECTORS` now exists and a test asserts that every detector
+`analyse()` can emit is scored.
+
+What it measures now: the number of distinct findings, weighted by severity
+(`error` 3, `split` 2, `review` 0.75) and by plays affected on a log scale,
+against the count of **album strings**, which is the unit that actually gets
+curated. Plays still matter, as a modifier rather than the denominator, so a
+split affecting 400 plays outweighs one affecting 2 without letting a single
+popular album sink the whole score.
+
+Two deliberate exclusions:
+
+- `unfixable` findings score zero. Last.fm gives you no way to act on them.
+- `style_choice` findings score zero. A valid convention is not a defect.
+
+The denominator has a floor of 80 album strings. Without it, a small library
+bottoms out a whole bucket on a single finding, which is noise rather than
+information.
+
+`12` (the penalty a bucket absorbs per album string before hitting zero) and the
+class weights are judgement calls about how alarmist to be, not facts. They are
+the numbers to change if the score ever feels wrong.
+
+---
 
 ### How artist matching decides
 
@@ -349,6 +430,8 @@ drifted within days: a bug fixed in one stayed live in the other.
 Tests, also no dependencies and no network:
 
 ```bash
+node scripts/test-era.mjs       # tagging conventions, era names, D14f
+node scripts/test-score.mjs     # the 100-means-clean invariant, weighting
 node scripts/test-spotify.mjs   # catalogue indexing, match tiers, editions
 node scripts/test-worker.mjs    # release-type mapping, normaliser agreement
 ```
