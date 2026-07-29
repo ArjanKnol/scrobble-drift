@@ -214,11 +214,36 @@ const monthName = (uts) =>
  * consistency check. Tagged, protected, and invisible.
  */
 
-// Words that mark an album string as unreleased material on their own.
-// `snippets?` and `leaks?` are pluralised: the old \bsnippet\b failed on the
-// bare "Snippets" that people actually use, because the trailing s ate the \b.
-const UNREL_MARK =
-  /\bunreleased\b|\bunrelased\b|\bleak(?:s|ed)?\b|\bsnippet(?:s)?\b|\bOG\s*file(?:s)?\b|\bref(?:erence)?\s*track(?:s)?\b|\bCDQ\b|\bouttake(?:s)?\b|\bleftover(?:s)?\b/i;
+/*
+ * Markers come in two strengths, because some of these words are also real
+ * album titles.
+ *
+ * STRONG markers are leak-culture vocabulary that essentially never titles a
+ * commercial release: "unreleased", "CDQ", "OG file", "reference track".
+ *
+ * WEAK markers are ordinary collection nouns. Lil Baby's "The Leaks" is an
+ * officially released project; so are albums called "Outtakes" and "Demos".
+ * Treating those as unreleased material does more than mislabel them: the era
+ * guard PROTECTS whatever it matches, excluding it from D0, D4 and D1. So a real
+ * album silently stopped being checked for splits, which is a lost finding with
+ * no error message anywhere.
+ *
+ * This is the same shape as the "Sessions" problem and gets the same answer: a
+ * weak marker only counts when the SAME ARTIST is strongly marked somewhere else
+ * in the library, which turns the convention into evidence instead of a guess.
+ */
+const UNREL_STRONG =
+  /\bunreleased\b|\bunrelased\b|\bOG\s*file(?:s)?\b|\bref(?:erence)?\s*track(?:s)?\b|\bCDQ\b/i;
+
+// Pluralised deliberately: the old \bsnippet\b failed on the bare "Snippets"
+// that people actually use, because the trailing s ate the word boundary.
+const UNREL_WEAK =
+  /\bleak(?:s|ed)?\b|\bsnippet(?:s)?\b|\bouttake(?:s)?\b|\bleftover(?:s)?\b/i;
+
+// Kept for eraName(), which needs to strip any marker before reading the
+// qualifier, regardless of strength.
+const UNREL_MARK = new RegExp(
+  `${UNREL_STRONG.source}|${UNREL_WEAK.source}`, "i");
 
 // "(Rodeo Era)", "[Rodeo Sessions]" -> Rodeo
 const BRACKETED_QUAL =
@@ -230,7 +255,18 @@ const BARE_BRACKET = /[([]\s*([^)\]]+?)\s*[)\]]/;
 
 /** Album strings that are unambiguously unreleased material on their own. */
 const explicitEra = (album) =>
-  Boolean(album) && (UNREL_MARK.test(album) || BRACKETED_QUAL.test(album));
+  Boolean(album) && (UNREL_STRONG.test(album) || BRACKETED_QUAL.test(album));
+
+/**
+ * A weak marker with nothing else to back it up.
+ *
+ * 'The Leaks', 'Outtakes', 'Snippets' on their own. Real albums carry these
+ * titles, so they need corroboration from the same artist before being treated
+ * as leak material. 'Unreleased Leaks' is not in here: the strong marker
+ * settles it.
+ */
+const weakEra = (album) =>
+  Boolean(album) && !explicitEra(album) && UNREL_WEAK.test(album);
 
 /**
  * Ambiguous forms: a bare "Rodeo Sessions" with no unreleased marker.
@@ -244,7 +280,15 @@ const explicitEra = (album) =>
 const ambiguousEra = (album) =>
   Boolean(album) && !explicitEra(album) && BARE_QUAL.test(album);
 
-export const isEraTagged = (album) => explicitEra(album) || ambiguousEra(album);
+/**
+ * Context-free "does this look like unreleased material".
+ *
+ * Includes the weak and ambiguous forms, so it answers the question a human
+ * would. partitionEra() is the one that decides, and it requires corroboration
+ * for anything that is not explicit.
+ */
+export const isEraTagged = (album) =>
+  explicitEra(album) || weakEra(album) || ambiguousEra(album);
 
 /**
  * The era name, or null when the string is a single undifferentiated bucket.
@@ -275,7 +319,7 @@ export const eraName = (album) => {
 
 /** True for a bucket with no era distinction at all, e.g. bare "Unreleased". */
 export const isUndifferentiated = (album) =>
-  explicitEra(album) && !eraName(album);
+  (explicitEra(album) || weakEra(album)) && !eraName(album);
 
 /**
  * The guard. Era-tagged material is partitioned out before anything else and
@@ -299,8 +343,13 @@ export function partitionEra(scrobbles) {
 
   const era = [], rest = [];
   for (const s of scrobbles) {
+    // Weak markers and bare qualifiers both need the same corroboration: this
+    // artist must be strongly marked somewhere. Without it, 'The Leaks' by Lil
+    // Baby and 'Spotify Sessions' by Coldplay stay in `rest`, where split
+    // detection can still see them.
+    const needsBacking = weakEra(s.album) || ambiguousEra(s.album);
     const isEra = explicitEra(s.album) ||
-                  (ambiguousEra(s.album) && taggers.has(norm(s.artist)));
+                  (needsBacking && taggers.has(norm(s.artist)));
     (isEra ? era : rest).push(s);
   }
   return { era, rest };

@@ -56,7 +56,7 @@ console.log("\nundifferentiated buckets: tagged, but deliberately nameless");
 
 for (const a of ["Unreleased", "unreleased", "Unreleased Songs",
                  "Unreleased Tracks", "Leaks", "Snippets", "Outtakes"]) {
-  ok(isEraTagged(a), `${JSON.stringify(a)} is era-tagged`);
+  ok(isEraTagged(a), `${JSON.stringify(a)} looks like unreleased material`);
   eq(eraName(a), null, `  ...with no era name`);
   ok(isUndifferentiated(a), `  ...and is flagged as a single bucket`);
 }
@@ -101,6 +101,66 @@ for (const a of ["Rodeo", "ASTROWORLD", "Abbey Road", "Views", "Scorpion"]) {
   eq(withContext.era.length, 2,
      "'Rodeo Sessions' IS era-tagged for an artist who tags explicitly");
   eq(withContext.rest.length, 1, "and Coldplay is untouched by that inference");
+}
+
+/* ------------------------------------------------------------------------- */
+console.log("\nweak markers are real album titles too");
+
+{
+  // Lil Baby's 'The Leaks' is an officially released project. Classifying it as
+  // unreleased did more than mislabel it: the era guard PROTECTS what it
+  // matches, so the album stopped being checked for splits with no error
+  // anywhere. Silently losing findings is worse than the visible mistake.
+  const mk = (artist, album, track, n) => {
+    const o = [];
+    for (let i = 0; i < n; i++) o.push({ uts: 1600000000 + i, artist, album, track });
+    return o;
+  };
+
+  let sc = [];
+  for (let i = 0; i < 15; i++) sc = sc.concat(mk("Lil Baby", "The Leaks", `T${i}`, 1));
+  sc = sc.concat(mk("Lil Baby", "My Turn", "Emotionally Scarred", 20));
+
+  const p = partitionEra(sc);
+  eq(p.era.length, 0,
+     "'The Leaks' alone is NOT treated as unreleased material");
+  ok(p.rest.some((x) => x.album === "The Leaks"),
+     "so it stays analysable by the split detectors");
+  eq(d14fSingleBucket(p.era).length, 0, "and D14f says nothing about it");
+
+  // Corroborated: the same artist tags unreleased material explicitly, so now
+  // the weak marker is evidence rather than a guess.
+  const backed = partitionEra(
+    sc.concat(mk("Lil Baby", "Unreleased (4PF Era)", "Some Leak", 5)));
+  ok(backed.era.some((x) => x.album === "The Leaks"),
+     "with explicit era tagging by the same artist, 'The Leaks' IS included");
+  eq(d14fSingleBucket(backed.era).length, 1, "and D14f reports the bucket");
+}
+
+{
+  // A strong marker needs no corroboration, ever.
+  const one = partitionEra([
+    { uts: 1, artist: "Nobody", album: "Unreleased (X Era)", track: "T" },
+  ]);
+  eq(one.era.length, 1, "a strong marker stands alone");
+
+  const two = partitionEra([
+    { uts: 1, artist: "Nobody", album: "Unreleased Leaks", track: "T" },
+  ]);
+  eq(two.era.length, 1,
+     "and a weak word alongside a strong one is settled by the strong one");
+}
+
+{
+  // Other real albums that would have been swallowed by weak markers.
+  for (const album of ["The Leaks", "Outtakes", "Demos & Leftovers",
+                       "Snippets"]) {
+    const p = partitionEra([
+      { uts: 1, artist: "Some Band", album, track: "A" },
+      { uts: 2, artist: "Some Band", album: "Real Album", track: "B" },
+    ]);
+    eq(p.era.length, 0, `'${album}' alone is not swept into the era partition`);
+  }
 }
 
 /* ------------------------------------------------------------------------- */
