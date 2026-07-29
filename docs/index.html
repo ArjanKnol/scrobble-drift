@@ -9,7 +9,7 @@
   how much they distort your charts.">
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=9">
+<link rel="stylesheet" href="style.css?v=11">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -64,6 +64,7 @@
     </label>
 
     <div id="prog" class="hide">
+      <div id="phase" class="phase"></div>
       <div class="bar"><i id="fill" style="width:0"></i></div>
       <div class="note" id="status"></div>
       <div class="note hide" id="waiting"></div>
@@ -347,6 +348,12 @@ let spotifyOn = false;
 let stats = null;
 const freshStats = () => ({
   started: Date.now(),
+  // scanSummary() must not claim "Scan complete" while work is still running.
+  // resolvePhase calls render() deliberately, so findings appear before the
+  // lookups finish, and the summary panel was drawing itself on every one of
+  // those intermediate renders.
+  running: true,
+  phase: "fetching",
   ingest_ms: 0,
   analyse_ms: 0,
   resolve_ms: 0,
@@ -408,6 +415,8 @@ $("f").onsubmit = async (e) => {
   $("fill").style.width = "0";
 
   const cap = Number($("depth").value);
+  setPhase(1, 2, "Reading your scrobbles from Last.fm",
+           "Nothing is looked up yet, this is just your listening history.");
   $("status").textContent = cap
     ? `Starting scan of ${N(cap)} scrobbles…`
     : "Starting full history scan. This takes a few minutes on a big library.";
@@ -435,16 +444,26 @@ $("f").onsubmit = async (e) => {
     const t1 = Date.now();
     report = analyse(scrobbles);
     stats.analyse_ms = Date.now() - t1;
+    stats.phase = "analysing";
+    setPhase(1, 2, "Analysing in your browser",
+             "Finding splits, variants and duplicates. No network needed.");
     report.user = user;
     render();                         // show local findings immediately
 
     stats.resolve_requested = $("resolve").checked;
     if ($("resolve").checked && !abort) {
       const t2 = Date.now();
+      stats.phase = "resolving";
+      setPhase(2, 2, "Looking up real release data",
+               "Your results are already below and are complete except for " +
+               "release dates and consolidation targets. This step only adds " +
+               "detail, so you can read the findings now or leave this running.");
       await resolvePhase(scrobbles, apiKey);
       stats.resolve_ms = Date.now() - t2;
     }
     stats.aborted = abort;
+    stats.running = false;            // only now may the summary claim to be done
+    stats.phase = "done";
     $("prog").classList.add("hide");
     render();                         // re-render so the summary panel appears
   } catch (err) {
@@ -473,7 +492,7 @@ const dur = (ms) => {
  * produced visually identical output before.
  */
 function scanSummary() {
-  if (!stats) return "";
+  if (!stats || stats.running) return "";
   const s = stats;
   const total = s.ingest_ms + s.analyse_ms + s.resolve_ms;
 
@@ -535,6 +554,22 @@ function scanSummary() {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Say which step is running, and that there are two of them.
+ *
+ * A scan is: read the scrobbles, then look up release data. The progress bar
+ * fills for step 1, resets, and fills again for step 2. With no label that reads
+ * as "finished, then mysteriously started over", which is exactly how it was
+ * reported. Naming the step and its total costs one line and removes the whole
+ * confusion.
+ */
+function setPhase(n, of, label, detail = "") {
+  $("phase").innerHTML =
+    `<span class="step">Step ${n} of ${of}</span>
+     <strong>${esc(label)}</strong>` +
+    (detail ? `<span class="phase-detail">${esc(detail)}</span>` : "");
+}
 
 /**
  * Token-bucket rate limiter that decouples SEND rate from COMPLETION rate.
