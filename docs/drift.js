@@ -865,13 +865,24 @@ export function d8FeatureCredits(rest) {
   const issues = [];
 
   const variants = new Map();
+  const when = new Map();          // `${key}␟${rawTitle}` -> {first, last}
   for (const s of rest) {
     const k = `${norm(s.artist)}␟${trackIdentity(baseTitle(s.track))}`;
     if (!variants.has(k)) variants.set(k, { artist: s.artist, titles: new Map() });
     const v = variants.get(k);
     v.titles.set(s.track, (v.titles.get(s.track) || 0) + 1);
+
+    // WHEN each spelling was played. Without this a finding like "'IMY2' 1 play"
+    // is unfindable: the user knows they never scrobbled it that way, cannot
+    // locate the one that says otherwise, and reasonably concludes the tool is
+    // wrong. A date turns it into something checkable in ten seconds.
+    const wk = `${k}␟${s.track}`;
+    const w = when.get(wk) || { first: s.uts, last: s.uts };
+    w.first = Math.min(w.first, s.uts);
+    w.last = Math.max(w.last, s.uts);
+    when.set(wk, w);
   }
-  for (const { artist, titles } of variants.values()) {
+  for (const [key, { artist, titles }] of variants) {
     if (titles.size < 2) continue;
 
     /*
@@ -951,8 +962,21 @@ export function d8FeatureCredits(rest) {
       continue;
     }
 
+    /*
+     * A single stray play is not the same finding as an even split.
+     *
+     * 14 plays of 'IMY2 (with Kid Cudi)' against 1 of 'IMY2' is one mis-scrobble,
+     * not a systematic tagging inconsistency, and calling both 80% confident
+     * "standardise on..." overstates it. Renaming one scrobble is also barely
+     * worth doing, so the wording should not imply a chore.
+     */
+    const total = order.reduce((n, [, v]) => n + v, 0);
+    const strays = order.slice(1).reduce((n, [, v]) => n + v, 0);
+    const stray = strays <= 2 && strays / total < 0.15;
+
     issues.push({
-      detector: "D8", class: "split", confidence: 0.8,
+      detector: "D8", class: "split",
+      confidence: stray ? 0.5 : 0.8,
       // The artist is carried AND named in the title. Without it the report
       // said things like "'Make It Work' scrobbled under 2 title variants",
       // which does not identify whose track it is, and left the issue with no
@@ -962,10 +986,29 @@ export function d8FeatureCredits(rest) {
       title: `${artist} - '${baseTitle(order[0][0])}' scrobbled under ` +
              `${titles.size} title variants`,
       plays_affected: order.reduce((n, [, v]) => n + v, 0),
-      suggest: `standardise on '${order[0][0]}' (${order[0][1]} plays). Check ` +
-               `the official credit style before assuming 'feat.': many ` +
-               `releases use 'with'.`,
-      members: order.map(([track, plays]) => ({ track, plays })),
+      suggest: stray
+        ? `Almost all of these say '${order[0][0]}' (${order[0][1]} plays). ` +
+          `${strays === 1 ? "One scrobble" : `${strays} scrobbles`} used a ` +
+          `different spelling, dated below, which usually means a one-off from ` +
+          `another player or a manual entry rather than a tagging habit. Barely ` +
+          `worth fixing, but the date is there if you want to find it.`
+        : `standardise on '${order[0][0]}' (${order[0][1]} plays). Check ` +
+          `the official credit style before assuming 'feat.': many ` +
+          `releases use 'with'.`,
+      members: order.map(([track, plays]) => {
+        const w = when.get(`${key}␟${track}`);
+        return {
+          track, plays,
+          first: w?.first, last: w?.last,
+          // Shown next to the variant. A single play gets one date; a range
+          // gets both, which distinguishes "one stray" from "used for months".
+          looks_like: w
+            ? (plays === 1 || monthName(w.first) === monthName(w.last)
+                ? monthName(w.first)
+                : `${monthName(w.first)} to ${monthName(w.last)}`)
+            : undefined,
+        };
+      }),
     });
   }
 
