@@ -28,15 +28,48 @@ never gets touched.
 | **D8** | Feature-credit splits (`Knife Talk` vs `Knife Talk (with …)`) and artist fields polluted with features |
 | **D14** | Era-tagged unreleased material, protected from every other detector |
 | **D14a** | Inconsistent spelling of your own era convention |
-| **D14c** | One track filed under two different eras |
+| **D14c** | One track title filed under several eras (informational) |
 | **D14e** | Unreleased material that now has an official release |
-| **D1 / D3 / D7** | Artist name variants, MBID conflicts, casing-only variants |
+| **D1 / D3** | Artist name variants, MusicBrainz ID conflicts |
 | **D5 / D6 / D11 / D12** | Missing albums, duplicate scrobbles, Various Artists, impossible timestamps |
 
-**D2 is deliberately not run.** It would compare your stored names against
+**Two detectors are deliberately not run.** Both remain in the code so the
+reasoning survives and re-enabling is one line.
+
+**D2, canonical-name divergence.** It would compare your stored names against
 Last.fm's canonical forms and recommend "fixing" them. With autocorrect off
 that is backwards: it would tell you to rewrite `Travis Scott` as
 `Travi$ Scott`. Divergence from Last.fm canonical is not an error.
+
+**D7, casing-only variants.** `JAŸ-Z` and `Jaÿ-Z` really are the same artist,
+but Last.fm cannot change just the casing of a name, so every finding is
+unactionable. A report padded with work nobody can do is worse than a shorter
+honest one. D1 also skips casing-only groups, so these are absent rather than
+relabelled.
+
+There is a community workaround if you ever want one of these badly enough:
+rename the artist to something different, then rename it back with the casing
+you want. Two edits, fiddly, and not worth automating.
+
+### How artist matching decides
+
+Three independent signals, because one is not enough:
+
+1. **Exact after normalisation** — casing, accents, apostrophe style and
+   punctuation removed. Catches `Melody's` versus `Melody’s`. Confidence 0.95.
+2. **Similarity ratio** at 0.9 or above. Catches longer-name noise and
+   reorderings. Confidence 0.75.
+3. **Edit distance**, budget scaled to name length. Needed because the ratio
+   is `2M/(n+m)` and so structurally cannot catch a one-character typo in a
+   short name: `Yeat` versus `Teat` scores 0.75, `Sef` versus `Sez` scores
+   0.667. Without this, typos in names under about ten characters were
+   invisible. Confidence 0.6, since it is the weakest signal.
+
+Candidates from 2 and 3 must then pass two gates: they must **share a track
+title** (the same artist misspelled will, two different artists will not), and
+their play counts must be **lopsided** (a typo is scrobbled a handful of times;
+two real artists have comparable presence). The second gate is what stops
+`Sef` and `Sez` being merged just because both released a track called `Intro`.
 
 ---
 
@@ -112,6 +145,74 @@ what is missing rather than throwing a CORS error at whoever opened it.
    (suspended key) takes every user down at once.
 2. **Check `ALLOWED_ORIGINS`.** It must list your Pages origin and nothing
    loose. `"*"` lets any website on the internet spend your key.
+
+---
+
+## Cost
+
+Everything is free tier, with no card required:
+
+| Piece | Plan | Relevant limit |
+|---|---|---|
+| GitHub repo + Pages | Free | Public repos only for Pages on Free |
+| GitHub Actions | Free | Unlimited minutes for public repos |
+| Cloudflare Workers | Free | 100,000 requests/day, 10ms CPU/request |
+| Workers Rate Limiting binding | Free | No additional charge; billed only as normal requests |
+| Cloudflare Cache API | Free | Used for the circuit breaker |
+| Last.fm API | Free | Contact partners@last.fm before commercial or large-scale use |
+| MusicBrainz | Free | 1 request/second, IP blocking for abuse |
+
+**Deliberately avoided:** Durable Objects (Workers Paid for the KV-backed
+kind) and Workers KV (its 1,000 writes/day free ceiling made it useless for a
+breaker). The Cache API replaced KV entirely, which also removed a setup step.
+
+**What the request cap means in practice.** A scan at the default 2,000 depth
+is 10 pages, batched 8 per request, so ~2 Worker requests. That is roughly
+50,000 scans/day inside the free tier. At 10,000 depth it is ~7 requests, so
+~14,000 scans/day. Cloudflare is not the constraint; the shared Last.fm key is.
+
+Exceeding the free Workers tier returns errors rather than a bill. Nothing here
+can silently start costing money.
+
+---
+
+## Rate limiting
+
+Written for the case where this gets posted somewhere busy.
+
+**The scarce resource is not Cloudflare requests, it is upstream Last.fm calls
+against one shared key.** A 10,000-scrobble scan is ~7 Worker requests but 50
+Last.fm calls. Last.fm suspends keys it sees abused (error 26), which would
+break the site for everyone at once. Community consensus puts its tolerance
+near 5 requests/second per key, and a single scan fetching pages back-to-back
+already sits at about that. So the danger is concurrency.
+
+Six layers, in order of how much work they actually do:
+
+1. **Pacing** — 130ms between upstream calls inside a request, so no single
+   scan can burst.
+2. **Circuit breaker** — on Last.fm error 29 or HTTP 429, stop for 120s rather
+   than hammering a key already in trouble. Backed by the Cache API.
+3. **Edge cache** — 30 minutes on upstream responses. Matters most in exactly
+   the viral case, where many people scan the same handful of usernames.
+4. **Own key** — visitors can paste their own API key and bypass the shared
+   budget and breaker entirely. The only layer that genuinely scales, because
+   it removes the shared resource.
+5. **Per-client limits** — 6 scan requests/10s and 120 pages/min per IP.
+6. **Shared ceiling** — 240 pages/min against the shared key.
+
+Two honest limits of layer 6, straight from Cloudflare's docs: counters are
+**per Cloudflare location, not global**, so worldwide traffic multiplies the
+ceiling; and the API is eventually consistent and "intentionally designed to
+not be used as an accurate accounting system". It overshoots. A true global
+counter needs Durable Objects — now possible on Free if declared as
+`new_sqlite_classes`, which is the upgrade path if per-location proves too
+loose.
+
+**The Worker fails OPEN if a limiter binding is missing**, so an unprotected
+deployment looks identical to a protected one. `/api/health` reports which
+limiters are live, and the frontend shows a warning banner when any are
+missing. Check that banner is absent before sharing the URL.
 
 ---
 
@@ -192,6 +293,23 @@ taxonomy is the worst thing this tool could do.
 from the official release, so the pre-release and post-release split may be
 correct rather than accidental. It reports the dates and counts and leaves the
 decision alone.
+
+**Era findings are settled with evidence, not guesses.** Two era names differing
+only by a trailing number could be a typo (`Yandhi` / `Yhandi`) or two real
+projects (`Drip Season` / `Drip Season 3`), and play counts cannot separate
+them. The MusicBrainz phase looks up whether each name exists as a release
+group; if both do, the finding is dropped entirely. MusicBrainz search is fuzzy
+and returns `Drip Season 3` when asked for `Drip Season`, so the Worker reports
+an `exact` flag based on normalised title equality and the detector trusts only
+that. Absence is treated as weak evidence, because era names often refer to
+projects that were never released at all.
+
+**A track under several eras is not an error.** This originally reported "one of
+these eras is wrong", which is false. Songs routinely survive across album eras:
+recorded for one project, held back, reworked, reconsidered for a later one. A
+Kanye track filed under both `BULLY` and `Cuck` is legitimate. The tool now says
+only that the two entries are indistinguishable in your data, and leaves it to
+you whether to differentiate the track titles or drop a redundant era tag.
 
 **Fuzzy artist matching is gated on shared track titles.** Two real artists can
 differ by one character. The same artist misspelled will share tracks; two
