@@ -16,10 +16,17 @@ album strings that share no characters and no string-matching tool will ever
 connect. Catalogues get repackaged into compilations and reissues on the
 label's schedule. Leaked tracks quietly get official releases years later.
 
-Because it regenerates, this is a **monitor**, not a one-off cleanup. One deep
-audit clears the backlog, then a monthly diff reports the few things that
-changed. Three specific edits a month is a five-minute job. A 500-item backlog
-never gets touched.
+Because it regenerates, rescanning occasionally beats one heroic cleanup. Lookup
+answers are cached in your browser, so a repeat scan is fast and mostly shows you
+what has changed since last time.
+
+There was a scheduled GitHub Action that scanned one hardcoded username monthly
+and committed the result to this repo. It is gone, for three reasons: it
+published one person's listening history into a public repo permanently, it was
+structurally single-tenant inside a tool meant for anyone, and its Node scanner
+had no Spotify support, so the "official" monthly report used a slower and weaker
+resolution path than the web app. That divergence is the same failure mode as the
+Python copy before it.
 
 | Detector | What it finds |
 |---|---|
@@ -173,8 +180,8 @@ secondary types including Compilation, Live, Remix, **Mixtape/Street** and
 **Demo**), which matters for hip-hop libraries that Spotify does not model.
 
 MusicBrainz enforces **1 request per second** with IP blocking for abuse. The
-limiter is not optional, and lookups are cached permanently in
-`data/mb-cache.json` because release dates do not change.
+limiter is not optional, and answers are cached permanently in the visitor's
+own browser because release dates do not change.
 
 ### Spotify first, MusicBrainz second
 
@@ -313,7 +320,6 @@ Everything is free tier, with no card required:
 | Piece | Plan | Relevant limit |
 |---|---|---|
 | GitHub repo + Pages | Free | Public repos only for Pages on Free |
-| GitHub Actions | Free | Unlimited minutes for public repos |
 | Cloudflare Workers | Free | 100,000 requests/day, 10ms CPU/request |
 | Workers Rate Limiting binding | Free | No additional charge; billed only as normal requests |
 | Cloudflare Cache API | Free | Used for the circuit breaker |
@@ -387,47 +393,35 @@ methods, and this project calls none of them. If it never enters the system it
 cannot leak, and its absence makes it structurally impossible for this codebase
 to write to your account.
 
-### 2. Add it as a repository secret
+The key goes into the Worker as a secret and nowhere else. It is never committed
+and never reaches the browser.
 
-Settings → Secrets and variables → Actions
+### 2. Deploy the Worker
 
-- **Secret** `LASTFM_API_KEY` = your key
-- **Variable** `LASTFM_USER` = your Last.fm username
-
-Never put the key in a file in this repo.
+See **Deploying the Worker** above.
 
 ### 3. Enable GitHub Pages
 
 Settings → Pages → Source: **Deploy from a branch** → branch `main`, folder
 **`/docs`**
 
-The scan commits `docs/report.json`, so Pages picks it up with no deploy step.
-
-### 4. Run it
-
-Actions → **scan** → Run workflow. Or wait for the 1st of the month.
+Nothing is generated or committed. The site is static files plus the Worker.
 
 ---
 
 ## Running locally
 
-Node 20, **zero dependencies**. Nothing to pin, nothing to audit, nothing to
-break in six months. `fetch` is built in.
+Any static server. There is no build step, no bundler and no dependencies:
+`docs/` is plain ES modules that browsers load directly.
 
 ```bash
-cp .env.example .env      # then put your key in it, it is git-ignored
-node scripts/scan.mjs                      # local detectors only, ~3 min
-node scripts/scan.mjs --resolve            # also resolve via MusicBrainz
-node scripts/scan.mjs --resolve --budget 300
-node scripts/scan.mjs --limit 5000         # quick smoke test
+npx http-server docs -p 8000
 ```
 
-The scanner **imports its detectors straight from `docs/drift.js`**, the same
-file the browser loads. There is one implementation, so the monthly run and the
-web app cannot disagree. An earlier version kept a parallel Python copy and they
-drifted within days: a bug fixed in one stayed live in the other.
+`docs/config.js` points at the Worker, so a local page still needs a deployed
+Worker (or `npx wrangler dev` from `worker/`).
 
-Tests, also no dependencies and no network:
+Tests, no dependencies and no network:
 
 ```bash
 node scripts/test-era.mjs       # tagging conventions, era names, D14f
@@ -442,18 +436,17 @@ Then serve the frontend:
 npx http-server docs -p 8000    # or any static server
 ```
 
-The first `--resolve` run is the slow one because the lookup cache is empty.
-`--budget` caps lookups per run, and the busiest issues are resolved first so a
-small budget still lands where it matters.
+The first deep scan is the slow one because the lookup cache is empty. Everything
+after that reuses it.
 
 ---
 
 ## Design notes
 
-**Detectors are pure functions over a list of scrobbles.** `detectors.py` does
-no I/O and touches no database or framework. That is deliberate: the detection
-logic is the actual asset, and it needs to run unchanged in a GitHub Action
-today and in a Cloudflare Worker later.
+**Detectors are pure functions over a list of scrobbles.** `docs/drift.js` does
+no I/O and touches no DOM, network or framework. That is deliberate: the
+detection logic is the actual asset, so it stays independent of where it runs and
+every rule is testable offline with no API key and no fixtures.
 
 **The era guard runs first.** Era-tagged unreleased material is partitioned out
 before anything else, and D0, D4, D1 and D13 never see it. Otherwise D0 would
@@ -503,9 +496,9 @@ and merging genuinely different songs is the worst failure available here.
 - **Case-only differences cannot be fixed by anyone**, due to how Last.fm
   stores names. They are reported in their own `unfixable` bucket so the list
   is not padded with impossible work.
-- **Last.fm sends no CORS headers**, so this cannot run in a browser against
-  the API. That is why the compute lives in a GitHub Action, and it is also why
-  your key never reaches the frontend.
+- **Last.fm sends no CORS headers**, so a browser cannot call the API directly.
+  A Cloudflare Worker proxies it, which is also what keeps the key off the
+  frontend. The analysis itself still runs entirely in the browser.
 - **Title matching for unreleased material is weak.** Leaks circulate under
   working titles and get released under different ones, with no duration or
   fingerprint fallback. D14e says "possibly released, verify" and means it.
@@ -514,23 +507,25 @@ and merging genuinely different songs is the worst failure available here.
 
 ## Sharing this with other people
 
-The current design works because it is one repo, one key, one user's public
-data. Multi-user breaks it in three specific ways:
+Two of the three original blockers are designed out rather than mitigated:
 
-1. **A public repo cannot hold other people's listening history.** Your own is
-   already public on Last.fm; theirs may not be, and it is personal data under
-   GDPR regardless. That needs a lawful basis, retention limits and a working
-   delete path, designed in rather than retrofitted.
-2. **A shared API key means a shared rate limit** and one suspension takes
-   everybody down.
-3. **Last.fm asks to be contacted at partners@last.fm before commercial or
-   large-scale use.** That email comes before the second user, not after.
+**Other people's listening history.** There is nowhere to put it. The Worker
+proxies and forgets, and the analysis runs in the visitor's own browser with
+results stored only in their own IndexedDB. No database, so no lawful basis to
+establish, no retention policy to write, no deletion endpoint to build and no
+breach surface. This is why the scheduled scan that committed a report to this
+repo was removed: it was the one component that published anything.
 
-The migration path is Cloudflare: Workers as the API proxy holding the key
-server-side (which also solves CORS), D1 for per-user storage, Pages for the
-frontend, which unlike GitHub Pages supports private repos on the free tier.
-`detectors.py` ports across untouched, which is the whole reason it has no
-dependencies.
+**A shared API key means a shared rate limit**, and one suspension takes
+everybody down. Mitigated in layers rather than solved: pacing, per-IP budgets, a
+shared ceiling, a circuit breaker on upstream pushback, edge caching, and a
+bring-your-own-key path that removes the shared resource entirely. Two of those
+layers are per-Cloudflare-location rather than global, which is documented above
+and not pretended otherwise.
+
+**Still outstanding: Last.fm asks to be contacted at partners@last.fm before
+commercial or large-scale use.** That email belongs before the second user, not
+after.
 
 ---
 

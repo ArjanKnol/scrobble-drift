@@ -1,16 +1,18 @@
 /**
- * Scrobble Drift detectors, browser build.
+ * Scrobble Drift detectors. The single implementation.
  *
- * A faithful port of scripts/detectors.py. Same rules, same thresholds, same
- * issue shapes. Pure functions over an array of scrobbles:
+ * Pure functions over an array of scrobbles:
  *
  *   {uts, artist, artist_mbid, album, album_mbid, track, track_mbid}
  *
- * NOTE ON DUPLICATION: this logic now exists in Python and JavaScript. That is
- * a real maintenance liability and should not be permanent. The Python version
- * powers the scheduled monitor; this one powers self-service scanning in the
- * browser. Consolidating on this file and running the monitor from a Worker
- * cron would leave one implementation. See README.
+ * No I/O, no DOM, no network. Everything that needs the network (pacing, retry,
+ * caching, progress) lives in the caller, which is what makes every rule in here
+ * testable offline and is why scripts/test-*.mjs need no fixtures or API keys.
+ *
+ * This file was once a port of a parallel Python implementation, and the two
+ * drifted within days: a fix landed in one and not the other. The Python copy is
+ * gone. If a second consumer ever appears, it imports this file rather than
+ * reimplementing it.
  */
 
 /* ------------------------------------------------------------ normalising */
@@ -174,9 +176,6 @@ const monthName = (uts) =>
 // bare "Snippets" that people actually use, because the trailing s ate the \b.
 const UNREL_MARK =
   /\bunreleased\b|\bunrelased\b|\bleak(?:s|ed)?\b|\bsnippet(?:s)?\b|\bOG\s*file(?:s)?\b|\bref(?:erence)?\s*track(?:s)?\b|\bCDQ\b|\bouttake(?:s)?\b|\bleftover(?:s)?\b/i;
-
-// A qualifier naming which period the material comes from, in brackets or not.
-const QUALIFIER = /\b(?:era|sessions?|sesh)\b/i;
 
 // "(Rodeo Era)", "[Rodeo Sessions]" -> Rodeo
 const BRACKETED_QUAL =
@@ -1228,8 +1227,9 @@ export function hygieneScore(totalPlays, issues, albumStrings = 0) {
   const counts = {};
   const plays = {};
 
-  // Falls back to a play-derived estimate when the caller does not pass a
-  // string count, so older callers and the saved monthly report still work.
+  // Falls back to a play-derived estimate when the caller omits the string
+  // count. Kept because the argument is optional and a wrong-but-sane score
+  // beats a crash, not because any current caller relies on it.
   //
   // The floor matters. Without it a library with 11 album strings bottoms out a
   // bucket on a single finding, because 12% of 11 is barely one penalty point.
