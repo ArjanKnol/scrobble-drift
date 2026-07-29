@@ -105,6 +105,82 @@ console.log("\nthe intended case still works");
 }
 
 /* ------------------------------------------------------------------------- */
+console.log("\na single stray play is not a systematic split");
+
+{
+  // 14 tagged plays against 1 bare one. Reported, because the scrobble really
+  // does exist, but as a one-off rather than a tagging habit, and WITH a date so
+  // it can actually be found. Without the date the reader knows they never
+  // scrobbled it that way, cannot locate the one that says otherwise, and
+  // reasonably concludes the tool is wrong.
+  const day = 86400;
+  const mk = (track, n, start) => {
+    const o = [];
+    for (let i = 0; i < n; i++)
+      o.push({ uts: start + i * day * 20, artist: "Drake",
+               album: "For All The Dogs", track });
+    return o;
+  };
+  const found = d8FeatureCredits(
+    mk("IMY2 (with Kid Cudi)", 14, 1698000000).concat(mk("IMY2", 1, 1712000000)),
+  ).filter((i) => i.title.includes("title variants"));
+
+  eq(found.length, 1, "the finding is still produced");
+  const i = found[0];
+  ok(i.confidence < 0.8, `at reduced confidence (${i.confidence})`);
+  ok(/One scrobble used a different spelling/.test(i.suggest),
+     "described as one stray scrobble, not a habit");
+  ok(/Barely worth fixing/.test(i.suggest),
+     "and says plainly it is barely worth fixing");
+  ok(!/standardise on/.test(i.suggest),
+     "so it does not imply a chore");
+
+  const bare = i.members.find((m) => m.track === "IMY2");
+  ok(bare.first, "the stray member carries a timestamp");
+  ok(bare.looks_like && /\d{4}/.test(bare.looks_like),
+     `and a readable date (${bare.looks_like})`);
+  eq(bare.plays, 1, "with its play count");
+
+  const main = i.members.find((m) => m.track === "IMY2 (with Kid Cudi)");
+  ok(/ to /.test(main.looks_like),
+     `a multi-month variant shows a range (${main.looks_like})`);
+}
+
+{
+  // An even split keeps full confidence and the original wording.
+  const mk = (track, n, start) => {
+    const o = [];
+    for (let i = 0; i < n; i++)
+      o.push({ uts: start + i * 86400, artist: "GoldLink", album: "At What Cost", track });
+    return o;
+  };
+  const i = d8FeatureCredits(
+    mk("Crew", 27, 1600000000)
+      .concat(mk("Crew (feat. Brent Faiyaz & Shy Glizzy)", 11, 1620000000)),
+  ).filter((x) => x.title.includes("title variants"))[0];
+
+  eq(i.confidence, 0.8, "a genuine split stays at full confidence");
+  ok(/standardise on/.test(i.suggest), "and still says standardise");
+}
+
+{
+  // Two strays is still stray; three is a pattern.
+  const mk = (track, n) => {
+    const o = [];
+    for (let i = 0; i < n; i++)
+      o.push({ uts: 1600000000 + o.length * 86400, artist: "A", album: "B", track });
+    return o;
+  };
+  const two = d8FeatureCredits(mk("Song (feat. X)", 40).concat(mk("Song", 2)))
+    .filter((i) => i.title.includes("title variants"))[0];
+  ok(two.confidence < 0.8, "two strays out of 42 is still a stray");
+
+  const many = d8FeatureCredits(mk("Song (feat. X)", 20).concat(mk("Song", 8)))
+    .filter((i) => i.title.includes("title variants"))[0];
+  eq(many.confidence, 0.8, "8 out of 28 is a real split, not a stray");
+}
+
+/* ------------------------------------------------------------------------- */
 console.log("\nconservative when a bare title is ambiguous");
 
 {
