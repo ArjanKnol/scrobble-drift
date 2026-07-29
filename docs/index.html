@@ -9,7 +9,7 @@
   how much they distort your charts.">
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=8">
+<link rel="stylesheet" href="style.css?v=9">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -536,6 +536,61 @@ function scanSummary() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Token-bucket rate limiter that decouples SEND rate from COMPLETION rate.
+ *
+ * The bug this fixes. MusicBrainz allows one request per second, and the old
+ * pacing was:
+ *
+ *   send  ->  await the reply  ->  top the elapsed time up to 1000ms  ->  repeat
+ *
+ * which makes the real send rate `1 / max(round_trip, 1s)`. MusicBrainz's fuzzy
+ * search routinely takes 3 to 5 seconds to answer, so a 3,400-lookup run that
+ * should have taken 57 minutes was quoting 246, and for most of every four
+ * seconds we sat idle. We were using under a quarter of the allowance.
+ *
+ * A token bucket releases one slot per second no matter how long earlier
+ * requests take, with a cap on how many may be in flight at once. The average
+ * send rate is still exactly 1/s, which is what MusicBrainz asks for, but
+ * latency no longer compounds into the rate.
+ *
+ * `concurrency` exists because "1 request per second" is a rate, not a
+ * concurrency limit, and a slow responder should not be able to convert our
+ * politeness into idleness. It is kept low deliberately: the aim is to use the
+ * allowance we are given, not to quietly exceed it.
+ */
+class Pacer {
+  constructor({ perSecond = 1, concurrency = 4 } = {}) {
+    this.interval = 1000 / perSecond;
+    this.concurrency = concurrency;
+    this.nextSlot = 0;
+    this.inFlight = 0;
+  }
+
+  /** Wait until this caller may send. */
+  async slot() {
+    // Wait for a free concurrency slot first, so a stall cannot queue hundreds
+    // of pending sends that then all fire at once when it clears.
+    while (this.inFlight >= this.concurrency) await sleep(25);
+
+    const now = Date.now();
+    // Slots are handed out on an absolute timeline rather than relative to
+    // "now", so a burst of callers is spread across the timeline instead of all
+    // being told to wait the same interval.
+    const at = Math.max(now, this.nextSlot);
+    this.nextSlot = at + this.interval;
+    if (at > now) await sleep(at - now);
+    this.inFlight++;
+  }
+
+  release() { this.inFlight = Math.max(0, this.inFlight - 1); }
+
+  /** Push the timeline out, e.g. after a 429. */
+  backoff(seconds) {
+    this.nextSlot = Math.max(this.nextSlot, Date.now() + seconds * 1000);
+  }
+}
+
 /** Visible countdown, so a wait never looks like a hang. */
 async function waitVisibly(seconds, why) {
   const box = $("waiting");
@@ -716,10 +771,16 @@ async function resolvePhase(scrobbles, apiKey) {
    * next job, silently losing that finding. Now the wait is followed by another
    * attempt, so a rate limit costs time rather than accuracy.
    */
+  // One request per second, up to 4 outstanding. MusicBrainz asks for a RATE of
+  // 1/s; waiting for each reply before starting the next turns their 1/s into
+  // our 1-per-4-seconds whenever their search is slow, which it usually is.
+  const mbPace = new Pacer({ perSecond: 1, concurrency: 4 });
+
   async function paced(path, params, attempts = 3, cacheKind = null) {
     // Answers already on disk cost nothing and never go stale: release groups,
     // types and dates are historical facts. This is what makes a repeat scan
-    // instant instead of another hour of one-per-second lookups.
+    // instant instead of another hour of one-per-second lookups. Checked before
+    // taking a pacer slot, so cache hits are not rate limited.
     const ck = cacheKind && [params.artist, params.track || params.title];
     if (ck) {
       const hit = await store.getLookup(cacheKind, ck[0], ck[1]);
@@ -728,17 +789,19 @@ async function resolvePhase(scrobbles, apiKey) {
 
     for (let attempt = 1; attempt <= attempts; attempt++) {
       if (abort) return null;
-      const t0 = Date.now();
       let retryIn = 0;
+      await mbPace.slot();
       try {
         const res = await fetch(`${base}${path}?` + new URLSearchParams(params));
         if (res.status === 429) {
           retryIn = Number(res.headers.get("Retry-After") || 30);
+          // Push the shared timeline out, not just this caller. Otherwise the
+          // other in-flight requests keep arriving during the cooldown and we
+          // ignore the very pushback we are responding to.
+          mbPace.backoff(retryIn);
         } else if (res.ok) {
           const out = await res.json();
           if (ck) await store.putLookup(cacheKind, ck[0], ck[1], out);
-          const spent = Date.now() - t0;
-          if (spent < 1000) await sleep(1000 - spent);   // pace the next call
           return out;
         } else if (res.status >= 500) {
           retryIn = 3 * attempt;                          // transient upstream
@@ -748,6 +811,10 @@ async function resolvePhase(scrobbles, apiKey) {
         }
       } catch {
         retryIn = 3 * attempt;                            // network blip
+      } finally {
+        // Must run on every path, including the returns above, or the
+        // concurrency counter leaks and the whole phase deadlocks.
+        mbPace.release();
       }
 
       if (attempt === attempts) { failed++; return null; }
@@ -773,21 +840,25 @@ async function resolvePhase(scrobbles, apiKey) {
   let spFails = 0;
   const SP_GIVE_UP = 5;
 
+  // Spotify publishes no rate number and answers 429 with Retry-After, so this
+  // is a conservative guess rather than a documented limit. Higher concurrency
+  // than MusicBrainz because Spotify is fast and tells us when to back off.
+  const spPace = new Pacer({ perSecond: 6, concurrency: 6 });
+
   async function spPaced(path, attempts = 3) {
     for (let attempt = 1; attempt <= attempts; attempt++) {
       if (abort) return null;
-      const t0 = Date.now();
       let retryIn = 0;
+      await spPace.slot();
       try {
         const res = await fetch(`${base}${path}`);
         if (res.status === 429) {
           const b = await res.json().catch(() => ({}));
           retryIn = Number(res.headers.get("Retry-After") || b.retry_after || 5);
+          spPace.backoff(retryIn);
         } else if (res.ok) {
           const out = await res.json();
           spFails = 0;
-          const spent = Date.now() - t0;
-          if (spent < 130) await sleep(130 - spent);
           return out;
         } else if (res.status >= 500) {
           retryIn = 2 * attempt;
@@ -797,6 +868,8 @@ async function resolvePhase(scrobbles, apiKey) {
         }
       } catch {
         retryIn = 2 * attempt;
+      } finally {
+        spPace.release();
       }
       if (attempt === attempts) { spFails++; return null; }
       await waitVisibly(retryIn, retryIn >= 10
@@ -807,6 +880,26 @@ async function resolvePhase(scrobbles, apiKey) {
         : "Spotify lookup failed, retrying.");
     }
     return null;
+  }
+
+  /**
+   * Run `work` over `items` with a bounded number of concurrent workers.
+   *
+   * Necessary because the Pacer alone changes nothing: a loop that awaits each
+   * lookup before starting the next only ever has one request outstanding, so
+   * the concurrency allowance goes unused and the rate stays at
+   * 1/round_trip. The pacer decides how fast requests may LEAVE; this decides
+   * how many are allowed to be in the air. Both are required.
+   *
+   * A shared index rather than chunking, so one slow item cannot leave a worker
+   * idle while another still has a queue.
+   */
+  async function pool(items, workers, work) {
+    let i = 0;
+    await Promise.all(Array.from({ length: Math.min(workers, items.length) },
+      async () => {
+        while (i < items.length && !abort) await work(items[i++]);
+      }));
   }
 
   $("fill").style.width = "0";
@@ -835,22 +928,27 @@ async function resolvePhase(scrobbles, apiKey) {
         ? Math.round(est.seconds / 60) + " min" : est.seconds + "s"})…`;
 
     const misses = [];
-    for (const group of artists) {
-      if (abort) break;
+    let gaveUp = false;
+    await pool(artists, 4, async (group) => {
+      if (gaveUp) { misses.push(...group.jobs); return; }
 
       if (spFails >= SP_GIVE_UP) {
         // Hand the rest straight to MusicBrainz rather than burning a call per
         // artist on something that is clearly down. Said out loud, because a
         // silent switch to the slow path looks like the scan has hung.
+        // A flag rather than a break: with a worker pool there is no single
+        // loop position to break out of, and the other workers must also stop
+        // and hand their remaining artists to MusicBrainz.
+        gaveUp = true;
         spotifyOn = false;
         if (stats) stats.spotify_gave_up = true;
-        for (const g of artists.slice(artists.indexOf(group))) misses.push(...g.jobs);
+        misses.push(...group.jobs);
         $("waiting").classList.remove("hide");
         $("waiting").innerHTML =
           `<strong style="color:var(--warn)">Spotify is not responding.</strong>
-           Falling back to MusicBrainz for the remaining
-           ${N(misses.length)} tracks. Same findings, just slower.`;
-        break;
+           Falling back to MusicBrainz for the remaining tracks.
+           Same findings, just slower.`;
+        return;
       }
 
       // Catalogues are cached on disk under their own kind, so a rescan or a
@@ -893,7 +991,7 @@ async function resolvePhase(scrobbles, apiKey) {
         }
       }
       tick(`Spotify: ${N(spHits)} of ${N(plan.length)} tracks resolved`);
-    }
+    });
 
     // No re-baseline needed: every job is either a hit or a miss, so
     // spHits + misses.length === plan.length and the total set above already
@@ -951,13 +1049,12 @@ async function resolvePhase(scrobbles, apiKey) {
    */
   if (stats) stats.mb_planned = mbPlan.length;
   let mbGot = 0;
-  for (const job of mbPlan) {
-    if (abort) break;
+  await pool(mbPlan, 4, async (job) => {
     const r = await paced("/api/mb/recording",
                           { artist: job.artist, track: job.track }, 3, "rec");
     if (r) { recCache.set(key(job.artist, job.track), r); mbGot++; }
     tick(`Resolving remaining ${N(mbPlan.length)} against MusicBrainz`);
-  }
+  });
   if (stats) {
     stats.mb_resolved = mbGot;
     stats.from_cache = cacheHits;
@@ -1138,19 +1235,60 @@ function render() {
       suggest merging it into an official release, whichever convention you
       use.</p>` : ""}
 
-    ${im.biggest_movers.length ? `
-      <h2>Your chart, corrected</h2>
+    ${im.biggest_movers.length ? (() => {
+      const mergedRows = im.biggest_movers.filter((m) => m.reason === "merged");
+      const moved = im.biggest_movers.filter((m) => m.reason === "displaced");
+      return `
+      <h2>Your album chart, if split albums were counted as one</h2>
+      <p class="note" style="margin:-4px 0 12px">
+        Some of your albums are split across more than one spelling, so Last.fm
+        counts them separately and each one ranks lower than it should. This is
+        what your chart would look like with those plays added back together.
+        Nothing here has been changed on Last.fm.
+      </p>
       ${im.number_one_changes ? `<div class="panel" style="border-color:var(--warn);
-        margin-bottom:12px">Your true number one album is not the one Last.fm
+        margin-bottom:12px">Your real number one album is not the one Last.fm
         shows you.</div>` : ""}
-      <div class="panel">${im.biggest_movers.slice(0, 14).map((m) => `
-        <div class="mv">
-          <span class="${m.delta > 0 ? "up" : "down"}" style="width:64px;
-            font-variant-numeric:tabular-nums">#${m.from} → #${m.to}</span>
-          <span style="flex:1">${KEY(m.album)}</span>
-          <span class="v" style="color:var(--dim)">
-            ${N(m.plays_before)} → ${N(m.plays_after)}</span>
-        </div>`).join("")}</div>` : ""}
+
+      ${mergedRows.length ? `
+        <div class="panel">
+          <div class="mv-head">
+            <span style="width:96px">Rank</span>
+            <span style="flex:1">Album</span>
+            <span>Plays, once merged${tip(
+              "Left is what Last.fm shows today. Right is the total after adding " +
+              "in the plays currently sitting under a different spelling of the " +
+              "same album.", "tip-r")}</span>
+          </div>
+          ${mergedRows.slice(0, 12).map((m) => `
+            <div class="mv">
+              <span class="${m.delta > 0 ? "up" : "down"}" style="width:96px;
+                font-variant-numeric:tabular-nums">#${m.from} &rarr; #${m.to}</span>
+              <span style="flex:1">${KEY(m.album)}</span>
+              <span class="v" style="color:var(--dim)">${N(m.plays_before)}
+                &rarr; <strong style="color:var(--good)">${N(m.plays_after)}</strong>
+                <span style="opacity:.7">(+${N(m.plays_after - m.plays_before)})</span>
+              </span>
+            </div>`).join("")}
+        </div>` : ""}
+
+      ${moved.length ? `
+        <p class="note" style="margin-top:14px">
+          These albums kept exactly the same play count. They only move because
+          the albums above them merged and overtook them.${tip(
+            "No plays were added to or removed from these. Their rank shifts " +
+            "purely as a side effect of other albums being counted correctly.",
+            "tip-r")}
+        </p>
+        <div class="panel">${moved.slice(0, 8).map((m) => `
+          <div class="mv">
+            <span class="${m.delta > 0 ? "up" : "down"}" style="width:96px;
+              font-variant-numeric:tabular-nums">#${m.from} &rarr; #${m.to}</span>
+            <span style="flex:1">${KEY(m.album)}</span>
+            <span class="v" style="color:var(--dim)">${N(m.plays_before)} plays,
+              unchanged</span>
+          </div>`).join("")}</div>` : ""}`;
+    })() : ""}
 
     <h2 id="issues-anchor">Issues</h2>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;
