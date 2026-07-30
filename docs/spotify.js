@@ -273,8 +273,9 @@ export function estimate(artistGroups, { albumsPerArtist = 12 } = {}) {
     artists: artistGroups.length,
     tracks: artistGroups.reduce((n, g) => n + g.jobs.length, 0),
     calls,
-    // 5/s is a deliberately conservative read of Spotify's undocumented
-    // limit. It publishes no number, only 429 with Retry-After.
-    seconds: Math.ceil(calls / 5),
+    // 3/s. Spotify publishes no number and measures over a rolling 30-second
+    // window; client credentials sits near 180/minute. 6/s produced constant
+    // 429s, and the retry stalls made it slower than pacing correctly.
+    seconds: Math.ceil(calls / 3),
   };
 }

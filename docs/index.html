@@ -146,6 +146,9 @@ import {
 import { apiBase, isConfigured } from "./config.js";
 import * as store from "./store.js";
 import { fetchCatalogue, matchTrack, byArtist, estimate } from "./spotify.js";
+import {
+  fetchMbCatalogue, splitByStrategy, estimateMb,
+} from "./mbcatalogue.js";
 
 const $ = (id) => document.getElementById(id);
 const N = (n) => (n ?? 0).toLocaleString();
@@ -391,6 +394,8 @@ const freshStats = () => ({
   spotify_artists: 0,
   mb_planned: 0,
   mb_resolved: 0,
+  mb_artists: 0,
+  mb_per_track: 0,
   lookups_failed: 0,
   from_cache: 0,
   aborted: false,
@@ -971,10 +976,20 @@ async function resolvePhase(scrobbles, apiKey) {
   let spFails = 0;
   const SP_GIVE_UP = 5;
 
-  // Spotify publishes no rate number and answers 429 with Retry-After, so this
-  // is a conservative guess rather than a documented limit. Higher concurrency
-  // than MusicBrainz because Spotify is fast and tells us when to back off.
-  const spPace = new Pacer({ perSecond: 6, concurrency: 6 });
+  /*
+   * 3/s, not 6.
+   *
+   * Spotify publishes no number, and computes its limit over a ROLLING 30-SECOND
+   * WINDOW, so a burst that looks fine per-second still trips it. Client
+   * credentials sits near 180 requests/minute in practice, which is 3/s. At 6/s
+   * every scan collected 429s, and the Retry-After stalls cost far more than the
+   * extra rate ever bought: nominally twice as fast, actually slower and noisier.
+   *
+   * Concurrency stays at 6 because that costs nothing here. The pacer spaces
+   * SENDS, so in-flight requests do not add to the rate; they only stop a slow
+   * response from idling the budget.
+   */
+  const spPace = new Pacer({ perSecond: 3, concurrency: 6 });
 
   async function spPaced(path, attempts = 3) {
     for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -1009,6 +1024,46 @@ async function resolvePhase(scrobbles, apiKey) {
         // upstreams was struggling, which made this impossible to diagnose from
         // a screenshot.
         : "Spotify lookup failed, retrying.");
+    }
+    return null;
+  }
+
+  /**
+   * Paced fetch for the MusicBrainz catalogue module.
+   *
+   * Shares mbPace with the per-track path, so browses and searches draw on ONE
+   * 1/s budget rather than each keeping its own and jointly doubling the rate.
+   * Returns null on failure, which fetchMbCatalogue reads as "call failed" and
+   * refuses to cache.
+   */
+  async function mbApi(path, attempts = 3) {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      if (abort) return null;
+      let retryIn = 0;
+      await mbPace.slot();
+      try {
+        const res = await fetch(`${base}${path}`);
+        if (res.status === 429) {
+          const b = await res.json().catch(() => ({}));
+          retryIn = Number(res.headers.get("Retry-After") || b.retry_after || 5);
+          mbPace.backoff(retryIn);
+        } else if (res.ok) {
+          return await res.json();
+        } else if (res.status >= 500) {
+          retryIn = 3 * attempt;
+        } else {
+          failed++;
+          return null;
+        }
+      } catch {
+        retryIn = 3 * attempt;
+      } finally {
+        mbPace.release();
+      }
+      if (attempt === attempts) { failed++; return null; }
+      await waitVisibly(retryIn, retryIn >= 20
+        ? "MusicBrainz asked us to slow down."
+        : "MusicBrainz lookup failed, retrying.");
     }
     return null;
   }
@@ -1178,18 +1233,71 @@ async function resolvePhase(scrobbles, apiKey) {
 
   /* --------------------------------- Phase C: MusicBrainz on the residual */
   /*
-   * Only the tracks Spotify could not confirm. This is the genuinely unreleased
-   * material plus anything Spotify has lost to licensing, which is exactly the
-   * set MusicBrainz is better at, so the slow source is spent where it is
-   * actually the stronger one.
+   * Only the tracks Spotify could not confirm: the genuinely unreleased material
+   * plus anything Spotify lost to licensing, which is exactly where MusicBrainz
+   * is the stronger source.
+   *
+   * MusicBrainz allows ONE request per second, hard, so this phase is the entire
+   * cost of a scan. Measured on a 10,000-scrobble run: Spotify handled most of
+   * 1,407 tracks in about two minutes, then a few hundred residual tracks took
+   * five more at one search each.
+   *
+   * The same per-artist trick applies, and is worth far more here. Browsing an
+   * artist's official releases with `inc=recordings` answers every one of their
+   * tracks from a couple of calls. The split matters though: for an artist with a
+   * single residual track a browse is pure overhead, so splitByStrategy sends the
+   * thin artists to per-track search and only browses where it pays.
    */
   if (stats) stats.mb_planned = mbPlan.length;
   let mbGot = 0;
-  await pool(mbPlan, 4, async (job) => {
+
+  const split = splitByStrategy(mbPlan);
+  const mbEst = estimateMb(split);
+  if (stats) {
+    stats.mb_artists = split.catalogue.length;
+    stats.mb_per_track = split.perTrack.length;
+  }
+
+  if (split.catalogue.length) {
+    setPhase(2, 2, "Looking up real release data",
+      `${N(mbEst.catalogue_tracks)} tracks belong to ${N(mbEst.artists)} ` +
+      `artists, so their catalogues are fetched once each instead of one lookup ` +
+      `per track. About ${mbEst.seconds}s for the rest.`);
+  }
+
+  // Catalogues first: each one may remove many per-track lookups.
+  for (const group of split.catalogue) {
+    if (abort) break;
+
+    let cat = await store.getLookup("mbcat", group.artist, "*");
+    if (cat) {
+      cat = { ...cat, titles: new Map(cat.titles || []) };
+      cacheHits++;
+    } else {
+      cat = await fetchMbCatalogue(group.artist, group.mbid, mbApi);
+      // Never persist a partial index. A browse whose second page failed would
+      // otherwise be cached as a complete but short discography, and every later
+      // scan would trust it.
+      if (!cat.error) {
+        await store.putLookup("mbcat", group.artist, "*",
+                              { ...cat, titles: [...cat.titles] });
+      }
+    }
+
+    for (const job of group.jobs) {
+      const hit = matchTrack(cat, job.track);
+      if (hit) { recCache.set(key(job.artist, job.track), hit); mbGot++; }
+      done++;
+      tick(`MusicBrainz: ${N(mbGot)} of ${N(mbPlan.length)} resolved`);
+    }
+  }
+
+  // Per-track for the artists a browse would not pay for.
+  await pool(split.perTrack, 4, async (job) => {
     const r = await paced("/api/mb/recording",
                           { artist: job.artist, track: job.track }, 3, "rec");
     if (r) { recCache.set(key(job.artist, job.track), r); mbGot++; }
-    tick(`Resolving remaining ${N(mbPlan.length)} against MusicBrainz`);
+    tick(`MusicBrainz: ${N(mbGot)} of ${N(mbPlan.length)} resolved`);
   });
   if (stats) {
     stats.mb_resolved = mbGot;
