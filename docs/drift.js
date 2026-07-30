@@ -496,7 +496,13 @@ export function d14aFormatVariants(era) {
         if (norm(a) === norm(b) || similar(norm(a), norm(b)) < 0.82) continue;
         const [lo, hi] = playsOf(a) <= playsOf(b) ? [a, b] : [b, a];
         if (playsOf(lo) > Math.max(2, 0.25 * playsOf(hi))) continue;
-        const sequel = differsOnlyByVersion(lo, hi);
+        // Version and sequel markers: not a typo, not worth a lookup, not
+        // reported. Previously these became low-confidence reviews awaiting a
+        // MusicBrainz ruling, which in practice was noise: the ruling often
+        // could not be obtained, and when it could, MusicBrainz catalogues
+        // leaked projects anyway so both names frequently "existed".
+        if (differsOnlyByVersion(lo, hi)) continue;
+
         const loAlbum = albumOf(lo), hiAlbum = albumOf(hi);
         issues.push({
           detector: "D14a",
@@ -504,32 +510,28 @@ export function d14aFormatVariants(era) {
           // the MusicBrainz phase can settle it with evidence: if both era
           // names exist as real release groups they are separate projects and
           // this is dropped entirely. See verifyEraNames().
-          // a/b stay as ERA NAMES because that is what MusicBrainz is asked
-          // about. The album strings ride along so verifyEraNames can name what
-          // the user actually has when it rewrites these messages.
-          verify: sequel
-            ? { artist, a: lo, b: hi, aAlbum: loAlbum, bAlbum: hiAlbum }
-            : undefined,
-          // A trailing number or version token means these are very likely
-          // distinct projects, not a misspelling: 'Drip Season' and 'Drip
-          // Season 3' are two different Gunna tapes. Play count asymmetry
-          // cannot separate that from a typo, so downgrade to review rather
-          // than assert an error.
-          class: sequel ? "review" : "error",
-          confidence: sequel ? 0.35 : 0.7,
+          /*
+           * The remaining pairs are probable typos, and THOSE are worth a
+           * database check. It can only make the finding more honest: if both
+           * spellings turn out to be real projects it is dropped entirely, and
+           * if the lookup fails the claim is withheld rather than asserted.
+           *
+           * The check used to sit on the version pairs instead, where it could
+           * not help, while the typo assertion went out unverified.
+           *
+           * a/b stay as ERA NAMES because that is what MusicBrainz is asked
+           * about. The album strings ride along so verifyEraNames can name what
+           * the user actually has when it rewrites these messages.
+           */
+          verify: { artist, a: lo, b: hi, aAlbum: loAlbum, bAlbum: hiAlbum },
+          class: "error",
+          confidence: 0.7,
           artist,
-          title: sequel
-            ? `Similar era names for ${artist}: '${loAlbum}' vs '${hiAlbum}'`
-            : `Probable era-name typo for ${artist}: '${loAlbum}' vs ` +
-              `'${hiAlbum}'`,
+          title: `Probable era-name typo for ${artist}: '${loAlbum}' vs ` +
+                 `'${hiAlbum}'`,
           plays_affected: playsOf(lo) + playsOf(hi),
-          suggest: sequel
-            ? `these differ only by a version or sequel marker, so they are ` +
-              `probably separate projects rather than a typo. Checking ` +
-              `MusicBrainz to confirm. '${hiAlbum}' has ${playsOf(hi)} plays, ` +
-              `'${loAlbum}' has ${playsOf(lo)}.`
-            : `'${hiAlbum}' has ${playsOf(hi)} plays against ` +
-              `${playsOf(lo)}, so '${loAlbum}' is likely the typo.`,
+          suggest: `'${hiAlbum}' has ${playsOf(hi)} plays against ` +
+                   `${playsOf(lo)}, so '${loAlbum}' is likely the typo.`,
           // Album strings, so the report names what is in the library and the
           // UI can deep-link straight to those album pages. The era name is
           // carried too, for the cases where one era has several spellings.
@@ -542,8 +544,21 @@ export function d14aFormatVariants(era) {
   return issues;
 }
 
+/*
+ * Trailing version and sequel markers.
+ *
+ * Two era names differing only by one of these are DIFFERENT PROJECTS, always.
+ * 'Drip Season 1' and 'Drip Season 2' are two Gunna tapes; 'Yandhi v1' and
+ * 'Yandhi v2' are two leak packages. There is no reading under which they are a
+ * misspelling of each other, so they are dropped rather than reported at low
+ * confidence and sent for a database check that cannot settle anything.
+ *
+ * Roman numerals are limited to ii and iii: unambiguous as a trailing token,
+ * where a bare 'v' or 'i' would collide with the v-prefix form and with real
+ * words.
+ */
 const VERSION_TAIL =
-  /\s*(?:v\.?\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?|og|alt|final|deluxe|pt\.?\s*\d+)$/i;
+  /\s*(?:v\.?\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?|og|alt|final|deluxe|ii|iii|(?:pt\.?|part)\s*\d+)$/i;
 
 /**
  * True when two names are identical once a trailing version token is cut.
@@ -577,13 +592,19 @@ export function d14cTrackInTwoEras(era) {
   for (const s of era) {
     const name = eraName(s.album);
     if (!name) continue;
-    const k = `${s.artist}␟${normTitle(s.track)}`;
-    if (!where.has(k)) where.set(k, { artist: s.artist, track: s.track, eras: new Map() });
-    const e = where.get(k).eras;
-    e.set(name, (e.get(name) || 0) + 1);
+    const k = `${s.artist}␟${trackIdentity(s.track)}`;
+    if (!where.has(k)) {
+      where.set(k, { artist: s.artist, track: s.track, eras: new Map(),
+                     albums: new Map() });
+    }
+    const rec = where.get(k);
+    rec.eras.set(name, (rec.eras.get(name) || 0) + 1);
+    // The album strings behind each era, so the finding can link to them
+    // instead of offering only an artist link.
+    rec.albums.set(s.album, (rec.albums.get(s.album) || 0) + 1);
   }
   const issues = [];
-  for (const { artist, track, eras } of where.values()) {
+  for (const { artist, track, eras, albums } of where.values()) {
     if (eras.size < 2) continue;
     // A version marker makes a carried-over song even more likely, so it is
     // reported with lower confidence still.
@@ -603,7 +624,20 @@ export function d14cTrackInTwoEras(era) {
         ". Nothing to fix if that is the case. If these are different " +
         "versions, consider putting that in the track title so the two are " +
         "distinguishable. If they are the same file, one era tag is redundant.",
-      members: ranked(eras).map(([era_, plays]) => ({ era: era_, plays })),
+      /*
+       * `track` on the issue, and album strings in the members.
+       *
+       * Without `track` the issue had no track for issueLinks to use, and the
+       * members carried only era NAMES, which are not linkable to anything. The
+       * result was a finding about one specific song offering nothing but a link
+       * to the artist's whole library. Naming the track and both album strings
+       * makes it one click per entry.
+       */
+      track,
+      members: [
+        ...ranked(albums).map(([album, plays]) => ({ album, plays })),
+        ...ranked(eras).map(([era_, plays]) => ({ era: era_, plays })),
+      ],
     });
   }
   return issues;
@@ -1797,6 +1831,41 @@ export function chartImpact(rest, splits, topN = 25) {
 }
 
 /**
+ * Report order, most worth fixing first.
+ *
+ * Sorting by plays alone put whatever happened to be popular at the top, which
+ * is not the same as what is worth doing. This order came from actually working
+ * through a report end to end:
+ *
+ *   1. Blank albums     unambiguous, and now carries the album each one needs
+ *   2. Album splits     the findings that actually distort the charts
+ *   3. Title splits     same idea, one level down
+ *   4. Artist names     real but rarer
+ *   5. Scrobbler bugs   duplicates and impossible timestamps, not your doing
+ *   6. Era consistency  mostly informational, and mostly already correct
+ *
+ * Plays still break ties within a tier, so the biggest problem of the most
+ * important kind is the first thing on the page.
+ */
+export const DETECTOR_ORDER = [
+  ["D5"],                            // scrobbles with no album
+  ["D0", "D4"],                      // one track split across album strings
+  ["D8"],                            // one track split across title variants
+  ["D1", "D3"],                      // artist name variants
+  ["D11"],                           // Various Artists
+  ["D6", "D12"],                     // duplicate and impossible scrobbles
+  ["D14a", "D14c", "D14e", "D14f"],  // unreleased tagging, mostly review
+];
+
+const ORDER_RANK = new Map();
+DETECTOR_ORDER.forEach((tier, i) => tier.forEach((d) => ORDER_RANK.set(d, i)));
+
+/** Sort comparator: detector tier first, then plays within a tier. */
+export const byImportance = (a, b) =>
+  (ORDER_RANK.get(a.detector) ?? 99) - (ORDER_RANK.get(b.detector) ?? 99) ||
+  (b.plays_affected || 0) - (a.plays_affected || 0);
+
+/**
  * Which bucket each detector scores into.
  *
  * Exhaustive on purpose, and asserted as such below. The previous version
@@ -1960,7 +2029,7 @@ export function analyse(scrobbles, { official } = {}) {
   // skips casing-only groups, so these are now absent entirely rather than
   // reported under a different detector.
 
-  issues.sort((a, b) => (b.plays_affected || 0) - (a.plays_affected || 0));
+  issues.sort(byImportance);
 
   const byDetector = {};
   for (const i of issues) {
