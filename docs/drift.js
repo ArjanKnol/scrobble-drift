@@ -806,12 +806,62 @@ export function d4AlbumSplits(rest, minPlays = 2) {
     const temporal = temporalSignature(members, g.track);
     const migration = Boolean(temporal?.migration);
 
+    /*
+     * A track legitimately on two different albums is not a split.
+     *
+     * The Jackson 5's 'Dancing Machine' is on the 1973 album `Get It Together`
+     * and on the 1974 album `Dancing Machine`. Both are real, separate records.
+     * The detector already worked this out, saying "the two look like different
+     * releases rather than one absorbing the other", and then reported it as a
+     * 70% split anyway. The evidence was being computed and ignored.
+     *
+     * The distinction D4 exists for is a single being ABSORBED into an album, so
+     * it needs at least one of:
+     *   - a migration signature (all early plays on one string, later on another)
+     *   - one string that looks like a single, an EP or an edition variant
+     *
+     * Two plain albums with no migration is normal discography, not drift.
+     *
+     * Note `classifyAlbumString` calls an album named after its title track a
+     * "single", which is wrong for `Dancing Machine` and for every self-titled
+     * lead single. Requiring a migration signature alongside it is what stops
+     * that misread from producing a confident claim.
+     */
+    const kinds = members.slice(0, 2).map((m) => m.looks_like);
+    /*
+     * Only RELIABLE single markers count here.
+     *
+     * classifyAlbumString returns "single (album titled after the track)"
+     * whenever the album and track names match, which is a guess, not a fact:
+     * an album named after its lead track is extremely common. `Dancing
+     * Machine` is a 1974 Jackson 5 ALBUM, and treating that label as evidence of
+     * a single is what let a two-album discography look like a split.
+     *
+     * An explicit " - Single" / " - EP" suffix, an edition variant or a
+     * compilation are all real signals. The name-match guess is not.
+     */
+    const hasSingleish = kinds.some((k) =>
+      /single or ep|edition variant|compilation|missing/i.test(k || ""));
+    const plainAlbums = !structural && !migration && !hasSingleish;
+
+    // A one-play minority side is a stray, not a systematic split. Same
+    // reasoning as the single stray scrobble in D8.
+    const minority = members.length > 1
+      ? members[members.length - 1].plays : 0;
+    const stray = minority <= 1 && total <= 4;
+
+    const weak = plainAlbums || stray;
+
     issues.push({
       detector: "D4",
       // A structural title almost certainly means several distinct tracks, so
       // it is a question rather than a finding.
-      class: structural ? "review" : "split",
-      confidence: structural ? 0.25 : (migration ? 0.9 : 0.7),
+      class: (structural || weak) ? "review" : "split",
+      confidence: structural ? 0.25
+        : migration ? 0.9
+        : plainAlbums ? 0.2     // checked before stray: it explains more
+        : stray ? 0.3
+        : 0.7,
       artist: g.artist, track: g.track,
       title: structural
         ? `${g.artist} - '${g.track}' appears on ${g.albums.size} albums`
@@ -824,9 +874,20 @@ export function d4AlbumSplits(rest, minPlays = 2) {
         : migration
         ? `consolidate to '${temporal.later}': the earlier string looks like ` +
           `the pre-album release.`
+        : plainAlbums
+        ? `Both of these look like ordinary albums, and there is no sign of one ` +
+          `absorbing the other, so this is probably just a song that appears on ` +
+          `two releases. Common with lead singles that get their own album, ` +
+          `reissues and label compilations. Nothing to fix unless you know ` +
+          `these are the same record.`
+        : stray
+        ? `${minority} play sits under '${members[members.length - 1].album}' ` +
+          `against ${members[0].plays} under '${members[0].album}'. Too small ` +
+          `to be a tagging habit, so probably a one-off. The dates are below if ` +
+          `you want to look.`
         : `candidate for consolidation, but the two album strings do not look ` +
-          `like editions of one release. Enable MusicBrainz resolution to ` +
-          `confirm before merging anything.`,
+          `like editions of one release. Enable release lookups to confirm ` +
+          `before merging anything.`,
       members,
       // The temporal note is suppressed for structural titles: the chronology
       // is real but says nothing useful about two different albums.
@@ -1316,13 +1377,37 @@ export function d6Duplicates(scrobbles, windowSec = 30) {
     .filter(([m, n]) => (allMonths.get(m) || 0) >= 50 && n / allMonths.get(m) > 0.25)
     .sort((a, b) => b[1] / allMonths.get(b[0]) - a[1] / allMonths.get(a[0]));
 
+  /*
+   * Members are the actual duplicated scrobbles, with a date and time.
+   *
+   * They used to be MONTHS, which told the reader nothing they could use: "1
+   * probable duplicate scrobble, 2026-06" leaves you to find one scrobble in a
+   * month of listening. Deleting a duplicate needs the artist, the track and the
+   * timestamp, so those are what it shows now. Same mistake D5 was making.
+   */
+  const stamp = (uts) => new Date(uts * 1000)
+    .toISOString().replace("T", " ").slice(0, 16) + " UTC";
+
   const issues = [{
     detector: "D6", class: "error", confidence: 0.8,
-    title: `${dupes.length.toLocaleString()} probable duplicate scrobbles ` +
-           `(same track within ${windowSec}s)`,
+    title: `${dupes.length.toLocaleString()} probable duplicate ` +
+           `scrobble${dupes.length === 1 ? "" : "s"} ` +
+           `(same track twice within ${windowSec}s)`,
     plays_affected: dupes.length,
-    suggest: "usually two scrobblers running at once.",
-    members: ranked(dupMonths).slice(0, 24).map(([month, plays]) => ({ month, plays })),
+    suggest:
+      `Each one is listed below with the exact time of the SECOND scrobble, ` +
+      `which is the one to remove. Almost always two scrobblers running at ` +
+      `once rather than anything you did` +
+      (dupes.length > 20
+        ? `, so finding the cause is worth more than deleting ${dupes.length} ` +
+          `entries by hand.`
+        : `.`),
+    members: dupes.slice(0, 30).map((d) => ({
+      artist: d.artist, track: d.track, plays: 1,
+      looks_like: stamp(d.uts),
+      first: d.uts, last: d.uts,
+    })),
+    months: ranked(dupMonths).slice(0, 24).map(([month, plays]) => ({ month, plays })),
   }];
   if (systemic.length) {
     issues.push({
@@ -1536,13 +1621,25 @@ export function resolutionPlan(scrobbles, { budget = 3000 } = {}) {
   const { era, rest } = partitionEra(scrobbles);
   const splits = d4AlbumSplits(rest);
 
-  const jobs = new Map();   // key -> {artist, track, plays, kind}
+  // Artist MBIDs, harvested from the scrobbles themselves. Last.fm supplies these
+  // on many scrobbles, and having one lets a MusicBrainz catalogue browse skip
+  // the name-resolution call AND removes any chance of browsing the wrong
+  // artist's discography.
+  const mbids = new Map();
+  for (const s of scrobbles) {
+    if (s.artist_mbid && !mbids.has(norm(s.artist))) {
+      mbids.set(norm(s.artist), s.artist_mbid);
+    }
+  }
+
+  const jobs = new Map();   // key -> {artist, track, plays, kind, artist_mbid}
   const add = (artist, track, plays, kind) => {
     if (!artist || !track) return;
     const k = `${artist}␟${track}`.toLowerCase();
     const cur = jobs.get(k);
     if (cur) { cur.plays += plays; return; }
-    jobs.set(k, { artist, track, plays, kind });
+    jobs.set(k, { artist, track, plays, kind,
+                  artist_mbid: mbids.get(norm(artist)) || null });
   };
 
   for (const s of splits) add(s.artist, s.track, s.plays_affected, "split");

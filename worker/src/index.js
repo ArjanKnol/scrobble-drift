@@ -116,6 +116,12 @@ export default {
       if (url.pathname === "/api/mb/recording") {
         return await mbRecording(url, cors);
       }
+      if (url.pathname === "/api/mb/artist-id") {
+        return await mbArtistId(url, cors);
+      }
+      if (url.pathname === "/api/mb/artist-catalogue") {
+        return await mbArtistCatalogue(url, cors);
+      }
       if (url.pathname === "/api/mb/release-group") {
         return await mbReleaseGroup(url, cors);
       }
@@ -505,6 +511,140 @@ async function mbReleaseGroup(url, cors) {
     exists: groups.some((g) => g.exact),
     matches: groups.filter((g) => g.exact).slice(0, 5),
     near: groups.filter((g) => !g.exact).slice(0, 5),
+  }, 200, { ...cors, "Cache-Control": "public, max-age=86400" });
+}
+
+/**
+ * MusicBrainz artist catalogue: every official release WITH its tracklist.
+ *
+ * ---------------------------------------------------------------------------
+ * Why this exists
+ * ---------------------------------------------------------------------------
+ * The Spotify catalogue trick cut per-track lookups to per-artist ones and made
+ * that phase ~5x faster. The same idea was never applied to MusicBrainz, where it
+ * is worth far more, because MusicBrainz allows only ONE request per second. A
+ * residual of 300 tracks is 5 minutes of wall clock; the same 300 tracks belong
+ * to maybe 40 artists, which is a handful of calls.
+ *
+ * The endpoint is `browse`, not `search`:
+ *
+ *   /ws/2/release?artist=<MBID>&inc=recordings&status=official
+ *
+ * Two things had to be checked in the docs rather than assumed:
+ *
+ *  - Browsing RECORDINGS by artist cannot include releases: the only `inc`
+ *    values are artist-credits and isrcs. So recording titles alone would say
+ *    "this artist has a track called X" without saying whether it was ever
+ *    released, which is precisely the question. Browsing RELEASES does support
+ *    `inc=recordings`, so that is the right direction.
+ *  - `status=official` is supported here, so bootlegs never enter the response.
+ *    That matters: MusicBrainz catalogues leaked projects, and filtering at the
+ *    source is cheaper and safer than filtering after.
+ *
+ * Paging is unusual and the docs are explicit: releases are capped so a response
+ * holds at most ~500 tracks, so you may get fewer than `limit`. The offset must
+ * be advanced by the number of releases ACTUALLY RETURNED, not by the limit, or
+ * pages get silently skipped.
+ */
+async function mbArtistCatalogue(url, cors) {
+  const mbid = (url.searchParams.get("mbid") || "").trim();
+  if (!/^[0-9a-f-]{36}$/i.test(mbid)) {
+    return json({ error: "valid mbid required" }, 400, cors);
+  }
+  const offset = Math.max(0, Number(url.searchParams.get("offset") || 0));
+
+  const res = await fetch(
+    `${MB}/release?artist=${mbid}&inc=recordings&status=official` +
+    `&limit=100&offset=${offset}&fmt=json`,
+    {
+      headers: {
+        // MusicBrainz blocks requests without a meaningful User-Agent. This is
+        // not optional politeness, it is enforced.
+        "User-Agent": "ScrobbleDrift/0.1 (+https://github.com/ArjanKnol/scrobble-drift)",
+        Accept: "application/json",
+      },
+      cf: { cacheTtl: 2592000, cacheEverything: true },   // 30 days
+    },
+  );
+  if (res.status === 503) {
+    throw new Retryable("MusicBrainz is rate limiting us.", 5);
+  }
+  if (!res.ok) return json({ error: `musicbrainz http ${res.status}` }, 502, cors);
+  const data = await res.json();
+
+  const releases = [];
+  for (const rel of data.releases || []) {
+    if (!rel?.id) continue;
+    const rg = rel["release-group"] || {};
+    const tracks = [];
+    for (const medium of rel.media || []) {
+      for (const t of medium.tracks || []) {
+        const title = t.title || t.recording?.title;
+        if (title) tracks.push(title);
+      }
+    }
+    releases.push({
+      // Keyed on the release GROUP where available, so the many pressings of one
+      // album collapse rather than each looking like a separate release.
+      rg_id: rg.id ? `mb:${rg.id}` : `mbrel:${rel.id}`,
+      title: rg.title || rel.title,
+      primary: rg["primary-type"] || null,
+      secondary: rg["secondary-types"] || [],
+      // The release-group date is the earliest across pressings, which is what
+      // "when did this come out" means. Falls back to this release's own date.
+      first_release: rg["first-release-date"] || rel.date || null,
+      status: rel.status || "Official",
+      source: "musicbrainz",
+      tracks,
+    });
+  }
+
+  // Advance by releases RETURNED, per the docs, not by the limit.
+  const got = (data.releases || []).length;
+  const total = Number(data["release-count"] ?? 0);
+  return json({
+    releases,
+    next_offset: got > 0 && offset + got < total ? offset + got : null,
+    total,
+  }, 200, { ...cors, "Cache-Control": "public, max-age=86400" });
+}
+
+/**
+ * Resolve an artist name to a MusicBrainz ID.
+ *
+ * Only needed when the scrobble carries no artist_mbid, which Last.fm often
+ * omits. Exact normalised match required, for the same reason as the Spotify
+ * artist search: silently browsing the wrong artist's catalogue would produce
+ * confident, wrong answers rather than no answer.
+ */
+async function mbArtistId(url, cors) {
+  const name = (url.searchParams.get("artist") || "").slice(0, 200);
+  if (!name) return json({ error: "artist required" }, 400, cors);
+
+  const esc = (x) => x.replace(/[\\+\-!(){}\[\]^"~*?:/&|]/g, (c) => "\\" + c);
+  const res = await fetch(
+    `${MB}/artist?query=artist:"${encodeURIComponent(esc(name))}"&limit=5&fmt=json`,
+    {
+      headers: {
+        "User-Agent": "ScrobbleDrift/0.1 (+https://github.com/ArjanKnol/scrobble-drift)",
+        Accept: "application/json",
+      },
+      cf: { cacheTtl: 2592000, cacheEverything: true },
+    },
+  );
+  if (res.status === 503) {
+    throw new Retryable("MusicBrainz is rate limiting us.", 5);
+  }
+  if (!res.ok) return json({ error: `musicbrainz http ${res.status}` }, 502, cors);
+  const data = await res.json();
+
+  const want = spNorm(name);
+  const hit = (data.artists || []).find((a) => spNorm(a.name) === want);
+  return json({
+    found: Boolean(hit),
+    mbid: hit?.id || null,
+    name: hit?.name || null,
+    near: (data.artists || []).slice(0, 3).map((a) => a.name),
   }, 200, { ...cors, "Cache-Control": "public, max-age=86400" });
 }
 
