@@ -141,7 +141,7 @@
 import {
   analyse, partitionEra, resolutionPlan, d0Resolve, d14eReleasedSince,
   eraVerificationPlan, verifyEraNames, hygieneScore, chartImpact,
-  weakEraCandidates, officialKey, d5Resolve,
+  weakEraCandidates, officialKey, d5Resolve, byImportance,
 } from "./drift.js";
 import { apiBase, isConfigured } from "./config.js";
 import * as store from "./store.js";
@@ -1212,7 +1212,7 @@ async function resolvePhase(scrobbles, apiKey) {
   report.issues = [
     ...report.issues.filter((i) => !(i.detector === "D4" && resolvedIds.has(i.title))),
     ...resolved, ...released,
-  ].sort((a, b) => (b.plays_affected || 0) - (a.plays_affected || 0));
+  ].sort(byImportance);
 
   // Name the album each blank-album track should carry. Uses the same cache as
   // the split resolver, so it costs no extra lookups.

@@ -34,7 +34,7 @@ Python copy before it.
 | **D4** | One track's plays spread across several album strings |
 | **D8** | Feature-credit splits (`Knife Talk` vs `Knife Talk (with …)`) and artist fields polluted with features |
 | **D14** | Unreleased material, protected from every other detector |
-| **D14a** | Inconsistent spelling of your own era convention |
+| **D14a** | Inconsistent spelling of your own era convention (version markers excluded, see below) |
 | **D14c** | One track title filed under several eras (informational) |
 | **D14e** | Unreleased material that now has an official release (see caveat below) |
 | **D14f** | A whole artist's unreleased output in one undifferentiated bucket (informational, unscored) |
@@ -83,6 +83,31 @@ matches, excluding it from D0, D4 and D1 — so a real album classified as
 unreleased silently stops being checked for splits, with no error anywhere. A
 lost finding is worse than a visible mistake, and it is the failure mode this
 whole area keeps producing.
+
+**Version and sequel markers are never typos.** `Drip Season 1` and `Drip
+Season 2` are two Gunna tapes; `Yandhi v1` and `Yandhi v2` are two leak packages.
+These are dropped outright rather than reported at low confidence pending a
+database ruling, which is what they used to do. In practice that ruling was
+noise: it often could not be obtained at all, and MusicBrainz catalogues leaked
+projects anyway, so both names frequently "existed" and nothing was settled. The
+database check moved to the case where it can change the answer — a probable
+typo like `Yandhi` versus `Yhandi`, which is now verified before being asserted.
+
+**Report order is by what is worth fixing, not by play count.** Sorting by plays
+put whatever happened to be popular at the top. The order below came from working
+through a full report by hand:
+
+1. Blank albums, which now carry the album each track should have
+2. One track split across album strings, the findings that distort the charts
+3. One track split across title variants
+4. Artist name variants
+5. Duplicate and impossible scrobbles, which are scrobbler bugs, not your doing
+6. Unreleased tagging consistency, mostly informational
+
+Plays break ties within a tier, so a four-play blank album now outranks a
+580-play title split. `DETECTOR_ORDER` in `docs/drift.js` is the single place
+that decides this, and a test asserts every detector has an explicit rank rather
+than falling into the catch-all.
 
 **MusicBrainz is a weak source for "has this leak been released", and only for
 that question.** It documents music rather than commerce, so it catalogues leaked

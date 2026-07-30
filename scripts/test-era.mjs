@@ -13,6 +13,7 @@
 import {
   isEraTagged, eraName, isUndifferentiated, partitionEra, d14fSingleBucket,
   d14aFormatVariants, analyse, weakEraCandidates, officialKey, verifyEraNames,
+  d14cTrackInTwoEras,
 } from "../docs/drift.js";
 
 let pass = 0, fail = 0;
@@ -245,17 +246,32 @@ console.log("\na failed lookup is not a negative answer");
    * Third occurrence of this exact shape, after the Spotify catalogue cache and
    * fetchCatalogue's error flag. Absence of an answer is not a negative answer.
    */
+  // The reported pair is now dropped BEFORE any lookup, because 'Rolling Papers'
+  // vs 'Rolling Papers 2' is a version pair and those are never typos. So the
+  // Wiz Khalifa complaint is fixed twice over.
+  {
+    const era = []; let uts = 1600000000;
+    era.push({ uts: uts++, artist: "Wiz Khalifa",
+               album: "Unreleased (Rolling Papers Era)", track: "T" });
+    for (let i = 0; i < 9; i++)
+      era.push({ uts: uts++, artist: "Wiz Khalifa",
+                 album: "Unreleased (Rolling Papers 2 Era)", track: `U${i}` });
+    eq(d14aFormatVariants(era).filter((i) => /typo|Similar era/.test(i.title)).length,
+       0, "'Rolling Papers' vs 'Rolling Papers 2' never reaches a lookup at all");
+  }
+
+  // The three-state logic still matters for genuine typos, which DO get checked.
   const era = []; let uts = 1600000000;
   const add = (album, n) => {
     for (let i = 0; i < n; i++)
-      era.push({ uts: uts++, artist: "Wiz Khalifa", album, track: `T${i}` });
+      era.push({ uts: uts++, artist: "Kanye West", album, track: `T${i}` });
   };
-  add("Unreleased (Rolling Papers Era)", 1);
-  add("Unreleased (Rolling Papers 2 Era)", 9);
+  add("Unreleased (Yhandi Era)", 1);
+  add("Unreleased (Yandhi Era)", 9);
 
   const found = d14aFormatVariants(era)
     .filter((i) => i.detector === "D14a" && i.verify);
-  eq(found.length, 1, "the sequel-vs-typo finding is produced and needs checking");
+  eq(found.length, 1, "a real typo is produced and flagged for checking");
 
   // Both lookups failed: must make NO claim either way.
   const unknown = verifyEraNames(found, () => null);
@@ -268,7 +284,7 @@ console.log("\na failed lookup is not a negative answer");
      `at minimal confidence (${unknown[0].confidence})`);
 
   // Half-known is still unknown: an asymmetry claim needs both sides.
-  const half = verifyEraNames(found, (a, t) => t === "Rolling Papers" ? true : null);
+  const half = verifyEraNames(found, (a, t) => t === "Yandhi" ? true : null);
   ok(/Could not check/.test(half[0].suggest),
      "one failed lookup is enough to withhold the claim");
 
@@ -278,7 +294,7 @@ console.log("\na failed lookup is not a negative answer");
      "two real releases produce no finding at all");
 
   // A genuine verified asymmetry still gets the confident message.
-  const real = verifyEraNames(found, (a, t) => t === "Rolling Papers");
+  const real = verifyEraNames(found, (a, t) => t === "Yandhi");
   eq(real.length, 1, "a verified asymmetry is still reported");
   ok(/does not/.test(real[0].suggest),
      "and does state that the other one is absent");
@@ -300,6 +316,36 @@ console.log("\na failed lookup is not a negative answer");
   } else {
     ok(true, "(no verify-flagged pair in this fixture, skipped)");
   }
+}
+
+/* ------------------------------------------------------------------------- */
+console.log("\na track in two eras must be linkable");
+
+{
+  // The finding is about ONE specific song, but it offered only a link to the
+  // artist's whole library: the issue carried no `track`, and the members held
+  // era NAMES, which are not linkable to anything.
+  const era = []; let uts = 1600000000;
+  const add = (album, n) => {
+    for (let i = 0; i < n; i++)
+      era.push({ uts: uts++, artist: "Kanye West", album, track: "All The Love" });
+  };
+  add("Unreleased (BULLY Era)", 7);
+  add("Unreleased (Cuck Era)", 4);
+
+  const f = d14cTrackInTwoEras(era)[0];
+  ok(f, "the finding is produced");
+  eq(f.track, "All The Love",
+     "the issue names the track, so a track link can be built");
+
+  const albums = f.members.filter((m) => m.album).map((m) => m.album);
+  eq(albums.length, 2, "both album strings are members");
+  ok(albums.includes("Unreleased (BULLY Era)") &&
+     albums.includes("Unreleased (Cuck Era)"),
+     "naming the strings as they appear in the library");
+  ok(f.members.some((m) => m.era),
+     "and the era names are still there for context");
+  eq(f.plays_affected, 11, "play count unchanged");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -401,20 +447,22 @@ console.log("\nera findings name the library's album string");
   const add = (artist, album, track, n) => {
     for (let i = 0; i < n; i++) era.push({ uts: uts++, artist, album, track });
   };
-  add("Lil Uzi Vert", "Unreleased (Eternal Atake Era)", "Leak A", 5);
-  add("Lil Uzi Vert", "Unreleased (Eternal Atake OG Era)", "Leak B", 92);
+  // 'Eternal Atake' vs 'Eternal Atake OG' is a VERSION pair now, so it is
+  // dropped before this point. Use a genuine typo to exercise the message.
+  add("Lil Uzi Vert", "Unreleased (Eternl Atake Era)", "Leak A", 5);
+  add("Lil Uzi Vert", "Unreleased (Eternal Atake Era)", "Leak B", 92);
 
   const found = d14a(era).filter((i) => i.detector === "D14a");
-  eq(found.length, 1, "one similar-era finding");
+  eq(found.length, 1, "one era-name finding");
   const i = found[0];
 
-  ok(i.title.includes("Unreleased (Eternal Atake Era)"),
+  ok(i.title.includes("Unreleased (Eternl Atake Era)"),
      "the title shows the full album string");
-  ok(i.title.includes("Unreleased (Eternal Atake OG Era)"),
+  ok(i.title.includes("Unreleased (Eternal Atake Era)"),
      "for both entries");
-  ok(!/: 'Eternal Atake' vs/.test(i.title),
+  ok(!/: 'Eternl Atake' vs/.test(i.title),
      "and not the bare extracted era name");
-  ok(i.suggest.includes("Unreleased (Eternal Atake OG Era)"),
+  ok(i.suggest.includes("Unreleased (Eternal Atake Era)"),
      "the suggestion names the album string too");
 
   eq(i.members.length, 2, "two members");
@@ -432,8 +480,9 @@ console.log("\nera findings name the library's album string");
 
   // And after the ruling the rewritten message still names the library entry.
   const ruled = verify(found, (a, t) => t === "Eternal Atake");
-  ok(ruled[0].suggest.includes("Unreleased (Eternal Atake Era)"),
-     "the post-MusicBrainz message names the library entry as well");
+  ok(ruled.length === 0 ||
+     ruled[0].suggest.includes("Unreleased (Eternal Atake Era)"),
+     "the post-lookup message names the library entry as well");
 }
 
 console.log(`\n${pass} passed, ${fail} failed (including appended block)\n`);
