@@ -1957,9 +1957,41 @@ export const DETECTOR_ORDER = [
 const ORDER_RANK = new Map();
 DETECTOR_ORDER.forEach((tier, i) => tier.forEach((d) => ORDER_RANK.set(d, i)));
 
-/** Sort comparator: detector tier first, then plays within a tier. */
+/** Classes that represent something to actually do. */
+const ACTIONABLE_CLASS = new Set(["error", "split"]);
+
+/**
+ * Is this a thing to fix, or a thing to know?
+ *
+ * Detector tier alone was not enough. D4 outranks D8, so a D4 finding the tool
+ * had already decided was probably nothing — a 20% review saying "these look like
+ * two different albums, nothing to fix" — was appearing above 80% D8 splits with
+ * six times the plays. Sorting by "which detector found it" ignored "is it worth
+ * reading", which is the actual question.
+ *
+ * `style_choice` counts as informational too: a deliberate tagging convention is
+ * not a task.
+ */
+const actionRank = (i) =>
+  (i.style_choice || !ACTIONABLE_CLASS.has(i.class)) ? 1 : 0;
+
+/**
+ * Report order.
+ *
+ *   1. actionable before informational
+ *   2. then detector tier: blank albums, album splits, title splits, ...
+ *   3. then confidence, in coarse bands
+ *   4. then plays
+ *
+ * Confidence is banded to the nearest 0.25 rather than compared exactly, so a
+ * 90% finding outranks a 70% one, but 0.72 versus 0.70 does not reorder anything
+ * and plays still decide between comparable findings. Sorting on raw confidence
+ * would let tiny modelling differences shuffle the list between runs.
+ */
 export const byImportance = (a, b) =>
+  actionRank(a) - actionRank(b) ||
   (ORDER_RANK.get(a.detector) ?? 99) - (ORDER_RANK.get(b.detector) ?? 99) ||
+  Math.round((b.confidence || 0) * 4) - Math.round((a.confidence || 0) * 4) ||
   (b.plays_affected || 0) - (a.plays_affected || 0);
 
 /**
