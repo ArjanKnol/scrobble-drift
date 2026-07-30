@@ -111,19 +111,86 @@ console.log("\nordering: importance first, plays second");
 }
 
 {
-  // Within one tier, plays decide.
-  const a = { detector: "D4", plays_affected: 10 };
-  const b = { detector: "D4", plays_affected: 99 };
+  // Within one tier and class, plays decide.
+  const a = { detector: "D4", class: "split", confidence: 0.7, plays_affected: 10 };
+  const b = { detector: "D4", class: "split", confidence: 0.7, plays_affected: 99 };
   eq([a, b].sort(byImportance)[0], b, "more plays first inside a tier");
 
   // Across tiers, the tier decides.
-  const d5 = { detector: "D5", plays_affected: 1 };
-  const d8 = { detector: "D8", plays_affected: 9999 };
+  const d5 = { detector: "D5", class: "error", confidence: 0.9, plays_affected: 1 };
+  const d8 = { detector: "D8", class: "split", confidence: 0.8, plays_affected: 9999 };
   eq([d8, d5].sort(byImportance)[0], d5, "tier beats plays across tiers");
 
   // An unknown detector sorts last rather than crashing or jumping to the top.
-  const mystery = { detector: "D99", plays_affected: 9999 };
+  const mystery = { detector: "D99", class: "split", confidence: 0.8,
+                    plays_affected: 9999 };
   eq([mystery, d8].sort(byImportance)[0], d8, "an unlisted detector sorts last");
+}
+
+/* ------------------------------------------------------------------------- */
+console.log("\nactionable findings outrank informational ones");
+
+{
+  /*
+   * The reported bug. A D4 review at 20% confidence with 2 plays was appearing
+   * ABOVE 80% D8 splits with six times the plays, purely because D4 outranks D8
+   * in the detector order. Sorting by "which detector found it" ignored "is it
+   * worth reading".
+   */
+  const jackson = { detector: "D4", class: "review", confidence: 0.20,
+                    plays_affected: 2 };
+  const kanye = { detector: "D8", class: "split", confidence: 0.80,
+                  plays_affected: 13 };
+  eq([jackson, kanye].sort(byImportance)[0], kanye,
+     "an 80% split outranks a 20% review from a higher-tier detector");
+
+  // But a real D4 split still outranks a D8 split, as intended.
+  const pale = { detector: "D4", class: "split", confidence: 0.9,
+                 plays_affected: 16 };
+  eq([kanye, pale].sort(byImportance)[0], pale,
+     "a genuine album split still comes before a title split");
+
+  // style_choice is informational however it is classed.
+  const style = { detector: "D14f", class: "review", confidence: 0.3,
+                  plays_affected: 9999, style_choice: true };
+  eq([style, kanye].sort(byImportance)[0], kanye,
+     "a style choice sorts below real work even with far more plays");
+
+  // error and split are both actionable.
+  const err = { detector: "D6", class: "error", confidence: 0.8, plays_affected: 1 };
+  const rev = { detector: "D5", class: "review", confidence: 0.9, plays_affected: 500 };
+  eq([rev, err].sort(byImportance)[0], err,
+     "an error outranks a review even from a higher-tier detector");
+}
+
+{
+  // Confidence is banded, so small differences do not reshuffle the list.
+  const hi = { detector: "D4", class: "split", confidence: 0.72, plays_affected: 5 };
+  const lo = { detector: "D4", class: "split", confidence: 0.70, plays_affected: 50 };
+  eq([hi, lo].sort(byImportance)[0], lo,
+     "0.72 vs 0.70 lands in one band, so plays still decide");
+
+  const certain = { detector: "D4", class: "split", confidence: 0.9, plays_affected: 5 };
+  const unsure = { detector: "D4", class: "split", confidence: 0.6, plays_affected: 50 };
+  eq([unsure, certain].sort(byImportance)[0], certain,
+     "but a clearly higher confidence does win");
+}
+
+{
+  // The exact list from the screenshot, ordered end to end.
+  const shot = [
+    { detector: "D4", class: "review", confidence: 0.20, plays_affected: 2, id: "jackson" },
+    { detector: "D8", class: "split", confidence: 0.80, plays_affected: 13, id: "kanye1" },
+    { detector: "D8", class: "split", confidence: 0.80, plays_affected: 3, id: "drake" },
+    { detector: "D5", class: "error", confidence: 0.90, plays_affected: 18, id: "noalbum" },
+    { detector: "D4", class: "split", confidence: 0.90, plays_affected: 16, id: "pale" },
+    { detector: "D14f", class: "review", confidence: 0.30, plays_affected: 33,
+      style_choice: true, id: "bucket" },
+  ];
+  const order = [...shot].sort(byImportance).map((i) => i.id);
+  eq(JSON.stringify(order),
+     JSON.stringify(["noalbum", "pale", "kanye1", "drake", "jackson", "bucket"]),
+     "the screenshot's findings order correctly end to end");
 }
 
 {
