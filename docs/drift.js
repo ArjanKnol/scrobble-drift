@@ -323,13 +323,34 @@ export const isUndifferentiated = (album) =>
 
 /**
  * The guard. Era-tagged material is partitioned out before anything else and
- * hidden from D0, D4, D1 and D13.
+ * hidden from D0, D4 and D1.
  *
  * Without this, D0 resolves "Unreleased (Rodeo Era)" against MusicBrainz,
  * finds "Rodeo", and confidently recommends merging them, destroying a
- * deliberate distinction. And every leak gets flagged as a typo because it has
- * near-zero listeners and no database entry. Confidently damaging a carefully
- * maintained taxonomy is the worst thing this tool could do.
+ * deliberate distinction. Confidently damaging a carefully maintained taxonomy
+ * is the worst thing this tool could do.
+ *
+ * NOTE ON "D13". Earlier versions of this comment also named a D13 "orphan
+ * detector", which would have flagged any album or artist with near-zero global
+ * listeners and no database entry as a probable typo. It was never written, and
+ * the comment promising the guard protected against it was therefore describing
+ * protection from nothing — worse than either building it or leaving it out,
+ * because a reader trusts the guard covers a case it does not.
+ *
+ * It is deliberately not being built. Two reasons:
+ *
+ *  - The cost is one artist.getInfo or album.getInfo per distinct string. A
+ *    139,000-scrobble library has ~15,000 album strings, which is impossible
+ *    inside any sane budget, so it would need a cap and would then only inspect
+ *    the popular strings, which are precisely the ones LEAST likely to be typos.
+ *  - The findings would mostly be unactionable. D1, D4 and D8 already catch
+ *    typos by comparing strings against each other WITHIN the library. What an
+ *    orphan check adds is the typo with no correct counterpart to compare
+ *    against, and for exactly those it can say "nobody else has this string"
+ *    without being able to say what it should have been.
+ *
+ * If it is ever revisited, the honest form is a low-listener-count signal used to
+ * RANK existing findings rather than to generate new ones.
  */
 export function partitionEra(scrobbles, { official } = {}) {
   /*
@@ -737,6 +758,48 @@ export function d14fSingleBucket(era, { minTracks = 8 } = {}) {
  * good metadata, absent otherwise. Absence is never treated as evidence.
  */
 
+/**
+ * Recording MBIDs seen for each (artist, exact track title).
+ *
+ * Keyed on the EXACT title, not the base title, because the whole point is to
+ * compare two spellings against each other. Keying on the base title would merge
+ * them before the comparison could happen.
+ */
+export function trackMbids(scrobbles) {
+  const map = new Map();
+  for (const s of scrobbles) {
+    if (!s.track || !s.track_mbid) continue;
+    const k = `${norm(s.artist)}␟${trackIdentity(s.track)}`;
+    if (!map.has(k)) map.set(k, new Set());
+    map.get(k).add(s.track_mbid);
+  }
+  return map;
+}
+
+/**
+ * How two track titles relate, per MusicBrainz.
+ *
+ * `track_mbid` identifies a RECORDING, which is exactly the right granularity
+ * for D8: the question is whether two title spellings are the same performance.
+ *
+ *   "same"      one recording, two spellings. Conclusive.
+ *   "different" two recordings. Also conclusive, in the opposite direction:
+ *               'Roll in Peace (feat. XXXTENTACION)' and the Travis Scott
+ *               version are genuinely different recordings and must not merge.
+ *   "unknown"   at least one side has no MBID.
+ *
+ * Unlike album MBIDs there is no pressing ambiguity here, so BOTH answers are
+ * treated as conclusive. A remaster or a live take is a different recording and
+ * differing MBIDs correctly say so.
+ */
+export function trackMbidVerdict(mbids, artist, a, b) {
+  const A = mbids.get(`${norm(artist)}␟${trackIdentity(a)}`);
+  const B = mbids.get(`${norm(artist)}␟${trackIdentity(b)}`);
+  if (!A?.size || !B?.size) return "unknown";
+  for (const id of A) if (B.has(id)) return "same";
+  return "different";
+}
+
 /** Album MBIDs seen for each (artist, album string). */
 export function albumMbids(scrobbles) {
   const map = new Map();
@@ -1117,6 +1180,9 @@ const creditsCompatible = (a, b) =>
 
 export function d8FeatureCredits(rest) {
   const issues = [];
+  // Recording MBIDs, which settle the feature-credit question outright wherever
+  // Last.fm supplied them. Ranked above the credit heuristic below.
+  const tmb = trackMbids(rest);
 
   const variants = new Map();
   const when = new Map();          // `${key}␟${rawTitle}` -> {first, last}
@@ -1161,12 +1227,32 @@ export function d8FeatureCredits(rest) {
      */
     const order = ranked(titles);
     const credits = order.map(([t]) => featCredits(t));
+
+    /*
+     * MBID evidence first, because it is a fact where the credit test is an
+     * inference.
+     *
+     * "same"      -> one recording under two spellings. A split, certainly, and
+     *                the credit conflict below becomes irrelevant: whatever the
+     *                bracketed text says, MusicBrainz says it is one performance.
+     * "different" -> two recordings. Never merge, regardless of how compatible
+     *                the credits look. This is the 'Roll in Peace' case settled
+     *                by data rather than by parsing artist names out of brackets.
+     */
+    const tVerdict = order.length >= 2
+      ? trackMbidVerdict(tmb, artist, order[0][0], order[1][0])
+      : "unknown";
+
     let conflict = false;
     for (let i = 0; i < credits.length && !conflict; i++) {
       for (let j = i + 1; j < credits.length; j++) {
         if (!creditsCompatible(credits[i], credits[j])) { conflict = true; break; }
       }
     }
+    // A confirmed single recording clears a credit conflict; a confirmed pair of
+    // recordings creates one even when the credits look compatible.
+    if (tVerdict === "same") conflict = false;
+    if (tVerdict === "different") conflict = true;
 
     if (conflict) {
       /*
@@ -1226,11 +1312,16 @@ export function d8FeatureCredits(rest) {
      */
     const total = order.reduce((n, [, v]) => n + v, 0);
     const strays = order.slice(1).reduce((n, [, v]) => n + v, 0);
-    const stray = strays <= 2 && strays / total < 0.15;
+    // A confirmed identical recording is not a "stray" however few plays it has:
+    // it is the same performance filed twice, and that is worth stating plainly.
+    const stray = tVerdict !== "same" && strays <= 2 && strays / total < 0.15;
+    const proven = tVerdict === "same";
 
     issues.push({
-      detector: "D8", class: "split",
-      confidence: stray ? 0.5 : 0.8,
+      detector: "D8",
+      class: proven ? "error" : "split",
+      confidence: proven ? 0.97 : (stray ? 0.5 : 0.8),
+      mbid_verdict: tVerdict,
       // The artist is carried AND named in the title. Without it the report
       // said things like "'Make It Work' scrobbled under 2 title variants",
       // which does not identify whose track it is, and left the issue with no
@@ -1240,7 +1331,11 @@ export function d8FeatureCredits(rest) {
       title: `${artist} - '${baseTitle(order[0][0])}' scrobbled under ` +
              `${titles.size} title variants`,
       plays_affected: order.reduce((n, [, v]) => n + v, 0),
-      suggest: stray
+      suggest: proven
+        ? `MusicBrainz gives both spellings the same recording ID, so this is ` +
+          `one performance filed twice rather than two versions. Standardise on ` +
+          `'${order[0][0]}' (${order[0][1]} plays).`
+        : stray
         ? `Almost all of these say '${order[0][0]}' (${order[0][1]} plays). ` +
           `${strays === 1 ? "One scrobble" : `${strays} scrobbles`} used a ` +
           `different spelling, dated below, which usually means a one-off from ` +
@@ -2068,12 +2163,29 @@ export function d15AlbumArtistSplits(albums, { minPlays = 4 } = {}) {
           title: `'${hi.title}' is split across 2 album artists: ` +
                  `'${hi.artist}' and '${lo.artist}'`,
           plays_affected: a.plays + b.plays,
+          /*
+           * Deliberately NOT fed into chartImpact.
+           *
+           * chartImpact groups by TRACK artist plus album title, and the scrobble
+           * stream carries only the track artist. So this split never existed in
+           * our numbers: the corrected chart already shows the combined total.
+           * Last.fm's chart is the one that divides it. Adding these plays to the
+           * simulation would double-count them and break the conservation
+           * invariant that chartImpact is tested against.
+           *
+           * The useful thing is to say so, so the reader knows which of the two
+           * numbers in front of them is wrong.
+           */
+          chart_already_correct: true,
           suggest:
             `Last.fm keys an album on the album artist as well as the title, so ` +
-            `these are two separate albums in your chart and neither shows the ` +
-            `full ${a.plays + b.plays} plays. ${why}. '${hi.artist}' has ` +
-            `${hi.plays}, '${lo.artist}' has ${lo.plays}. Re-crediting the ` +
-            `smaller one merges them.`,
+            `these are two separate albums in YOUR LAST.FM chart and neither ` +
+            `shows the full ${a.plays + b.plays} plays. ${why}. ` +
+            `'${hi.artist}' has ${hi.plays}, '${lo.artist}' has ${lo.plays}. ` +
+            `Re-crediting the smaller one on Last.fm merges them. Note the ` +
+            `corrected chart above already counts all ${a.plays + b.plays}: ` +
+            `Scrobble Drift groups on the track artist, so it never saw this ` +
+            `split. Last.fm's own chart is the one to distrust here.`,
           members: [hi, lo].map((x) => ({
             album: x.title, artist: x.artist, plays: x.plays,
             looks_like: isVA(x.artist) ? "compilation credit" : "artist credit",
