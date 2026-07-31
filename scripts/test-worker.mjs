@@ -313,11 +313,15 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
   const src = await readFile(
     new URL("../worker/src/index.js", import.meta.url), "utf8");
 
-  // Drop the probe, which holds the broken shape on purpose.
-  const live = src.replace(/\/\/ DIAG-BEGIN[\s\S]*?\/\/ DIAG-END/, "");
-  ok(!/DIAG-BEGIN/.test(live), "the diagnostic probe is excluded from this check");
-  ok(/DIAG-BEGIN/.test(src),
-     "and is still delimited, so it can be deleted in one go");
+  /*
+   * The temporary /api/spotify/diag probe has been removed now that it has
+   * answered its question. This asserts it is gone, because a debug endpoint that
+   * enumerates upstream request shapes has no business on a public Worker, and
+   * "remove it later" is how it would have stayed.
+   */
+  ok(!/DIAG-BEGIN|spotify\/diag/.test(src),
+     "the temporary diagnostic endpoint is gone from the Worker");
+  const live = src;
 
   /*
    * Scanned over a WINDOW around each `limit=`, not line by line.
@@ -336,9 +340,19 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
    * Its URLs always carry `fmt=json`, which Spotify's never do, so that is the
    * discriminator rather than a list of paths.
    */
+  /*
+   * 10, established by probing the live API one value at a time: 6, 8 and 10 are
+   * accepted, 15 and 50 are refused. Omitting the parameter gives pages of 5,
+   * not the documented 20, so neither the ceiling nor the default matches the
+   * documentation and both had to be measured.
+   */
+  const SP_LIMIT_CEILING = 10;
+  ok(new RegExp(`const SP_PAGE = ${SP_LIMIT_CEILING};`).test(live),
+     `SP_PAGE is pinned to the probed ceiling of ${SP_LIMIT_CEILING}`);
+
   const offenders = [];
   for (const m of live.matchAll(/limit=(\d+)/g)) {
-    if (Number(m[1]) <= 5) continue;
+    if (Number(m[1]) <= SP_LIMIT_CEILING) continue;
     const around = live.slice(Math.max(0, m.index - 250), m.index + 250);
     const isMusicBrainz = /fmt=json|\/ws\/2|\$\{MB\}/.test(around);
     const isSpotify = /SP_MARKET|\/search\?type=|\/artists\/|\/albums\?/.test(around);
@@ -349,16 +363,14 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
   ok(offenders.length === 0,
      offenders.length
        ? `Spotify refuses these: ${offenders.join("  |  ")}`
-       : "no Spotify call sends an explicit limit above 5");
+       : `no Spotify call sends an explicit limit above ${SP_LIMIT_CEILING}`);
 
   // Prove the check can actually fail, on a copy of the real broken line.
   {
-    const broken = live.replace(
-      "`&market=${SP_MARKET}` + (offset ? `&offset=${offset}` : \"\");",
-      "`&limit=50&market=${SP_MARKET}` + (offset ? `&offset=${offset}` : \"\");");
+    const broken = live.replace("&limit=${SP_PAGE}&market=", "&limit=50&market=");
     let caught = 0;
     for (const m of broken.matchAll(/limit=(\d+)/g)) {
-      if (Number(m[1]) <= 5) continue;
+      if (Number(m[1]) <= SP_LIMIT_CEILING) continue;
       const around = broken.slice(Math.max(0, m.index - 250), m.index + 250);
       if (/SP_MARKET|\/search\?type=|\/artists\//.test(around) &&
           !/fmt=json|\/ws\/2/.test(around)) caught++;
@@ -433,6 +445,26 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
   // Successes must stay cacheable, or the shared cache is pointless.
   ok(/"Cache-Control": "public, max-age=86400"/.test(src),
      "successful lookups remain cacheable");
+}
+
+/* ---------------------------------------------------------------------------
+ * The build marker.
+ *
+ * Exists because three rounds of debugging were lost to a deployed Worker being
+ * older than the source, and each time the symptom was indistinguishable from a
+ * real bug. Behaviour cannot answer "is the running code current?" when behaviour
+ * is the thing in question, so /api/health states it outright.
+ * ------------------------------------------------------------------------- */
+{
+  const src = await readFile(
+    new URL("../worker/src/index.js", import.meta.url), "utf8");
+  const m = src.match(/const BUILD = "([^"]+)"/);
+  ok(Boolean(m), "a BUILD constant exists");
+  ok(m && /^\d{4}-\d{2}-\d{2}/.test(m[1]),
+     `and starts with a date so staleness is obvious at a glance (${m?.[1]})`);
+  ok(m && /page-size-10/.test(m[1]),
+     "and was bumped for the page-size change, per the note on BUILD");
+  ok(/build: BUILD/.test(src), "and /api/health reports it");
 }
 
 console.log(`\n${pass} passed, ${fail} failed (including MusicBrainz cache block)\n`);
