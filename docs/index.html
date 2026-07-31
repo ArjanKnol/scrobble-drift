@@ -9,7 +9,7 @@
   how much they distort your charts.">
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=14">
+<link rel="stylesheet" href="style.css?v=15">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -1636,6 +1636,26 @@ function issues() {
       <h3>${esc(i.title)}</h3>
       <div>
         <span class="tag t-${i.class}">${i.class}</span>
+        ${/*
+           * Evidence badge, ahead of the confidence percentage.
+           *
+           * Every D4 and D8 finding now carries a MusicBrainz verdict, and it was
+           * being computed and thrown away. That matters more than the number
+           * next to it: a percentage reads as the tool's OPINION, while a source
+           * reads as a FACT. A 97% and a 70% finding looked identical apart from
+           * two digits, with nothing saying one was proven and the other guessed.
+           *
+           * Both directions are shown. "Not a split" is as useful as "is a
+           * split" when the job is deciding what to ignore.
+           */
+          i.mbid_verdict === "same"
+            ? `<span class="tag t-proven" title="MusicBrainz confirms these are
+                the same release or recording">proven by MusicBrainz</span>`
+            : i.mbid_verdict === "different"
+            ? `<span class="tag t-disproven" title="MusicBrainz says these are
+                different releases or recordings">not a match, per
+                MusicBrainz</span>`
+            : ""}
         ${i.style_choice ? `<span class="tag t-unfixable">tagging style,
           not scored</span>` : ""}
         <span class="tag">${i.detector}</span>
@@ -1653,6 +1673,12 @@ function issues() {
         return `<code>${esc(label)}</code>${n !== null ? " " + N(n) : ""}${
           m.looks_like ? ` <span style="opacity:.65">(${esc(m.looks_like)})</span>` : ""}`;
       }).join(" &nbsp;·&nbsp; ")}</div>` : ""}
+      ${(i.months || []).length > 1 ? `<div class="mem months">
+        <span class="lk">when</span>${i.months.slice(0, 8).map((m) =>
+          `${esc(m.month)}&nbsp;<span style="opacity:.6">${N(m.plays)}</span>`)
+          .join(" &nbsp;·&nbsp; ")}${i.months.length > 8
+            ? ` <span style="opacity:.6">+${N(i.months.length - 8)} more</span>`
+            : ""}</div>` : ""}
       ${(() => {
         const links = issueLinks(i, report.user);
         return links.length

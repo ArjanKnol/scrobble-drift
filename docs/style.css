@@ -261,3 +261,13 @@ html{scroll-behavior:smooth}
   background:#0c0c0c}
 .social .ic:hover{color:var(--accent);border-color:var(--accent)}
 .social .ic svg{display:block;flex:0 0 auto}
+
+/* Evidence badges. Ranked visually above the confidence percentage, because a
+   source is a fact and a percentage is only the tool's opinion. */
+.t-proven{color:var(--good);border-color:var(--good)}
+.t-disproven{color:var(--dim);border-color:var(--dim);opacity:.85}
+
+/* Month clustering for D5 and D6. Computed all along and never shown, though it
+   answers the more useful question: fix the scrobbler, not the 18 entries. */
+.months{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;
+  margin-top:7px;font-variant-numeric:tabular-nums}
