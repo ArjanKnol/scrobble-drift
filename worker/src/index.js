@@ -147,6 +147,67 @@ export default {
       if (url.pathname === "/api/spotify/album-tracks") {
         return await spAlbumTracks(url, env, cors);
       }
+      /*
+       * TEMPORARY diagnostic. Remove once the Spotify 400 is settled.
+       *
+       * Exists because narrowing this by redeploying one guess at a time is
+       * slow and we have already lost time to that on this project. It tries
+       * the same request with one variable changed at a time and reports the
+       * status of each, so a single deploy identifies the offending parameter
+       * instead of six.
+       *
+       * Read-only, no secrets in the output, and it spends a handful of
+       * Spotify calls. Delete this block before it is forgotten.
+       */
+      if (url.pathname === "/api/spotify/diag") {
+        const name = (url.searchParams.get("artist") || "Portishead").slice(0, 100);
+        const out = [];
+        const attempt = async (label, path) => {
+          try {
+            await spFetch(path, env);
+            out.push({ label, ok: true });
+          } catch (err) {
+            out.push({ label, ok: false, err: redact(String(err.message || err)) });
+          }
+        };
+        await attempt("search artist, limit 5, market",
+          `/search?type=artist&limit=5&market=${SP_MARKET}&q=${encodeURIComponent(name)}`);
+        await attempt("search artist, limit 5, NO market",
+          `/search?type=artist&limit=5&q=${encodeURIComponent(name)}`);
+        await attempt("search artist, limit 20, market",
+          `/search?type=artist&limit=20&market=${SP_MARKET}&q=${encodeURIComponent(name)}`);
+        await attempt("search album, limit 5, market",
+          `/search?type=album&limit=5&market=${SP_MARKET}&q=${encodeURIComponent(name)}`);
+
+        // Resolve an id with the shape already known to work, then vary the
+        // albums call around it.
+        let id = null;
+        try {
+          const f = await spFetch(
+            `/search?type=artist&limit=5&market=${SP_MARKET}` +
+            `&q=${encodeURIComponent(name)}`, env);
+          id = (f.artists?.items || []).find((a) => a?.id)?.id || null;
+        } catch { /* reported above */ }
+        out.push({ label: "resolved artist id", ok: Boolean(id), id });
+
+        if (id) {
+          await attempt("albums, groups + limit 50 + market",
+            `/artists/${id}/albums?include_groups=album,single,compilation` +
+            `&limit=50&market=${SP_MARKET}`);
+          await attempt("albums, groups + limit 50, NO market",
+            `/artists/${id}/albums?include_groups=album,single,compilation&limit=50`);
+          await attempt("albums, groups + limit 20 + market",
+            `/artists/${id}/albums?include_groups=album,single,compilation` +
+            `&limit=20&market=${SP_MARKET}`);
+          await attempt("albums, limit 20 + market, NO groups",
+            `/artists/${id}/albums?limit=20&market=${SP_MARKET}`);
+          await attempt("albums, market only",
+            `/artists/${id}/albums?market=${SP_MARKET}`);
+          await attempt("albums, no params at all", `/artists/${id}/albums`);
+        }
+        return json({ artist: name, market: SP_MARKET, attempts: out }, 200, cors);
+      }
+
       if (url.pathname === "/api/spotify/album") {
         return await spAlbum(url, env, cors);
       }
@@ -974,7 +1035,26 @@ async function spFetch(path, env) {
     await caches.default.delete(new Request(SP_TOKEN_CACHE));
     throw new Error("spotify token rejected");
   }
-  if (!res.ok) throw new Error(`spotify http ${res.status}`);
+  if (!res.ok) {
+    /*
+     * Include Spotify's own message.
+     *
+     * This threw the response body away, so a 400 reached the client as the
+     * bare string "spotify http 400" with no indication of WHICH parameter
+     * Spotify objected to. Diagnosing one cost a whole round of guesswork:
+     * the shape was valid per the documentation, a fresh artist failed
+     * identically so it was not a poisoned cache, and the token was provably
+     * fine because another endpoint answered with it.
+     *
+     * Spotify sends `{"error":{"status":400,"message":"..."}}`. That message is
+     * the entire answer, and it was one line of code away the whole time.
+     * Truncated because it reaches the browser, and passed through redact()
+     * by the top-level handler in case a URL with a key is ever quoted back.
+     */
+    const detail = await res.text().catch(() => "");
+    throw new Error(`spotify http ${res.status}` +
+      (detail ? `: ${detail.replace(/\s+/g, " ").slice(0, 300)}` : ""));
+  }
   return res.json();
 }
 
