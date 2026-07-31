@@ -58,7 +58,7 @@
  *
  * Bump this in the same commit as any Worker change. /api/health reports it.
  */
-const BUILD = "2026-07-31-6-page-size-10-probe-removed";
+const BUILD = "2026-07-31-7-health-no-store";
 
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";
@@ -126,7 +126,20 @@ export default {
             : null,
           cooling_down: await breakerActive(),
           mb_cooling_down: await mbBreakerActive(),
-        }, 200, cors);
+        /*
+         * `no-store`, because a cached health check is a lie.
+         *
+         * This endpoint exists to answer "what is deployed and what is wired up",
+         * and it was cacheable, so a client that had asked once kept being served
+         * the old answer. That produced a reading in which `build` had vanished
+         * and `mb_cache` was false, immediately after a deploy that had in fact
+         * succeeded, and the obvious conclusion was that the deploy had gone
+         * backwards. The same URL from a different client showed the truth.
+         *
+         * Anything whose purpose is to describe the current state must never be
+         * cached, which is the same rule already applied to error responses.
+         */
+        }, 200, { ...cors, "Cache-Control": "no-store" });
       }
 
       // `return await`, not `return`, on every one of these.

@@ -114,6 +114,32 @@ const code = html
      "If this wording changes, re-check that a step 2 error preserves them.");
 }
 
+/* ---- 6. both steps estimate the time remaining ------------------------- */
+{
+  /*
+   * Step 2 showed "about N min left" from the start and step 1 showed nothing,
+   * which is backwards: step 1 is the part that runs for ten minutes on a large
+   * history with only a page counter to look at, and it is the first thing a new
+   * visitor sees. Reported as "there is no time estimation anymore".
+   */
+  ok("step 1 estimates the time remaining",
+     /startedAt/.test(code) && /left \+ "s"/.test(code),
+     "The ingest loop must compute an ETA, not just a page number.");
+
+  // Measured from this session's own throughput. A resumed scan begins with
+  // thousands of scrobbles already on disk, and counting those against this
+  // session's clock invents a rate the network never achieved.
+  ok("the ingest rate excludes already-stored scrobbles",
+     /startedWith/.test(code) && /all\.length - startedWith/.test(code),
+     "Otherwise a resumed scan reports an estimate of nearly zero.");
+
+  // A figure that starts at 40 min and settles at 6 reads as the scan speeding
+  // up rather than as a bad first guess, so it waits for evidence.
+  ok("the estimate is withheld until it is stable",
+     /elapsed > \d/.test(code),
+     "An estimate from the first page includes connection setup.");
+}
+
 console.log(`\n  ${pass} passed, ${fails.length} failed`);
 if (fails.length) {
   console.log("\n  FAILED");

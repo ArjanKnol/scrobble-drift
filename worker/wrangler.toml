@@ -118,26 +118,38 @@ namespace_id = "1005"
 # ---------------------------------------------------------------------------
 # Shared MusicBrainz answer cache (D1)
 # ---------------------------------------------------------------------------
-# COMMENTED OUT because a D1 binding with no database makes `wrangler deploy`
-# fail, and src/index.js treats the binding as optional on purpose: with no
-# MB_CACHE it falls through to asking MusicBrainz, exactly as before. So the
-# Worker deploys and works today, and the cache is two commands away.
+# There is deliberately NO d1_databases block here yet. A binding pointing at a
+# database that does not exist makes `wrangler deploy` fail outright, and
+# src/index.js treats MB_CACHE as optional on purpose: with no binding it asks
+# MusicBrainz directly, exactly as it did before. So this file always deploys.
 #
-# To turn it on:
+# To enable the cache:
 #
 #   npx wrangler d1 create scrobble-drift-cache
-#       -> prints a database_id, paste it below
+#     -> answer YES when it offers to add the binding to this file
+#
+#   The binding it adds is named after the database. The code expects MB_CACHE,
+#   so rename it:
+#     (Get-Content wrangler.toml -Raw) -replace 'binding = "scrobble_drift_cache"', 'binding = "MB_CACHE"' | Set-Content wrangler.toml
+#
 #   npx wrangler d1 execute scrobble-drift-cache --remote --file=./schema.sql
-#   uncomment this block, then npx wrangler deploy
+#   npx wrangler deploy
 #
-# Free tier is 5 GB, 5 million rows read and 100,000 written per day. One row
-# per answer, a few KB each, so the practical ceiling is hundreds of thousands
-# of cached artists: far more than this will ever hold.
+# Then /api/health reports "mb_cache": true and a row count.
 #
-# [[d1_databases]]
-# binding = "MB_CACHE"
-# database_name = "scrobble-drift-cache"
-# database_id = "PASTE-THE-ID-FROM-WRANGLER-HERE"
+# Free tier: 5 GB, 5 million rows read and 100,000 written per day. One row per
+# answer at a few KB, so the practical ceiling is hundreds of thousands of
+# cached artists.
 
 [observability]
 enabled = true
+
+# The shared MusicBrainz answer cache described above. `binding` must stay
+# MB_CACHE: src/index.js reads env.MB_CACHE and treats its absence as "no cache,
+# ask MusicBrainz directly", so a renamed binding disables the cache silently
+# rather than failing.
+[[d1_databases]]
+binding = "MB_CACHE"
+database_name = "scrobble-drift-cache"
+database_id = "a26c37b4-0251-4ca9-96cb-018de0a4648c"
+
