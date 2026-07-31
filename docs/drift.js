@@ -701,6 +701,124 @@ export function d14fSingleBucket(era, { minTracks = 8 } = {}) {
   return issues;
 }
 
+/* ------------------------------------------------------ D3: MBID evidence */
+
+/**
+ * MusicBrainz IDs, which Last.fm hands us for free and nothing has ever read.
+ *
+ * ---------------------------------------------------------------------------
+ * Why this matters more than any heuristic in this file
+ * ---------------------------------------------------------------------------
+ * Every scrobble carries `album_mbid` and `track_mbid`. Both were ingested by the
+ * Worker, carried through the whole pipeline, and used by exactly zero detectors.
+ * The README even advertised a "D3 — MusicBrainz ID conflicts" that did not exist.
+ *
+ * That is a big miss, because an MBID is GROUND TRUTH for the question D4 spends
+ * the most effort guessing at:
+ *
+ *   same album_mbid, different album strings  -> provably one release, two spellings
+ *   different album_mbid                      -> provably different releases
+ *
+ * The second half is what kills the false positives. The Jackson 5's "Dancing
+ * Machine" on both `Get It Together` and `Dancing Machine` carries two different
+ * album MBIDs, so it is demonstrably not a split, and no amount of string
+ * cleverness was ever going to work that out.
+ *
+ * ---------------------------------------------------------------------------
+ * The one caveat that stops this being conclusive in both directions
+ * ---------------------------------------------------------------------------
+ * `album_mbid` identifies a RELEASE, not a release group. The standard and
+ * deluxe pressings of one album are different releases with different MBIDs. So
+ * differing MBIDs are strong evidence AGAINST a split but not proof, and are used
+ * to downgrade rather than suppress. A matching MBID has no such ambiguity and is
+ * treated as conclusive.
+ *
+ * Last.fm also populates these inconsistently: present when the scrobbler sent
+ * good metadata, absent otherwise. Absence is never treated as evidence.
+ */
+
+/** Album MBIDs seen for each (artist, album string). */
+export function albumMbids(scrobbles) {
+  const map = new Map();
+  for (const s of scrobbles) {
+    if (!s.album || !s.album_mbid) continue;
+    const k = `${norm(s.artist)}␟${norm(s.album)}`;
+    if (!map.has(k)) map.set(k, new Set());
+    map.get(k).add(s.album_mbid);
+  }
+  return map;
+}
+
+/**
+ * How two album strings relate, per MusicBrainz.
+ *
+ *   "same"      they share an MBID: one release, two spellings
+ *   "different" neither MBID appears on the other: different releases
+ *   "unknown"   at least one side has no MBID at all
+ */
+export function mbidVerdict(mbids, artist, a, b) {
+  const A = mbids.get(`${norm(artist)}␟${norm(a)}`);
+  const B = mbids.get(`${norm(artist)}␟${norm(b)}`);
+  if (!A?.size || !B?.size) return "unknown";
+  for (const id of A) if (B.has(id)) return "same";
+  return "different";
+}
+
+/**
+ * D3: the same album string carrying two different release MBIDs.
+ *
+ * Not a split — the opposite. It means one album name in your library actually
+ * covers two distinct releases, so merging them would be wrong and the plays are
+ * already pooled under one name. Reported because it explains why a play count
+ * can look higher than expected, and because it is the signal that tells D4 to
+ * keep its hands off.
+ *
+ * Editions are excluded: the deluxe and standard pressings of one album routinely
+ * share a title in a library while being separate MusicBrainz releases, and
+ * saying so on every album anyone owns twice would be noise.
+ */
+export function d3MbidConflicts(rest, { minPlays = 6 } = {}) {
+  const groups = new Map();
+  for (const s of rest) {
+    if (!s.album || !s.album_mbid) continue;
+    const k = `${norm(s.artist)}␟${norm(s.album)}`;
+    if (!groups.has(k)) {
+      groups.set(k, { artist: s.artist, album: s.album, ids: new Map() });
+    }
+    const g = groups.get(k);
+    g.ids.set(s.album_mbid, (g.ids.get(s.album_mbid) || 0) + 1);
+  }
+
+  const issues = [];
+  for (const g of groups.values()) {
+    if (g.ids.size < 2) continue;
+    const total = [...g.ids.values()].reduce((a, b) => a + b, 0);
+    if (total < minPlays) continue;
+    // A lone stray MBID is a scrobbler quirk, not two releases.
+    const order = ranked(g.ids);
+    if (order[1][1] < 2) continue;
+
+    issues.push({
+      detector: "D3", class: "review", confidence: 0.5,
+      artist: g.artist, album: g.album,
+      title: `${g.artist} - '${g.album}' covers ${g.ids.size} different ` +
+             `MusicBrainz releases`,
+      plays_affected: total,
+      suggest:
+        `These plays share one album name but MusicBrainz says they are ` +
+        `${g.ids.size} separate releases, usually different pressings or a ` +
+        `reissue. Nothing to merge: they are already pooled under one name. ` +
+        `Worth knowing because it explains a play count that looks off, and it ` +
+        `is why no split is reported for this album.`,
+      members: order.map(([id, plays]) => ({
+        album: g.album, plays, looks_like: `release ${id.slice(0, 8)}`,
+      })),
+      no_auto_action: true,
+    });
+  }
+  return issues;
+}
+
 /* ------------------------------------------------- D4 splits, D0 temporal */
 
 const EDITION =
@@ -776,6 +894,9 @@ function temporalSignature(members, track) {
 }
 
 export function d4AlbumSplits(rest, minPlays = 2) {
+  // MusicBrainz IDs from the scrobbles themselves. Free, already in hand, and
+  // conclusive where present. Built once for the whole pass.
+  const mbids = albumMbids(rest);
   const groups = new Map();
   for (const s of rest) {
     // trackIdentity, not normTitle: this key decides whether two scrobbles are
@@ -827,6 +948,22 @@ export function d4AlbumSplits(rest, minPlays = 2) {
      * lead single. Requiring a migration signature alongside it is what stops
      * that misread from producing a confident claim.
      */
+    /*
+     * MBID evidence, ranked above every string heuristic below.
+     *
+     * "same"      -> the two strings ARE one release. Conclusive: upgrade to an
+     *                error, and no release lookup is needed at all.
+     * "different" -> provably separate releases. Downgraded rather than
+     *                suppressed, because album_mbid identifies a RELEASE and the
+     *                deluxe and standard pressings of one album legitimately
+     *                carry different IDs.
+     * "unknown"   -> at least one side has no MBID. Falls through to the
+     *                heuristics unchanged; absence is never evidence.
+     */
+    const verdict = members.length >= 2
+      ? mbidVerdict(mbids, g.artist, members[0].album, members[1].album)
+      : "unknown";
+
     const kinds = members.slice(0, 2).map((m) => m.looks_like);
     /*
      * Only RELIABLE single markers count here.
@@ -850,24 +987,46 @@ export function d4AlbumSplits(rest, minPlays = 2) {
       ? members[members.length - 1].plays : 0;
     const stray = minority <= 1 && total <= 4;
 
-    const weak = plainAlbums || stray;
+    // A verified MBID match overrides every doubt below it: the strings are the
+    // same release, whatever they look like. A verified mismatch overrides the
+    // other way.
+    const weak = verdict === "same" ? false : (plainAlbums || stray);
+    const proven = verdict === "same";
+    const disproven = verdict === "different";
 
     issues.push({
       detector: "D4",
       // A structural title almost certainly means several distinct tracks, so
       // it is a question rather than a finding.
-      class: (structural || weak) ? "review" : "split",
-      confidence: structural ? 0.25
+      class: proven ? "error"
+        : disproven ? "review"
+        : (structural || weak) ? "review"
+        : "split",
+      confidence: proven ? 0.97
+        : disproven ? 0.15
+        : structural ? 0.25
         : migration ? 0.9
         : plainAlbums ? 0.2     // checked before stray: it explains more
         : stray ? 0.3
         : 0.7,
+      // Carried so the resolver can skip a lookup it cannot improve on.
+      mbid_verdict: verdict,
       artist: g.artist, track: g.track,
       title: structural
         ? `${g.artist} - '${g.track}' appears on ${g.albums.size} albums`
         : `${g.artist} - '${g.track}' split across ${g.albums.size} album strings`,
       plays_affected: total,
-      suggest: structural
+      suggest: proven
+        ? `MusicBrainz confirms these are the same release under two different ` +
+          `names, so this is certain rather than a guess. Consolidate to ` +
+          `'${members[0].album}' (${members[0].plays} plays).`
+        : disproven
+        ? `MusicBrainz says these two album names are different releases, so ` +
+          `this is probably a song that genuinely appears on both rather than a ` +
+          `split. Note it identifies pressings, so a deluxe and a standard ` +
+          `edition of one album will also look different here. Nothing to fix ` +
+          `unless you know they are the same record.`
+        : structural
         ? `'${g.track}' is a structural track title, so these are almost ` +
           `certainly different recordings, one per album, rather than one ` +
           `track split in two. Nothing to fix unless you know otherwise.`
@@ -1805,6 +1964,127 @@ export function d14eReleasedSince(era, lookup) {
   return issues;
 }
 
+/* ------------------------------------------- D15: album-artist splits */
+
+/** Names Last.fm uses for a compilation credit. */
+const VA_NAMES = new Set(["various artists", "various", "va", "verschillende artiesten"]);
+
+/**
+ * D15: one album split across two ALBUM ARTISTS.
+ *
+ * ---------------------------------------------------------------------------
+ * Why no existing detector can see this
+ * ---------------------------------------------------------------------------
+ * Last.fm's album entity is keyed by (album artist, album title). So when
+ * Spotify re-credited Kanye's `Cruel Winter` from "Kanye West" to "Various
+ * Artists", Last.fm gained a SECOND album with the same title, and the plays
+ * divided between them.
+ *
+ * Nothing in this file could catch it, for a specific reason: album artist is a
+ * different field from track artist, and `user.getRecentTracks` returns only the
+ * TRACK artist. Both halves of a Cruel Winter split therefore look byte-identical
+ * in the scrobble stream. Every grouping key in this file also begins with the
+ * artist, so even a cross-album comparison would never have paired them.
+ *
+ * `user.getTopAlbums` is the missing piece: each entry there carries the album
+ * artist and a play count, and it covers the WHOLE chart rather than just the
+ * scanned window.
+ *
+ * ---------------------------------------------------------------------------
+ * The false-positive problem, and the gate
+ * ---------------------------------------------------------------------------
+ * Shared album titles are extremely common: self-titled records, `Greatest
+ * Hits`, `Live`, `Demos`. So a title match alone proves nothing, and this only
+ * fires when the two album artists are demonstrably RELATED:
+ *
+ *   1. they share an album MBID          -> conclusive
+ *   2. one side is a Various Artists credit -> the Cruel Winter shape exactly
+ *   3. one artist name contains the other  -> "Kanye West" vs "Kanye West & Kid Cudi"
+ *
+ * Anything else is silent, even when the titles match exactly. A stage-name
+ * change ("Ye" vs "Kanye West") is therefore missed, which is the accepted cost
+ * of not reporting every band that ever released a self-titled album.
+ *
+ * `albums` is the shape `user.getTopAlbums` returns:
+ *   { name, artist: { name, mbid }, mbid, playcount }
+ */
+export function d15AlbumArtistSplits(albums, { minPlays = 4 } = {}) {
+  const byTitle = new Map();
+  for (const a of albums || []) {
+    const title = a?.name;
+    const artist = a?.artist?.name ?? a?.artist;
+    if (!title || !artist) continue;
+    const k = norm(title);
+    if (!byTitle.has(k)) byTitle.set(k, []);
+    byTitle.get(k).push({
+      title, artist,
+      plays: Number(a.playcount || 0),
+      mbid: a.mbid || "",
+      artist_mbid: a?.artist?.mbid || "",
+    });
+  }
+
+  const contains = (a, b) => {
+    const x = norm(a), y = norm(b);
+    if (!x || !y || x === y) return false;
+    // Word-boundary containment, so "Yeat" does not match "Wheatus".
+    return ` ${x} `.includes(` ${y} `) || ` ${y} `.includes(` ${x} `) ||
+           x.startsWith(`${y} `) || y.startsWith(`${x} `);
+  };
+  const isVA = (n) => VA_NAMES.has(norm(n));
+
+  const issues = [];
+  for (const group of byTitle.values()) {
+    if (group.length < 2) continue;
+
+    // Compare every pair, since a title can carry three credits.
+    for (let i = 0; i < group.length; i++) {
+      for (let j = i + 1; j < group.length; j++) {
+        const a = group[i], b = group[j];
+        if (norm(a.artist) === norm(b.artist)) continue;
+        if (a.plays + b.plays < minPlays) continue;
+
+        let why = null, confidence = 0, cls = "split";
+        if (a.mbid && b.mbid && a.mbid === b.mbid) {
+          why = "MusicBrainz gives both the same release ID, so they are one album";
+          confidence = 0.95; cls = "error";
+        } else if (isVA(a.artist) || isVA(b.artist)) {
+          why = "one is credited to Various Artists, which is how a compilation " +
+                "re-credit usually shows up";
+          confidence = 0.85;
+        } else if (contains(a.artist, b.artist)) {
+          why = "one artist credit contains the other, so this looks like a " +
+                "credit change rather than two different records";
+          confidence = 0.8;
+        }
+        // Rule 4: unrelated artists sharing a title prove nothing. Silent.
+        if (!why) continue;
+
+        const [hi, lo] = a.plays >= b.plays ? [a, b] : [b, a];
+        issues.push({
+          detector: "D15", class: cls, confidence,
+          artist: hi.artist,
+          album: hi.title,
+          title: `'${hi.title}' is split across 2 album artists: ` +
+                 `'${hi.artist}' and '${lo.artist}'`,
+          plays_affected: a.plays + b.plays,
+          suggest:
+            `Last.fm keys an album on the album artist as well as the title, so ` +
+            `these are two separate albums in your chart and neither shows the ` +
+            `full ${a.plays + b.plays} plays. ${why}. '${hi.artist}' has ` +
+            `${hi.plays}, '${lo.artist}' has ${lo.plays}. Re-crediting the ` +
+            `smaller one merges them.`,
+          members: [hi, lo].map((x) => ({
+            album: x.title, artist: x.artist, plays: x.plays,
+            looks_like: isVA(x.artist) ? "compilation credit" : "artist credit",
+          })),
+        });
+      }
+    }
+  }
+  return issues.sort((a, b) => b.plays_affected - a.plays_affected);
+}
+
 /* -------------------------------------------- impact and hygiene score */
 
 /**
@@ -1946,9 +2226,10 @@ export function chartImpact(rest, splits, topN = 25) {
  */
 export const DETECTOR_ORDER = [
   ["D5"],                            // scrobbles with no album
-  ["D0", "D4"],                      // one track split across album strings
+  ["D0", "D4", "D15"],               // album splits, including album-artist ones
   ["D8"],                            // one track split across title variants
-  ["D1", "D3"],                      // artist name variants
+  ["D1"],                            // artist name variants
+  ["D3"],                            // MBID conflicts, informational
   ["D11"],                           // Various Artists
   ["D6", "D12"],                     // duplicate and impossible scrobbles
   ["D14a", "D14c", "D14e", "D14f"],  // unreleased tagging, mostly review
@@ -2004,8 +2285,8 @@ export const byImportance = (a, b) =>
  * not listed here now throws in development rather than quietly scoring zero.
  */
 const BUCKETS = {
-  album_integrity:  ["D0", "D4", "D5"],
-  artist_integrity: ["D1", "D3", "D8", "D11"],
+  album_integrity:  ["D0", "D4", "D5", "D3", "D15"],
+  artist_integrity: ["D1", "D8", "D11"],
   duplicate_rate:   ["D6", "D12"],
   era_consistency:  ["D14a", "D14c", "D14e", "D14f"],
 };
@@ -2126,7 +2407,7 @@ export const SCORED_DETECTORS = new Set(Object.values(BUCKETS).flat());
 
 /* --------------------------------------------------------- orchestration */
 
-export function analyse(scrobbles, { official } = {}) {
+export function analyse(scrobbles, { official, topAlbums } = {}) {
   const total = scrobbles.length;
   // guard first, always. `official` lets verified real releases out of the
   // protected partition so they get checked for splits like any other album.
@@ -2144,6 +2425,10 @@ export function analyse(scrobbles, { official } = {}) {
     ...d6Duplicates(scrobbles),
     ...d11VariousArtists(rest),
     ...d12Impossible(scrobbles),
+    ...d3MbidConflicts(rest),
+    // Needs the album chart, which carries the album artist. Absent when the
+    // caller could not fetch it, in which case this simply contributes nothing.
+    ...d15AlbumArtistSplits(topAlbums || []),
   ];
   // Two detectors are deliberately NOT run, and both stay in this file so the
   // reasoning survives and re-enabling is one line.
