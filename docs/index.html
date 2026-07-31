@@ -518,17 +518,41 @@ $("f").onsubmit = async (e) => {
                "Your results are already below and are complete except for " +
                "release dates and consolidation targets. This step only adds " +
                "detail, so you can read the findings now or leave this running.");
-      await resolvePhase(scrobbles, apiKey);
+      /*
+       * Step 2 has its OWN catch, because a failure here is not a failed scan.
+       *
+       * The banner directly above promises "your results are already below and
+       * are complete except for release dates". That promise was false: this
+       * await sat inside the scan-wide try, so one network blip hours into the
+       * MusicBrainz phase reached `fail()`, which overwrites #out and therefore
+       * DELETED every finding the user had been invited to read.
+       *
+       * Step 1 is self-contained and needs no network. Whatever happens here,
+       * those findings stand, so the scan still completes and the summary says
+       * plainly which part did not finish.
+       */
+      try {
+        await resolvePhase(scrobbles, apiKey);
+      } catch (err) {
+        stats.resolve_error = err.message || String(err);
+      }
       stats.resolve_ms = Date.now() - t2;
     }
     stats.aborted = abort;
-    stats.running = false;            // only now may the summary claim to be done
     stats.phase = "done";
     $("prog").classList.add("hide");
     render();                         // re-render so the summary panel appears
   } catch (err) {
     fail(err.message || String(err));
   } finally {
+    /*
+     * In `finally`, not on the success path.
+     *
+     * `stats.running` gates the whole summary panel (`if (stats.running) return ""`),
+     * so leaving it true after an error meant the summary was suppressed forever,
+     * silently, with no way back except a full rescan.
+     */
+    if (stats) stats.running = false;
     $("go").disabled = false;
     $("stop").classList.add("hide");
   }
@@ -598,13 +622,33 @@ function scanSummary() {
     warn.push(`<strong>You stopped this scan.</strong> The results below are
                partial. Running it again resumes rather than starting over.`);
   }
+  /*
+   * Step 2 failing is stated, not swallowed.
+   *
+   * Everything below still holds: step 1 needs no network and had already
+   * finished. What is missing is exactly the detail step 2 adds, so say which
+   * part is absent rather than either hiding the error or implying the findings
+   * are suspect.
+   */
+  if (s.resolve_error) {
+    warn.push(`<strong>Release lookups stopped early.</strong>
+               ${esc(s.resolve_error)}. Everything above comes from your own
+               listening data and is unaffected; what is missing is release dates
+               and consolidation targets. Run the scan again to retry just that
+               part, since the lookups already done are cached on this device.`);
+  }
 
+  // "Scan complete" only when it is. A partial run says so in the headline, not
+  // twelve lines further down where it can be missed.
+  const part = s.aborted || s.resolve_error;
   return `
     <div class="panel done">
       <div class="done-head">
-        <span class="done-mark ${s.aborted ? "part" : "ok"}"
-              aria-hidden="true">${s.aborted ? "!" : "✓"}</span>
-        <strong>${s.aborted ? "Stopped" : "Scan complete"}</strong>
+        <span class="done-mark ${part ? "part" : "ok"}"
+              aria-hidden="true">${part ? "!" : "✓"}</span>
+        <strong>${s.aborted ? "Stopped"
+                  : s.resolve_error ? "Scan finished, lookups incomplete"
+                  : "Scan complete"}</strong>
         <span class="v" style="color:var(--dim)">${dur(total)} total</span>
       </div>
       ${lines.map((l) => `<p class="note">${l}</p>`).join("")}
@@ -1400,14 +1444,27 @@ async function resolvePhase(scrobbles, apiKey) {
   render();
 }
 
+/**
+ * Report a failure WITHOUT throwing away results that already exist.
+ *
+ * This used to assign to `$("out").innerHTML` unconditionally, which is the same
+ * element `render()` writes to. So any error after the first render replaced a
+ * complete set of findings with an error box, and on a scan whose second step can
+ * run for hours that meant losing the lot to a single dropped request.
+ *
+ * If there is nothing on screen yet, the error box IS the output. If there is,
+ * the error goes above it as a banner and the findings stay put.
+ */
 function fail(msg) {
   $("prog").classList.add("hide");
-  $("out").innerHTML = `
+  const box = `
     <div class="panel err" style="margin-top:16px">
       ${esc(msg)}
       <p class="note" style="color:var(--dim)">If this keeps happening, try a
       shallower scan, or use your own Last.fm API key.</p>
     </div>`;
+  if (report) $("out").insertAdjacentHTML("afterbegin", box);
+  else        $("out").innerHTML = box;
 }
 
 /**
