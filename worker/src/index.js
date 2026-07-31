@@ -159,6 +159,7 @@ export default {
        * Read-only, no secrets in the output, and it spends a handful of
        * Spotify calls. Delete this block before it is forgotten.
        */
+      // DIAG-BEGIN (temporary, safe to delete this whole block)
       if (url.pathname === "/api/spotify/diag") {
         const name = (url.searchParams.get("artist") || "Portishead").slice(0, 100);
         const out = [];
@@ -170,14 +171,11 @@ export default {
             out.push({ label, ok: false, err: redact(String(err.message || err)) });
           }
         };
-        await attempt("search artist, limit 5, market",
+        // The shapes the code now actually uses. All four must be ok.
+        await attempt("search artist, limit 5, market  [used by spArtistAlbums]",
           `/search?type=artist&limit=5&market=${SP_MARKET}&q=${encodeURIComponent(name)}`);
-        await attempt("search artist, limit 5, NO market",
-          `/search?type=artist&limit=5&q=${encodeURIComponent(name)}`);
-        await attempt("search artist, limit 20, market",
-          `/search?type=artist&limit=20&market=${SP_MARKET}&q=${encodeURIComponent(name)}`);
-        await attempt("search album, limit 5, market",
-          `/search?type=album&limit=5&market=${SP_MARKET}&q=${encodeURIComponent(name)}`);
+        await attempt("search album, NO limit, market  [used by spAlbum]",
+          `/search?type=album&market=${SP_MARKET}&q=${encodeURIComponent(name)}`);
 
         // Resolve an id with the shape already known to work, then vary the
         // albums call around it.
@@ -191,22 +189,53 @@ export default {
         out.push({ label: "resolved artist id", ok: Boolean(id), id });
 
         if (id) {
-          await attempt("albums, groups + limit 50 + market",
+          // The two shapes the paging loop now uses. `include_groups` was never
+          // implicated in any error, but it has not been proven innocent
+          // WITHOUT a limit until this runs, and page two has never run at all.
+          await attempt("albums, groups + market, NO limit  [page 1]",
+            `/artists/${id}/albums?include_groups=album,single,compilation` +
+            `&market=${SP_MARKET}`);
+          await attempt("albums, groups + market + offset, NO limit  [page 2]",
+            `/artists/${id}/albums?include_groups=album,single,compilation` +
+            `&market=${SP_MARKET}&offset=20`);
+
+          /*
+           * Where exactly is the ceiling?
+           *
+           * 5 is accepted and 20 is refused, and the page size Spotify actually
+           * serves is 5, which is not the documented default of 20. If anything
+           * between 6 and 15 is accepted it halves or thirds the number of
+           * requests a catalogue costs, so it is worth one probe rather than an
+           * assumption.
+           */
+          for (const n of [6, 8, 10, 15]) {
+            await attempt(`albums, limit ${n} + groups + market`,
+              `/artists/${id}/albums?include_groups=album,single,compilation` +
+              `&limit=${n}&market=${SP_MARKET}`);
+          }
+
+          // Kept as the control: this is the shape that was failing.
+          await attempt("albums, groups + limit 50 + market  [the old, broken shape]",
             `/artists/${id}/albums?include_groups=album,single,compilation` +
             `&limit=50&market=${SP_MARKET}`);
-          await attempt("albums, groups + limit 50, NO market",
-            `/artists/${id}/albums?include_groups=album,single,compilation&limit=50`);
-          await attempt("albums, groups + limit 20 + market",
-            `/artists/${id}/albums?include_groups=album,single,compilation` +
-            `&limit=20&market=${SP_MARKET}`);
-          await attempt("albums, limit 20 + market, NO groups",
-            `/artists/${id}/albums?limit=20&market=${SP_MARKET}`);
-          await attempt("albums, market only",
-            `/artists/${id}/albums?market=${SP_MARKET}`);
-          await attempt("albums, no params at all", `/artists/${id}/albums`);
+
+          // How many albums a page actually returns now decides how many
+          // requests a catalogue costs, so report it rather than assuming 20.
+          try {
+            const pg = await spFetch(
+              `/artists/${id}/albums?include_groups=album,single,compilation` +
+              `&market=${SP_MARKET}`, env);
+            out.push({ label: "page size and total",
+                       ok: true, items: (pg.items || []).length,
+                       total: pg.total ?? null });
+          } catch (err) {
+            out.push({ label: "page size and total", ok: false,
+                       err: redact(String(err.message || err)) });
+          }
         }
         return json({ artist: name, market: SP_MARKET, attempts: out }, 200, cors);
       }
+      // DIAG-END
 
       if (url.pathname === "/api/spotify/album") {
         return await spAlbum(url, env, cors);
@@ -217,7 +246,8 @@ export default {
       console.error(err?.stack || String(err));
       if (err instanceof Retryable) {
         return json({ error: err.message, retry_after: err.retryAfter }, 429,
-                    { ...cors, "Retry-After": String(err.retryAfter) });
+                    { ...cors, "Retry-After": String(err.retryAfter),
+                      "Cache-Control": "no-store" });
       }
       // A short, scrubbed reason. Without one, every upstream problem looked
       // identical from the client and could only be diagnosed with `wrangler
@@ -226,10 +256,24 @@ export default {
       // Scrubbed because callLastfm puts the API key in a URL, and a fetch
       // error can quote that URL. Any 32-hex run is redacted before it leaves
       // the Worker, so a leak cannot happen by accident here.
+      /*
+       * `no-store`, because a cached error is a pinned error.
+       *
+       * Observed live: after the Spotify fix was deployed and provably working,
+       * the same URL kept returning the old 400 while the identical URL with one
+       * extra query parameter returned data. The failure had been cached and was
+       * being served over a working Worker, which is indistinguishable from "the
+       * fix did not deploy" and cost a round of confusion.
+       *
+       * Success responses are cacheable and say so individually. A failure never
+       * is: it describes a moment, not a fact. This project has now been bitten
+       * by a cached negative three times, twice in the Spotify catalogue and once
+       * here.
+       */
       return json({
         error: "upstream failure",
         reason: redact(`${err?.name || "Error"}: ${err?.message || err}`),
-      }, 502, cors);
+      }, 502, { ...cors, "Cache-Control": "no-store" });
     }
   },
 };
@@ -1138,15 +1182,35 @@ async function spArtistAlbums(url, env, cors) {
                 200, { ...cors, "Cache-Control": "public, max-age=86400" });
   }
 
+  /*
+   * No `limit` parameter, and paging by `offset` rather than by following
+   * `page.next`.
+   *
+   * Spotify rejects an explicit limit above 5 on this endpoint with
+   * {"status":400,"message":"Invalid limit"} - including limit=20, which is the
+   * DEFAULT it applies when the parameter is omitted. So the parameter is being
+   * validated, not the number, and the fix is to stop sending it. Confirmed by
+   * probing one variable at a time: market and include_groups are both fine and
+   * were never mentioned in any error.
+   *
+   * This is why Spotify resolved 0 of 289 tracks. Every catalogue call 400ed, so
+   * every lookup fell through to MusicBrainz at one per second, which is the
+   * whole reason release lookups took hours.
+   *
+   * `page.next` cannot be used to page, because Spotify builds that URL WITH the
+   * limit it used, so following it would 400 on the second page - a failure that
+   * would only appear for artists with more than 20 releases, which is exactly
+   * the case that matters. Offsets are computed here instead, advancing by the
+   * number of items actually returned.
+   */
   const albums = [];
-  let next = `/artists/${hit.id}/albums` +
-             `?include_groups=album,single,compilation&limit=50` +
-             `&market=${SP_MARKET}`;
+  const albumPage = (offset) =>
+    `/artists/${hit.id}/albums?include_groups=album,single,compilation` +
+    `&market=${SP_MARKET}` + (offset ? `&offset=${offset}` : "");
   // `appears_on` is excluded on purpose. It pulls in every playlist-style
   // compilation and other artists' records that merely feature this artist,
   // which would make almost any track look "officially released".
-  while (next && albums.length < SP_ALBUM_CAP) {
-    const page = await spFetch(next, env);
+  const collect = (page) => {
     for (const al of page.items || []) {
       // Spotify puts nulls in result arrays for unmatched or region-restricted
       // entries. One null used to throw on al.id and take the request down.
@@ -1160,15 +1224,56 @@ async function spArtistAlbums(url, env, cors) {
         url: al.external_urls?.spotify || null,
       });
     }
-    next = page.next ? page.next.replace(SPOTIFY_API, "") : null;
+  };
+
+  /*
+   * One page, then the rest CONCURRENTLY.
+   *
+   * Spotify serves 5 items per page to this app and refuses any explicit limit
+   * above that, so a 45-release artist is 9 requests and the 100-album cap is 20.
+   * Fetched one after another that is several seconds per artist, and a library
+   * with a few hundred artists spends most of its scan waiting on round trips
+   * rather than on anything useful.
+   *
+   * Page one reports `total`, which is enough to compute every remaining offset
+   * up front instead of discovering them one reply at a time. They then go out in
+   * small groups: bounded, not all at once, because a burst of twenty per artist
+   * multiplied by concurrent visitors is how you collect 429s. The client already
+   * paces artists; this only stops each artist being needlessly serial.
+   */
+  const first = await spFetch(albumPage(0), env);
+  collect(first);
+
+  const total = Math.min(Number(first.total ?? 0), SP_ALBUM_CAP);
+  const step = (first.items || []).length;
+  if (step > 0 && total > step) {
+    const offsets = [];
+    for (let o = step; o < total; o += step) offsets.push(o);
+
+    const CONCURRENCY = 4;
+    for (let k = 0; k < offsets.length; k += CONCURRENCY) {
+      const batch = offsets.slice(k, k + CONCURRENCY);
+      const pages = await Promise.all(
+        batch.map((o) => spFetch(albumPage(o), env)));
+      for (const pg of pages) collect(pg);
+    }
   }
+
+  // Offsets were computed from `total`, so pages can overlap if the catalogue
+  // shifts mid-read, and a null-heavy page can leave gaps. De-duplicate on id
+  // rather than trusting arithmetic against a live catalogue.
+  const seen = new Set();
+  const unique = albums.filter((a) => !seen.has(a.id) && seen.add(a.id));
+  albums.length = 0;
+  albums.push(...unique.slice(0, SP_ALBUM_CAP));
 
   return json({
     found: true,
     artist_id: hit.id,
     artist_name: hit.name,
     albums,
-    truncated: albums.length >= SP_ALBUM_CAP,
+    truncated: Number(first.total ?? 0) > SP_ALBUM_CAP,
+    page_size: step,
   }, 200, { ...cors, "Cache-Control": "public, max-age=86400" });
 }
 
@@ -1234,7 +1339,9 @@ async function spAlbum(url, env, cors) {
 
   const q = `album:${JSON.stringify(title)} artist:${JSON.stringify(artist)}`;
   const data = await spFetch(
-    `/search?type=album&limit=20&market=${SP_MARKET}&q=${encodeURIComponent(q)}`,
+    // No `limit`: see the note in spArtistAlbums. Spotify's default for search
+    // is 20, which is what this asked for explicitly and was refused for.
+    `/search?type=album&market=${SP_MARKET}&q=${encodeURIComponent(q)}`,
     env);
 
   const wantTitle = spNorm(title);
