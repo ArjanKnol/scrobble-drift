@@ -38,7 +38,9 @@ Python copy before it.
 | **D14c** | One track title filed under several eras (informational) |
 | **D14e** | Unreleased material that now has an official release (see caveat below) |
 | **D14f** | A whole artist's unreleased output in one undifferentiated bucket (informational, unscored) |
-| **D1 / D3** | Artist name variants, MusicBrainz ID conflicts |
+| **D15** | One album split across two **album artists** (`Cruel Winter` by Kanye West and by Various Artists) |
+| **D1** | Artist name variants |
+| **D3** | One album name covering two MusicBrainz releases (informational) |
 | **D5 / D6 / D11 / D12** | Missing albums, duplicate scrobbles, Various Artists, impossible timestamps |
 
 ---
@@ -151,6 +153,57 @@ relabelled.
 There is a community workaround if you ever want one of these badly enough:
 rename the artist to something different, then rename it back with the casing
 you want. Two edits, fiddly, and not worth automating.
+
+---
+
+## Two signals that were sitting unused
+
+**MusicBrainz IDs.** Every scrobble carries `album_mbid` and `track_mbid`. Both
+were ingested by the Worker, carried through the whole pipeline, and read by
+**zero detectors** — while this README advertised a "D3 — MusicBrainz ID
+conflicts" that had never been written.
+
+That was the single biggest miss in the project, because an MBID is ground truth
+for the question D4 spends the most effort guessing at:
+
+| Evidence | Meaning | Effect |
+|---|---|---|
+| Same `album_mbid`, different album strings | Provably one release, two spellings | `error` at 0.97, no lookup needed |
+| Different `album_mbid` | Provably different releases | Downgraded to `review` at 0.15 |
+| Either side missing | No evidence | Falls through to the heuristics |
+
+The second row is what kills the false positives. The Jackson 5's *Dancing
+Machine* appears on both `Get It Together` and `Dancing Machine`, with two
+different album MBIDs — demonstrably not a split, and no amount of string
+cleverness was going to work that out.
+
+One caveat keeps it from being conclusive in both directions: `album_mbid`
+identifies a **release**, not a release group, so the standard and deluxe
+pressings of one album carry different IDs. A mismatch therefore downgrades
+rather than suppresses. A match has no such ambiguity.
+
+**Album artist is a different field from track artist.** Last.fm keys an album
+entity on **(album artist, album title)**, so when Spotify re-credited Kanye's
+`Cruel Winter` from "Kanye West" to "Various Artists", Last.fm gained a *second*
+album with the same title and the plays divided between them.
+
+Nothing here could see it, for a precise reason: `user.getRecentTracks` returns
+the **track** artist, so both halves of that split are byte-identical in the
+scrobble stream. Every grouping key in `drift.js` also begins with the artist, so
+no cross-artist comparison was possible either.
+
+`user.getTopAlbums` is the missing piece — each entry carries the album artist
+and a play count, and it covers the whole chart rather than just the scanned
+window. D15 only fires when the two credits are demonstrably **related**:
+
+1. they share an album MBID → conclusive
+2. one side is a Various Artists credit → the `Cruel Winter` shape
+3. one artist name contains the other → `Kanye West` vs `Kanye West & Kid Cudi`
+
+Anything else is silent even when the titles match exactly, because shared album
+titles are extremely common: self-titled records, `Greatest Hits`, `Live`. The
+accepted cost is missing a pure stage-name change (`Ye` versus `Kanye West`),
+which containment cannot catch.
 
 ---
 

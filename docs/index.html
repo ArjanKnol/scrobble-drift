@@ -138,6 +138,7 @@ import {
   eraVerificationPlan, verifyEraNames, hygieneScore, chartImpact,
   weakEraCandidates, officialKey, d5Resolve, byImportance,
 } from "./drift.js";
+
 import { apiBase, isConfigured, activeLinks } from "./config.js";
 import * as store from "./store.js";
 import { fetchCatalogue, matchTrack, byArtist, estimate } from "./spotify.js";
@@ -493,9 +494,15 @@ $("f").onsubmit = async (e) => {
     // thousands.
     const official = await verifyOfficialAlbums(scrobbles, apiKey);
 
+    // The album chart, which is the ONLY place Last.fm exposes the album artist.
+    // getRecentTracks returns the track artist, so an album re-credited from
+    // "Kanye West" to "Various Artists" is invisible in the scrobble stream: both
+    // halves look byte-identical. This is what makes D15 possible.
+    const topAlbums = await fetchTopAlbums(user, apiKey);
+
     await sleep(60);                  // let the browser paint before the CPU work
     const t1 = Date.now();
-    report = analyse(scrobbles, { official });
+    report = analyse(scrobbles, { official, topAlbums });
     stats.analyse_ms = Date.now() - t1;
     stats.phase = "analysing";
     setPhase(1, 2, "Analysing in your browser",
@@ -739,6 +746,41 @@ async function verifyOfficialAlbums(scrobbles, apiKey) {
     }
   }
   return official;
+}
+
+/**
+ * The user's whole album chart, for D15.
+ *
+ * Each entry carries the ALBUM ARTIST, which no other endpoint gives us. Cheap:
+ * 1000 albums per page, and it covers the entire chart rather than only the
+ * scanned window, so a re-credit outside the scan depth is still found.
+ *
+ * Best-effort. Returns [] on any failure, and D15 then contributes nothing rather
+ * than the scan breaking.
+ */
+async function fetchTopAlbums(user, apiKey, { maxPages = 6 } = {}) {
+  const base = apiBase().replace(/\/+$/, "");
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    if (abort) break;
+    const qs = new URLSearchParams({
+      method: "user.getTopAlbums", user, period: "overall",
+      limit: "1000", page: String(page),
+    });
+    if (apiKey) qs.set("key", apiKey);
+
+    const data = await fetch(`${base}/api/lastfm?${qs}`)
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    let list = data?.topalbums?.album;
+    if (!list) break;
+    if (!Array.isArray(list)) list = [list];
+    out.push(...list);
+
+    const total = Number(data.topalbums?.["@attr"]?.totalPages || 1);
+    if (page >= total) break;
+    await sleep(250);                 // gentle on the shared key
+  }
+  return out;
 }
 
 /** Visible countdown, so a wait never looks like a hang. */
