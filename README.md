@@ -557,11 +557,19 @@ detection logic is the actual asset, so it stays independent of where it runs an
 every rule is testable offline with no API key and no fixtures.
 
 **The era guard runs first.** Era-tagged unreleased material is partitioned out
-before anything else, and D0, D4, D1 and D13 never see it. Otherwise D0 would
+before anything else, and D0, D4 and D1 never see it. Otherwise D0 would
 resolve `Unreleased (Rodeo Era)` against MusicBrainz, find `Rodeo`, and
-confidently recommend merging them, destroying a deliberate distinction. And
-the orphan detector would flag every leak as a typo, since leaks have near-zero
-listeners and no database entry. Confidently damaging a carefully maintained
+confidently recommend merging them, destroying a deliberate distinction.
+
+This paragraph used to also name a **D13 orphan detector**, which would have
+flagged strings with near-zero global listeners as probable typos. It was never
+written, so the guard was documented as protecting against nothing. It is
+deliberately not being built: it needs one `getInfo` call per distinct string,
+which is impossible across 15,000 album strings, and capping it would inspect
+only the popular strings, which are the least likely to be typos. D1, D4 and D8
+already catch typos by comparing strings against each other inside the library.
+If revisited, the honest form is a listener-count signal that **ranks** existing
+findings rather than generating new ones. Confidently damaging a carefully maintained
 taxonomy is the worst thing this tool could do.
 
 **D14e never recommends an action.** A leak is frequently a different recording
