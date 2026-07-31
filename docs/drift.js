@@ -276,17 +276,111 @@ const UNREL_WEAK =
 const UNREL_MARK = new RegExp(
   `${UNREL_STRONG.source}|${UNREL_WEAK.source}`, "i");
 
-// "(Rodeo Era)", "[Rodeo Sessions]" -> Rodeo
-const BRACKETED_QUAL =
-  /[([]\s*([^)\]]*?)\s*\b(?:era|sessions?|sesh)\b\s*[)\]]/i;
-// Trailing "Rodeo Era" / "Rodeo Sessions" with no brackets at all.
-const BARE_QUAL = /^\s*(.+?)\s+\b(?:era|sessions?|sesh)\b\s*$/i;
-// "Unreleased (Rodeo)" -> Rodeo. Only consulted after an unreleased marker.
-const BARE_BRACKET = /[([]\s*([^)\]]+?)\s*[)\]]/;
+/* ---------------------------------------------------------------------------
+ * Era naming, in six forms this library has to recognise:
+ *
+ *     Unreleased (Rodeo Era)        marker + bracketed qualifier
+ *     Unreleased (Rodeo Sessions)   ditto, other qualifier word
+ *     Rodeo Sessions                bare qualifier, no marker
+ *     Eternal Atake (Sessions)      name OUTSIDE the bracket
+ *     Unreleased (Rodeo)            marker + bare parenthetical
+ *     Unreleased                    no era at all, a single bucket
+ *
+ * The fourth form was missing until a real library turned up with 111 Lil Uzi
+ * Vert tracks named that way. The old `BRACKETED_QUAL` regex matched its
+ * "(Sessions)" with an EMPTY capture group, so the string counted as unreleased
+ * and was protected from every other detector, while yielding no era name — and
+ * D14f then told the owner to "split them by era", which he had already done.
+ * That was the third instance of the same silent failure: absence of an answer
+ * treated as a negative answer.
+ *
+ * All of it is string operations now, rather than regexes. See the note on
+ * ReDoS below for why that is not a matter of taste.
+ * ------------------------------------------------------------------------- */
+const QUAL_WORD = /^(?:era|sessions?|sesh)$/i;
+
+/*
+ * All three era-name patterns are now string operations, not regexes.
+ *
+ * BARE_QUAL was `/^\s*(.+?)\s+\b(?:era|sessions?|sesh)\b\s*$/i` and hung outright
+ * on 4,096 leading spaces. It survived this long because `eraName` happens to
+ * collapse whitespace before reaching it, while `ambiguousEra` tests the RAW
+ * album string, so only `isEraTagged` was reachable and nothing called it with a
+ * pathological title until the fuzzer did.
+ *
+ * BRACKETED_QUAL and BARE_BRACKET had the same defect in a quieter form:
+ * `\s*([^)\]]*?)\s*` puts a lazy quantifier over a class that INCLUDES
+ * whitespace between two `\s*`, so three quantifiers compete for every space
+ * inside a bracket.
+ *
+ * There is no clever regex fix. Splitting a string on its last space and
+ * comparing a word against a fixed anchored alternation cannot backtrack at all,
+ * and it reads more plainly than the pattern it replaces.
+ */
+
+/** Every bracketed group as [content, startIndex, endIndex]. Linear: the class
+ *  excludes both closing brackets, so each group matches exactly one way. */
+const BRACKET_GROUP = /[([]([^)\]]*)[)\]]/g;
+function bracketGroups(s) {
+  const out = [];
+  BRACKET_GROUP.lastIndex = 0;                     // /g is stateful, so reset
+  for (let m; (m = BRACKET_GROUP.exec(s)); )
+    out.push([m[1], m.index, m.index + m[0].length]);
+  return out;
+}
+
+/** ["Rodeo", "Era"] for "Rodeo Era"; ["", "Sessions"] for "Sessions". */
+function splitLastWord(text) {
+  const t = String(text).replace(/\s+/g, " ").trim();
+  const i = t.lastIndexOf(" ");
+  return i < 0 ? ["", t] : [t.slice(0, i), t.slice(i + 1)];
+}
+
+/**
+ * The bracketed form: "(Rodeo Era)", "[Rodeo Sessions]" -> Rodeo.
+ *
+ * Returns the prefix, "" for a qualifier-only bracket such as "(Sessions)", or
+ * null when no group ends in a qualifier. Scans groups left to right and takes
+ * the first that qualifies, which is what the old regex did via backtracking.
+ */
+function bracketedQual(album) {
+  if (!album) return null;
+  for (const [content, start, end] of bracketGroups(album)) {
+    const [pre, last] = splitLastWord(content);
+    if (!QUAL_WORD.test(last)) continue;
+    if (pre) return pre;
+    // Qualifier alone in the bracket: the era name is what PRECEDES it,
+    // e.g. "Eternal Atake (Sessions)". Only when the bracket ends the title,
+    // so a stray "(Era)" in the middle does not rename the record.
+    if (!album.slice(end).trim()) {
+      const before = album.slice(0, start)
+        .replace(UNREL_MARK, " ").replace(/\s+/g, " ").trim();
+      if (before) return before;
+    }
+    return "";
+  }
+  return null;
+}
+
+/** The bare trailing form: "Rodeo Sessions" -> Rodeo. Null if it does not apply. */
+function bareQual(album) {
+  if (!album) return null;
+  const [pre, last] = splitLastWord(album);
+  return QUAL_WORD.test(last) && pre ? pre : null;
+}
+
+/** "Unreleased (Rodeo)" -> Rodeo. Only consulted after an unreleased marker. */
+function bareBracket(album) {
+  for (const [content] of bracketGroups(album || "")) {
+    const t = content.replace(/\s+/g, " ").trim();
+    if (t) return t;
+  }
+  return null;
+}
 
 /** Album strings that are unambiguously unreleased material on their own. */
 const explicitEra = (album) =>
-  Boolean(album) && (UNREL_STRONG.test(album) || BRACKETED_QUAL.test(album));
+  Boolean(album) && (UNREL_STRONG.test(album) || bracketedQual(album) !== null);
 
 /**
  * A weak marker with nothing else to back it up.
@@ -309,7 +403,7 @@ const weakEra = (album) =>
  * which is what makes the convention evidence rather than a guess.
  */
 const ambiguousEra = (album) =>
-  Boolean(album) && !explicitEra(album) && BARE_QUAL.test(album);
+  Boolean(album) && !explicitEra(album) && bareQual(album) !== null;
 
 /**
  * Context-free "does this look like unreleased material".
@@ -330,20 +424,20 @@ export const isEraTagged = (album) =>
 export const eraName = (album) => {
   if (!album) return null;
 
-  // Bracketed qualifier wins: it is the most explicit form.
-  let m = BRACKETED_QUAL.exec(album);
-  if (m?.[1]?.trim()) return m[1].trim();
+  // Bracketed qualifier wins: it is the most explicit form. "" means the bracket
+  // held nothing but the qualifier and there was no usable name around it.
+  const br = bracketedQual(album);
+  if (br) return br;
 
   // Bare trailing qualifier, e.g. "Rodeo Sessions". Strip any unreleased marker
   // first so "Unreleased Rodeo Sessions" yields Rodeo rather than the lot.
-  const stripped = album.replace(UNREL_MARK, " ").replace(/\s+/g, " ").trim();
-  m = BARE_QUAL.exec(stripped);
-  if (m?.[1]?.trim()) return m[1].trim();
+  const bare = bareQual(album.replace(UNREL_MARK, " "));
+  if (bare) return bare;
 
   // Bare parenthetical after an unreleased marker: "Unreleased (Rodeo)".
-  if (UNREL_MARK.test(album)) {
-    m = BARE_BRACKET.exec(album);
-    if (m?.[1]?.trim()) return m[1].trim();
+  if (br === null && UNREL_MARK.test(album)) {
+    const inner = bareBracket(album);
+    if (inner) return inner;
   }
   return null;
 };
@@ -2535,7 +2629,22 @@ const BUCKETS = {
  * light: those are informational, and inflating them would punish people for
  * having unusual libraries rather than untidy ones.
  */
-const CLASS_WEIGHT = { error: 3, split: 2, review: 0.75, unfixable: 0 };
+/*
+ * `review` scores ZERO, like `unfixable` and `style_choice`.
+ *
+ * It used to weigh 0.75, which meant a library whose ONLY findings were
+ * low-confidence reviews — every one of them saying "this is probably nothing to
+ * fix" — was capped below 100 and told it had "3 things you can fix". Found on a
+ * real 329-scrobble library: three D4 reviews, two of them MusicBrainz-disproven,
+ * and the report claimed three actionable items.
+ *
+ * That contradicts the one rule the score is built on: 100 means nothing left to
+ * fix. A review is by definition not a task, so the three exclusions are now
+ * uniform — unfixable, style_choice and review all cost nothing. What remains
+ * driving the score is `error` and `split`, which is exactly the fixable debt it
+ * claims to measure.
+ */
+const CLASS_WEIGHT = { error: 3, split: 2, review: 0, unfixable: 0 };
 
 /**
  * Hygiene score, 0 to 100.
