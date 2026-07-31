@@ -445,6 +445,23 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
   // Successes must stay cacheable, or the shared cache is pointless.
   ok(/"Cache-Control": "public, max-age=86400"/.test(src),
      "successful lookups remain cacheable");
+
+  /*
+   * /api/health is the exception among successes. It reports what is deployed and
+   * which bindings are live, and it WAS cacheable: a client that had asked once
+   * kept getting the old answer, which produced a reading where `build` had
+   * vanished and `mb_cache` was false straight after a deploy that had succeeded.
+   * The obvious reading was that the deploy had rolled back. Anything describing
+   * current state must not be cached.
+   */
+  const health = src.slice(src.indexOf('/api/health'),
+                           src.indexOf('/api/lastfm'));
+  ok(/no-store/.test(health),
+     "/api/health sets no-store, so it cannot report a stale deployment");
+  ok(!/public, max-age/.test(health),
+     "and is not marked publicly cacheable");
+  ok(/build: BUILD/.test(health) && /mb_cache:/.test(health),
+     "while still reporting the build and whether the cache is wired up");
 }
 
 /* ---------------------------------------------------------------------------
@@ -462,8 +479,8 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
   ok(Boolean(m), "a BUILD constant exists");
   ok(m && /^\d{4}-\d{2}-\d{2}/.test(m[1]),
      `and starts with a date so staleness is obvious at a glance (${m?.[1]})`);
-  ok(m && /page-size-10/.test(m[1]),
-     "and was bumped for the page-size change, per the note on BUILD");
+  ok(m && /health-no-store/.test(m[1]),
+     "and was bumped for the latest Worker change, per the note on BUILD");
   ok(/build: BUILD/.test(src), "and /api/health reports it");
 }
 

@@ -870,6 +870,22 @@ async function fetchAll(user, cap, apiKey) {
 
   let totalPages = null, totalScrobbles = null, attempt = 0, sinceSave = 0;
 
+  /*
+   * Baseline for the time estimate.
+   *
+   * Step 2 has always shown "about N min left" and step 1 never did, which is the
+   * wrong way round: step 1 is the part that runs for ten minutes on a large
+   * history with nothing to read but a page counter, and it is the first thing a
+   * new visitor sees.
+   *
+   * The rate is measured from what THIS session has fetched, not from `all.length`,
+   * because a resumed scan starts with tens of thousands of scrobbles already on
+   * disk. Dividing those by this session's elapsed time would report a rate the
+   * network never achieved and an estimate of nearly zero.
+   */
+  const startedAt = Date.now();
+  const startedWith = all.length;
+
   while (!abort) {
     const qs = new URLSearchParams({
       user, from: String(from), count: String(PAGES_PER_REQUEST),
@@ -940,10 +956,29 @@ async function fetchAll(user, cap, apiKey) {
     const target = cap ? Math.min(cap, totalScrobbles) : totalScrobbles;
     const pct = Math.min(100, (all.length / Math.max(target, 1)) * 100);
     $("fill").style.width = pct + "%";
+    /*
+     * Withheld until there is enough evidence to be worth showing.
+     *
+     * The first page or two include connection setup and a cold cache, so an
+     * estimate drawn from them is wildly pessimistic, and a number that starts at
+     * "40 min" and settles at "6 min" is worse than no number: it reads as the
+     * scan getting faster because something was fixed, rather than as the first
+     * guess having been bad. Four seconds and two pages of evidence is enough for
+     * the figure to be roughly stable from the moment it appears.
+     */
+    const fetchedNow = all.length - startedWith;
+    const elapsed = (Date.now() - startedAt) / 1000;
+    let eta = "";
+    if (elapsed > 4 && fetchedNow > PAGES_PER_REQUEST * 200 && target > all.length) {
+      const perSec = fetchedNow / elapsed;
+      const left = Math.round((target - all.length) / Math.max(perSec, 1));
+      eta = ` · about ${left > 90 ? Math.round(left / 60) + " min" : left + "s"} left`;
+    }
+
     $("status").textContent =
       `Fetching ${N(all.length)} of ${N(target)} scrobbles` +
       (data.shared_key === false ? " (your own key)" : "") +
-      ` · page ${N(from)} of ${N(totalPages)}`;
+      ` · page ${N(from)} of ${N(totalPages)}` + eta;
 
     // Checkpoint periodically rather than every batch: writing 100MB on each
     // page would be slower than the network. Best-effort throughout, so a
