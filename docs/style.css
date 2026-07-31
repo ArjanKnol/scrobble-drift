@@ -249,3 +249,15 @@ html{scroll-behavior:smooth}
   border-radius:99px;padding:1px 6px;font-size:10px;font-weight:700;
   text-transform:uppercase;letter-spacing:.05em}
 .links a:hover .lk{background:var(--accent);color:#fff}
+
+/* ------------------------------------------------------------ social links */
+/* Sits under the intro rather than in the footer: from there it reads as "who
+   made this", which is what a stranger arriving from a link actually wants to
+   know, instead of as boilerplate nobody scrolls to. */
+.social{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:0 0 26px}
+.social .ic{display:inline-flex;align-items:center;gap:7px;border-bottom:0;
+  color:var(--dim);font-size:12.5px;
+  border:1px solid var(--line);border-radius:99px;padding:5px 13px 5px 11px;
+  background:#0c0c0c}
+.social .ic:hover{color:var(--accent);border-color:var(--accent)}
+.social .ic svg{display:block;flex:0 0 auto}

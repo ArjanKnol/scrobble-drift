@@ -9,7 +9,7 @@
   how much they distort your charts.">
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=12">
+<link rel="stylesheet" href="style.css?v=14">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -30,9 +30,7 @@
     existing tool catches it.
   </p>
 
-  <div class="nav">
-    <a href="https://github.com/ArjanKnol/scrobble-drift">Source</a>
-  </div>
+  <div class="social" id="social"></div>
 
   <div class="panel">
     <form id="f">
@@ -131,9 +129,6 @@
          target="_blank" rel="noopener noreferrer">Spotify</a></span>
     <span class="sep">|</span>
     <span>Not affiliated with Last.fm Ltd.</span>
-    <span class="sep">|</span>
-    <a href="https://github.com/ArjanKnol/scrobble-drift" target="_blank"
-       rel="noopener noreferrer">Source</a>
   </footer>
 </div>
 
@@ -143,7 +138,7 @@ import {
   eraVerificationPlan, verifyEraNames, hygieneScore, chartImpact,
   weakEraCandidates, officialKey, d5Resolve, byImportance,
 } from "./drift.js";
-import { apiBase, isConfigured } from "./config.js";
+import { apiBase, isConfigured, activeLinks } from "./config.js";
 import * as store from "./store.js";
 import { fetchCatalogue, matchTrack, byArtist, estimate } from "./spotify.js";
 import {
@@ -321,6 +316,25 @@ npx wrangler deploy</pre></div>
       then reload.</p>
     </div>`;
 }
+
+/*
+ * Footer links, rendered from config.js.
+ *
+ * Icons are inline SVG paths rather than an icon font or a CDN sprite. The whole
+ * claim of this page is that it makes no third-party request it does not need,
+ * and pulling an icon set from someone else's server to draw three glyphs would
+ * quietly break that for no benefit.
+ *
+ * Entries with no URL are skipped, so config.js can ship with placeholders
+ * without the page ever showing a dead link.
+ */
+$("social").innerHTML = activeLinks().map((l) => `
+  <a class="ic" href="${esc(l.url)}" target="_blank" rel="noopener noreferrer"
+     title="${esc(l.label)}" aria-label="${esc(l.label)}">
+    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"
+         focusable="false"><path fill="currentColor" d="${esc(l.path)}"/></svg>
+    <span>${esc(l.label)}</span>
+  </a>`).join("");
 
 $("stop").onclick = () => { abort = true; $("status").textContent = "stopping…"; };
 
