@@ -16,7 +16,8 @@
  *
  * Run: node scripts/test-shapes.mjs
  */
-import { analyse, editDistance, norm } from "../docs/drift.js";
+import * as drift from "../docs/drift.js";
+const { analyse, editDistance, norm } = drift;
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log(`  ok   ${m}`); }
@@ -270,6 +271,123 @@ for (const [label, lib] of [
   ok(!threw, `${label} does not throw${threw ? ": " + threw.message : ""}`);
   if (r) ok(r.hygiene.score >= 0 && r.hygiene.score <= 100,
             `  and scores in range (${r.hygiene.score})`);
+}
+
+/* ---------------------------------------------------------------------------
+ * No string function may blow up on an adversarial title.
+ *
+ * A regex I added for the "Eternal Atake (Sessions)" form was a ReDoS:
+ *
+ *     /^\s*(.+?)\s*[([]\s*(?:era|sessions?|sesh)\s*[)\]]\s*$/
+ *
+ * `\s*`, lazy `.+?`, `\s*` — three quantifiers competing for the same run of
+ * spaces. With an opening bracket and no closing one it never terminated. 20
+ * leading spaces was instant, 200 hung Node completely.
+ *
+ * This is not merely a slow test. Album and artist strings arrive from other
+ * people's public Last.fm libraries, and every detector runs in the browser on the
+ * main thread. One malformed title would freeze the tab with nothing in the
+ * console to explain it, and the user's only recourse would be to close it.
+ *
+ * The bug was found because test-shapes.mjs timed out, which is a terrible way to
+ * learn about it: no name, no line, no failing assertion. So it is now asserted.
+ * Every exported single-string function is called on inputs designed to trigger
+ * backtracking, under a wall-clock budget.
+ * ------------------------------------------------------------------------- */
+{
+  /*
+   * Shapes that provoke backtracking: an unclosed opener after a long ambiguous
+   * run, nested and repeated brackets, and a qualifier word that appears but never
+   * completes. The long runs are whitespace and separators, because those are what
+   * the quantifiers in these patterns overlap on.
+   */
+  const nasty = [];
+  for (const n of [64, 512, 4096]) {
+    nasty.push(" ".repeat(n) + "a (sessions");           // the actual bug
+    nasty.push("a" + " ".repeat(n) + "(era");
+    nasty.push("(".repeat(n) + "era");
+    nasty.push("[".repeat(n) + "sessions]");
+    nasty.push("Unreleased" + " ".repeat(n) + "(sesh");
+    nasty.push("(x)".repeat(Math.floor(n / 3)) + " (era");
+    nasty.push("-".repeat(n) + " (Sessions)");
+    nasty.push("feat. ".repeat(Math.floor(n / 6)) + "(era");
+    nasty.push("a".repeat(n));
+    nasty.push(("\u00a0" + " ").repeat(Math.floor(n / 2)) + "(era");
+  }
+
+  /*
+   * Named explicitly, NOT found by reflection.
+   *
+   * The first version of this block filtered on `fn.length === 1`, reasoning that
+   * a one-argument export takes one string. It does not: `analyse(scrobbles,
+   * opts = {})` also reports length 1, so the fuzz fed a 4,096-character string
+   * into the entire detector pipeline, which treated each character as a scrobble
+   * and ran D1's O(n^2) artist comparison over 4,096 of them. The guard against
+   * hanging hung.
+   *
+   * So the list is explicit, and the assertion below keeps it honest: it probes
+   * every export and fails if one accepts a string and returns a primitive
+   * without being listed here.
+   */
+  const STRING_FNS = [
+    "norm", "normTitle", "trackIdentity", "baseTitle", "eraName",
+    "isEraTagged", "isUndifferentiated", "isStructuralTitle", "featCredits",
+    "officialKey", "d5Resolve", "digitsOnlyDiffer", "caseOnly",
+  ];
+  const unary = STRING_FNS.map((n) => [n, drift[n]]).filter(([, v]) => typeof v === "function");
+  ok(unary.length === STRING_FNS.length,
+     `all ${STRING_FNS.length} named string functions exist`);
+
+  const unlisted = Object.entries(drift).filter(([name, v]) => {
+    if (typeof v !== "function" || STRING_FNS.includes(name)) return false;
+    try { return ["string", "boolean"].includes(typeof v("Test (Sessions)")); }
+    catch { return false; }                 // rejects a bare string: not one of these
+  }).map(([n]) => n);
+  ok(unlisted.length === 0,
+     unlisted.length
+       ? `add to STRING_FNS so it gets fuzzed: ${unlisted.join(", ")}`
+       : "no string function is missing from the fuzz list");
+
+  const BUDGET_MS = 50;                 // generous: correct versions are ~0.01ms
+  const slow = [];
+  for (const [name, fn] of unary) {
+    let worst = 0, worstIn = "";
+    for (const input of nasty) {
+      const t = process.hrtime.bigint();
+      try { fn(input); } catch { /* throwing is fine, hanging is not */ }
+      const ms = Number(process.hrtime.bigint() - t) / 1e6;
+      if (ms > worst) { worst = ms; worstIn = input.slice(0, 24); }
+    }
+    if (worst > BUDGET_MS) slow.push(`${name} took ${worst.toFixed(0)}ms on ${JSON.stringify(worstIn)}...`);
+    ok(worst <= BUDGET_MS,
+       `${name}() stays linear on adversarial input (worst ${worst.toFixed(2)}ms)`);
+  }
+  ok(slow.length === 0, slow.length ? slow.join("\n       ") : "no function backtracks");
+
+  /*
+   * And the growth curve, which is what actually distinguishes a ReDoS from a
+   * merely long string. Doubling the input must not more than quadruple the time.
+   * Checked on eraName specifically, since that is where the bug was.
+   */
+  if (typeof drift.eraName === "function") {
+    const time = (n) => {
+      const s = " ".repeat(n) + "a (sessions";
+      const t = process.hrtime.bigint();
+      for (let i = 0; i < 200; i++) drift.eraName(s);
+      return Number(process.hrtime.bigint() - t) / 1e6;
+    };
+    time(1000);                                          // warm the JIT
+    const small = Math.max(time(2000), 0.01);
+    const large = time(8000);                            // 4x the input
+    ok(large < small * 40,
+       `eraName grows sub-quadratically: 4x input cost ${(large / small).toFixed(1)}x time`);
+  }
+
+  // The fixed behaviour must survive all of that: still correct, never throwing.
+  for (const [album, want] of [["Eternal Atake (Sessions)", "Eternal Atake"],
+                               ["(Sessions)", null], ["a (sessions", null]])
+    ok(drift.eraName(album) === want,
+       `eraName(${JSON.stringify(album)}) === ${JSON.stringify(want)}`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

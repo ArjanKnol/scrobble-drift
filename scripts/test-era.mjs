@@ -547,5 +547,65 @@ console.log("\nera findings name the library's album string");
      "the post-lookup message names the library entry as well");
 }
 
+/* ---------------------------------------------------------------------------
+ * The era name on the OUTSIDE of the bracket.
+ *
+ * "Eternal Atake (Sessions)". Real libraries use this heavily, and it was the
+ * third instance of the same silent failure: BRACKETED_QUAL matched "(Sessions)"
+ * with an EMPTY capture group, so the string counted as unreleased and was
+ * protected from every other detector, while yielding no era name at all.
+ *
+ * The visible damage was D14f telling someone with 111 carefully named
+ * Lil Uzi Vert tracks to "split them by era". He had. The name was just on the
+ * other side of the bracket.
+ * ------------------------------------------------------------------------- */
+{
+  const cases = [
+    ["Eternal Atake (Sessions)",            "Eternal Atake"],
+    ["Luv Is Rage (Sessions)",              "Luv Is Rage"],
+    ["Eternal Atake [Sessions]",            "Eternal Atake"],
+    ["Rodeo (Sesh)",                        "Rodeo"],
+    ["Donda (Era)",                         "Donda"],
+    ["Donda ( era )",                       "Donda"],
+    ["DONDA (SESSIONS)",                    "DONDA"],
+    // The marker may also lead. The era is still just Rodeo.
+    ["Unreleased Rodeo (Sessions)",         "Rodeo"],
+    // Inside-the-bracket form must keep working unchanged.
+    ["Unreleased (Eternal Atake Sessions)", "Eternal Atake"],
+    ["Unreleased (Rodeo Era)",              "Rodeo"],
+  ];
+  for (const [album, want] of cases) {
+    ok(eraName(album) === want,
+       `${JSON.stringify(album)} -> era ${JSON.stringify(want)} (got ${JSON.stringify(eraName(album))})`);
+    ok(!isUndifferentiated(album),
+       `${JSON.stringify(album)} counts as differentiated, so D14f leaves it alone`);
+  }
+
+  // The genuinely undifferentiated forms must still be caught, or the fix has
+  // simply disabled the detector it was meant to correct.
+  for (const album of ["Unreleased", "unreleased", "Leaks", "Snippets", "OG Files"]) {
+    ok(eraName(album) === null, `${JSON.stringify(album)} still yields no era name`);
+    ok(isUndifferentiated(album), `${JSON.stringify(album)} is still undifferentiated`);
+  }
+
+  // A bracket containing only the qualifier and NOTHING before it has no name to
+  // extract, so it must not invent one out of the empty string.
+  for (const album of ["(Sessions)", "  (Era) ", "[sesh]"])
+    ok(eraName(album) === null,
+       `${JSON.stringify(album)} has no name to take (got ${JSON.stringify(eraName(album))})`);
+
+  // The end-to-end consequence: D14f must go quiet on a library that has already
+  // named its eras this way.
+  const named = [];
+  for (const [alb, n] of [["Eternal Atake (Sessions)", 40],
+                          ["Luv Is Rage (Sessions)", 35],
+                          ["Lil Uzi Vert vs. The World (Sessions)", 36]])
+    for (let i = 0; i < n; i++)
+      named.push({ artist: "Lil Uzi Vert", album: alb, track: `t${i}`, uts: 1e9 + i });
+  const era = partitionEra(named).era;
+  ok(d14fSingleBucket(era).length === 0,
+     "D14f says nothing to a library whose eras are named outside the bracket");
+}
+
 console.log(`\n${pass} passed, ${fail} failed (including appended block)\n`);
 process.exit(fail ? 1 : 0);

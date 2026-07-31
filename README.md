@@ -226,16 +226,24 @@ is why `SCORED_DETECTORS` now exists and a test asserts that every detector
 `analyse()` can emit is scored.
 
 What it measures now: the number of distinct findings, weighted by severity
-(`error` 3, `split` 2, `review` 0.75) and by plays affected on a log scale,
+(`error` 3, `split` 2) and by plays affected on a log scale,
 against the count of **album strings**, which is the unit that actually gets
 curated. Plays still matter, as a modifier rather than the denominator, so a
 split affecting 400 plays outweighs one affecting 2 without letting a single
 popular album sink the whole score.
 
-Two deliberate exclusions:
+Three deliberate exclusions:
 
 - `unfixable` findings score zero. Last.fm gives you no way to act on them.
 - `style_choice` findings score zero. A valid convention is not a defect.
+- `review` findings score zero, and are not counted as actionable.
+
+The last one was a third bug of the same family. `review` used to weigh 0.75, so
+a library whose only findings were reviews — every one of them saying *probably
+nothing to fix* — was capped below 100 and told it had "3 things you can fix".
+Found on a real 329-scrobble library with three D4 reviews, two of them
+MusicBrainz-**disproven** at 0.15 confidence. A maybe is not a task, and quantity
+does not turn one into a task, so reviews are now reported and not scored.
 
 The denominator has a floor of 80 album strings. Without it, a small library
 bottoms out a whole bucket on a single finding, which is noise rather than

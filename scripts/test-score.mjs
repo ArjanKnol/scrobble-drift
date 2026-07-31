@@ -42,7 +42,19 @@ console.log("\nthe invariant: 100 means nothing to fix");
   ];
   const h = hygieneScore(2000, issues, 786);
   ok(h.score < 100, `10 findings can never score 100 (got ${h.score})`);
-  eq(h.actionable, 10, "all ten count as actionable");
+  /*
+   * SEVEN, not ten. Three of the fixture's findings are `review` (D14c, D5, D11),
+   * and a review is no longer a task: see "a review is not a task" below. This
+   * assertion originally read 10 because at the time every class counted, which
+   * is what produced "3 things you can fix" on a library whose three findings all
+   * said "probably nothing to fix".
+   *
+   * What this block was actually written to pin down is unchanged and still
+   * asserted directly above: ten findings can never render as 100/100.
+   */
+  eq(h.actionable, 7, "the seven error/split findings count as actionable");
+  eq(issues.filter((i) => i.class === "review").length, 3,
+     "and the other three are reviews, which are reported but not counted");
   console.log(`       score ${h.score}, subscores ` +
               JSON.stringify(h.subscores));
 }
@@ -181,6 +193,70 @@ console.log("\nbounds and degenerate input");
     60, Array.from({ length: 12 }, () => issue("D4", "split", 16)), 11);
   ok(worse.score < h.score,
      `12 findings in the same small library still scores worse (${worse.score} < ${h.score})`);
+}
+
+/* ---------------------------------------------------------------------------
+ * A `review` is not a task.
+ *
+ * `review` used to weigh 0.75, so a library whose only findings were
+ * low-confidence reviews — every one of them saying "this is probably nothing to
+ * fix" — was capped below 100 and told it had "3 things you can fix". Found on a
+ * real 329-scrobble library: three D4 reviews, two of them MusicBrainz-DISPROVEN
+ * at 15% confidence, and the report still claimed three actionable items.
+ *
+ * That breaks the one rule the whole score rests on, stated in the README:
+ * 100 is reserved for a library with nothing left to fix.
+ * ------------------------------------------------------------------------- */
+{
+  const review = (n, conf = 0.15) =>
+    Array.from({ length: n }, () => ({
+      detector: "D4", class: "review", confidence: conf, plays_affected: 3,
+    }));
+
+  const only = hygieneScore(329, review(3), 101);
+  ok(only.score === 100,
+     `three "probably nothing" reviews leave a perfect score (got ${only.score})`);
+  ok(only.actionable === 0,
+     `and count as nothing to fix (got ${only.actionable})`);
+
+  // Not even a lot of them, because quantity does not turn a maybe into a task.
+  const many = hygieneScore(329, review(25), 101);
+  ok(many.score === 100 && many.actionable === 0,
+     `25 reviews still leave 100/0 (got ${many.score}/${many.actionable})`);
+
+  // Confidence must not smuggle one back in either.
+  const confident = hygieneScore(329, review(3, 0.95), 101);
+  ok(confident.score === 100 && confident.actionable === 0,
+     "a high-confidence review is still only a review");
+
+  // But a real finding alongside them must still register, and must be counted
+  // ONCE: the reviews neither add to nor mask it.
+  const mixed = hygieneScore(
+    329, [...review(3), { detector: "D4", class: "split", confidence: 0.9, plays_affected: 16 }], 101);
+  ok(mixed.actionable === 1,
+     `one split among three reviews is exactly one thing to fix (got ${mixed.actionable})`);
+  ok(mixed.score < 100, `and caps the score (got ${mixed.score})`);
+
+  const alone = hygieneScore(
+    329, [{ detector: "D4", class: "split", confidence: 0.9, plays_affected: 16 }], 101);
+  ok(mixed.score === alone.score,
+     `adding reviews does not move the score at all (${mixed.score} === ${alone.score})`);
+
+  // `review` now sits with the other two free classes. Stated as one assertion so
+  // that reintroducing a weight for any of them fails here rather than in the UI.
+  for (const cls of ["review", "unfixable"]) {
+    const free = hygieneScore(329, Array.from({ length: 4 }, () => ({
+      detector: "D4", class: cls, confidence: 0.5, plays_affected: 5 })), 101);
+    ok(free.score === 100 && free.actionable === 0,
+       `class "${cls}" costs nothing (got ${free.score}/${free.actionable})`);
+  }
+
+  // A style choice was already free; confirm it did not regress on the way past.
+  const style = hygieneScore(329, [{
+    detector: "D14f", class: "review", confidence: 0.3,
+    plays_affected: 111, style_choice: true }], 101);
+  ok(style.score === 100 && style.actionable === 0,
+     "a style choice costs nothing");
 }
 
 /* ------------------------------------------------------------------------- */
