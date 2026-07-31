@@ -134,16 +134,79 @@ export async function loadScrobbles(user) {
  * answer from last month is as good as a fresh one, and this cache is what
  * turns a 50-minute resolution phase into an instant one on the second run.
  */
+/*
+ * How long a cached answer is allowed to live.
+ *
+ * A POSITIVE answer never expires, and that is not laziness: a release group, its
+ * type and its first release date are historical facts. Once MusicBrainz says
+ * Rodeo came out in 2015 that will not change, and re-asking would spend a
+ * one-per-second budget to be told the same thing.
+ *
+ * A NEGATIVE answer is completely different, and treating the two the same was a
+ * bug. "MusicBrainz has never heard of this" is only ever a statement about
+ * today. D14e exists precisely to notice that a leak has since had an official
+ * release, so caching its absence forever guaranteed that the one detector whose
+ * whole job is to spot a change over time could never fire again for anyone who
+ * had already scanned. The cache silently disabled the feature.
+ *
+ * Same family as every other bug in this project: an absent answer recorded as a
+ * permanent fact.
+ */
+const NEG_TTL_MS = 30 * 24 * 60 * 60 * 1000;      // 30 days
+
+/**
+ * Does this answer mean "not found"?
+ *
+ * Judged from the VALUE rather than from a flag written alongside it, so that
+ * entries stored before any of this existed are classified correctly too. Each
+ * shape below is one of the four lookup kinds' way of saying no.
+ */
+const isNegative = (v) =>
+  Boolean(v) && typeof v === "object" && (
+    v.found === false || v.exists === false ||
+    (Array.isArray(v.groups) && v.groups.length === 0) ||
+    (Array.isArray(v.releases) && v.releases.length === 0)
+  );
+
+const KEY = (kind, a, b) => `${kind}:${a}:${b}`.toLowerCase();
+
 export async function getLookup(kind, a, b) {
-  return tx("lookups", "readonly", (store, set) => {
-    const r = store.get(`${kind}:${a}:${b}`.toLowerCase());
+  const rec = await tx("lookups", "readonly", (store, set) => {
+    const r = store.get(KEY(kind, a, b));
     r.onsuccess = () => set(r.result ?? null);
   }, null);
+  if (rec == null) return null;
+
+  // Wrapped records carry a timestamp. Anything else was written before this
+  // existed, so its age is unknown.
+  const wrapped = typeof rec === "object" && rec !== null &&
+                  "v" in rec && "t" in rec;
+  if (!wrapped) {
+    /*
+     * Legacy entry. Stamped with NOW rather than discarded.
+     *
+     * Discarding every un-aged negative would be the strictly correct reading,
+     * but on an unreleased-heavy library most entries are negative and that
+     * would throw away thousands of answers and re-fetch them at one per second.
+     * Starting the clock now costs nothing, keeps the cache, and means the
+     * thirty-day re-check happens from here on. The only thing lost is one cycle
+     * of freshness for entries that were already stale, which is the cheapest
+     * possible way out of a mistake that was already made.
+     */
+    putLookup(kind, a, b, rec);            // fire and forget, never awaited
+    return rec;
+  }
+
+  if (isNegative(rec.v) && Date.now() - rec.t > NEG_TTL_MS) return null;
+  return rec.v;
 }
 
 export async function putLookup(kind, a, b, value) {
   return tx("lookups", "readwrite", (store) => {
-    store.put(value, `${kind}:${a}:${b}`.toLowerCase());
+    // `t` is what makes the negative TTL above possible. The value itself is
+    // nested rather than annotated, so a stored answer is never confused with
+    // its own metadata.
+    store.put({ v: value, t: Date.now() }, KEY(kind, a, b));
   }, false).then(() => true, () => false);
 }
 
