@@ -46,6 +46,20 @@
  * Layers 1, 4, 5 and 6 are what carry the load; layer 3 is a coarse backstop.
  */
 
+/*
+ * A build marker, so "is the running Worker the code I am looking at?" is a
+ * question with an answer.
+ *
+ * Three separate rounds of debugging were spent on a deployed build being older
+ * than the source, and each time the symptom was indistinguishable from a real
+ * bug: the Spotify limit fix appeared not to work, and a cached error response
+ * appeared to be a failed deploy. Guessing from behaviour cannot settle it,
+ * because behaviour is exactly what is in question.
+ *
+ * Bump this in the same commit as any Worker change. /api/health reports it.
+ */
+const BUILD = "2026-07-31-6-page-size-10-probe-removed";
+
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";
 const SPOTIFY_TOKEN = "https://accounts.spotify.com/api/token";
@@ -88,6 +102,7 @@ export default {
       if (url.pathname === "/api/health") {
         return json({
           ok: true,
+          build: BUILD,
           configured: Boolean(env.LASTFM_API_KEY),
           spotify: Boolean(env.SPOTIFY_CLIENT_ID && env.SPOTIFY_CLIENT_SECRET),
           limiters: {
@@ -159,83 +174,6 @@ export default {
        * Read-only, no secrets in the output, and it spends a handful of
        * Spotify calls. Delete this block before it is forgotten.
        */
-      // DIAG-BEGIN (temporary, safe to delete this whole block)
-      if (url.pathname === "/api/spotify/diag") {
-        const name = (url.searchParams.get("artist") || "Portishead").slice(0, 100);
-        const out = [];
-        const attempt = async (label, path) => {
-          try {
-            await spFetch(path, env);
-            out.push({ label, ok: true });
-          } catch (err) {
-            out.push({ label, ok: false, err: redact(String(err.message || err)) });
-          }
-        };
-        // The shapes the code now actually uses. All four must be ok.
-        await attempt("search artist, limit 5, market  [used by spArtistAlbums]",
-          `/search?type=artist&limit=5&market=${SP_MARKET}&q=${encodeURIComponent(name)}`);
-        await attempt("search album, NO limit, market  [used by spAlbum]",
-          `/search?type=album&market=${SP_MARKET}&q=${encodeURIComponent(name)}`);
-
-        // Resolve an id with the shape already known to work, then vary the
-        // albums call around it.
-        let id = null;
-        try {
-          const f = await spFetch(
-            `/search?type=artist&limit=5&market=${SP_MARKET}` +
-            `&q=${encodeURIComponent(name)}`, env);
-          id = (f.artists?.items || []).find((a) => a?.id)?.id || null;
-        } catch { /* reported above */ }
-        out.push({ label: "resolved artist id", ok: Boolean(id), id });
-
-        if (id) {
-          // The two shapes the paging loop now uses. `include_groups` was never
-          // implicated in any error, but it has not been proven innocent
-          // WITHOUT a limit until this runs, and page two has never run at all.
-          await attempt("albums, groups + market, NO limit  [page 1]",
-            `/artists/${id}/albums?include_groups=album,single,compilation` +
-            `&market=${SP_MARKET}`);
-          await attempt("albums, groups + market + offset, NO limit  [page 2]",
-            `/artists/${id}/albums?include_groups=album,single,compilation` +
-            `&market=${SP_MARKET}&offset=20`);
-
-          /*
-           * Where exactly is the ceiling?
-           *
-           * 5 is accepted and 20 is refused, and the page size Spotify actually
-           * serves is 5, which is not the documented default of 20. If anything
-           * between 6 and 15 is accepted it halves or thirds the number of
-           * requests a catalogue costs, so it is worth one probe rather than an
-           * assumption.
-           */
-          for (const n of [6, 8, 10, 15]) {
-            await attempt(`albums, limit ${n} + groups + market`,
-              `/artists/${id}/albums?include_groups=album,single,compilation` +
-              `&limit=${n}&market=${SP_MARKET}`);
-          }
-
-          // Kept as the control: this is the shape that was failing.
-          await attempt("albums, groups + limit 50 + market  [the old, broken shape]",
-            `/artists/${id}/albums?include_groups=album,single,compilation` +
-            `&limit=50&market=${SP_MARKET}`);
-
-          // How many albums a page actually returns now decides how many
-          // requests a catalogue costs, so report it rather than assuming 20.
-          try {
-            const pg = await spFetch(
-              `/artists/${id}/albums?include_groups=album,single,compilation` +
-              `&market=${SP_MARKET}`, env);
-            out.push({ label: "page size and total",
-                       ok: true, items: (pg.items || []).length,
-                       total: pg.total ?? null });
-          } catch (err) {
-            out.push({ label: "page size and total", ok: false,
-                       err: redact(String(err.message || err)) });
-          }
-        }
-        return json({ artist: name, market: SP_MARKET, attempts: out }, 200, cors);
-      }
-      // DIAG-END
 
       if (url.pathname === "/api/spotify/album") {
         return await spAlbum(url, env, cors);
@@ -995,6 +933,22 @@ async function mbRecording(url, env, request, cors) {
 
 const SP_TOKEN_CACHE = "https://scrobble-drift.internal/spotify-token";
 const SP_ALBUM_CAP = 100;    // albums per artist, keeps subrequests bounded
+
+/*
+ * Albums per page: 10, which is the highest value Spotify accepts here.
+ *
+ * Probed rather than assumed, because the documented behaviour is wrong for this
+ * app. 6, 8 and 10 are accepted; 15 and 50 are refused with
+ * {"status":400,"message":"Invalid limit"}; and omitting the parameter yields
+ * pages of 5, not the documented default of 20. So the real ceiling sits between
+ * 10 and 15 and the default is a quarter of what the docs claim.
+ *
+ * Worth the probe: at 5 per page Björk's 145 releases were 29 requests, and the
+ * 100-album cap was 20. At 10 it is half that. Combined with fetching pages
+ * concurrently rather than one at a time, this went from the slowest part of a
+ * scan to a rounding error.
+ */
+const SP_PAGE = 10;
 const SP_TTL = 604800;       // 7 days. Catalogues change; release dates do not.
 const SP_BATCH = 10;         // albums per tracklist call, see SP_MARKET below
 
@@ -1206,7 +1160,8 @@ async function spArtistAlbums(url, env, cors) {
   const albums = [];
   const albumPage = (offset) =>
     `/artists/${hit.id}/albums?include_groups=album,single,compilation` +
-    `&market=${SP_MARKET}` + (offset ? `&offset=${offset}` : "");
+    `&limit=${SP_PAGE}&market=${SP_MARKET}` +
+    (offset ? `&offset=${offset}` : "");
   // `appears_on` is excluded on purpose. It pulls in every playlist-style
   // compilation and other artists' records that merely feature this artist,
   // which would make almost any track look "officially released".
