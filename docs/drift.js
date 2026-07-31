@@ -908,7 +908,7 @@ export function d14fSingleBucket(era, { minTracks = 8, rest = [] } = {}) {
   return issues;
 }
 
-/* ------------------------------------------------------ D3: MBID evidence */
+/* -------------------------------------------------------- MBID evidence */
 
 /**
  * MusicBrainz IDs, which Last.fm hands us for free and nothing has ever read.
@@ -1013,60 +1013,30 @@ export function mbidVerdict(mbids, artist, a, b) {
   return "different";
 }
 
-/**
- * D3: the same album string carrying two different release MBIDs.
+/*
+ * There is no D3.
  *
- * Not a split — the opposite. It means one album name in your library actually
- * covers two distinct releases, so merging them would be wrong and the plays are
- * already pooled under one name. Reported because it explains why a play count
- * can look higher than expected, and because it is the signal that tells D4 to
- * keep its hands off.
+ * It reported that one album name in a library covers two different MusicBrainz
+ * releases, which happens with a reissue or a second pressing. Removed because it
+ * was unactionable in the strictest sense: Last.fm already pools those plays under
+ * one name, which is the correct outcome, so there was nothing to merge, nothing
+ * to click and nothing to decide.
  *
- * Editions are excluded: the deluxe and standard pressings of one album routinely
- * share a title in a library while being separate MusicBrainz releases, and
- * saying so on every album anyone owns twice would be noise.
+ * The justification it shipped with was "it explains a play count that looks off",
+ * and that does not survive being read carefully: if two pressings are pooled the
+ * count is their sum, which is what you want. It was a fact about MusicBrainz's
+ * data model rather than about anyone's library, and it failed the standard set
+ * for the rest of the report, which is that a finding has to be something you can
+ * act on.
+ *
+ * Reported by the person it was shown to as "I have absolutely no clue what is
+ * flagged here", which is the right reaction to a card whose own text says
+ * "nothing to merge" above two opaque MBID fragments.
+ *
+ * `albumMbids` and `mbidVerdict` remain and are still load-bearing: they are the
+ * ground truth D4 uses to decide that two album names ARE the same release, and to
+ * downgrade itself when they are not. That was always the valuable half.
  */
-export function d3MbidConflicts(rest, { minPlays = 6 } = {}) {
-  const groups = new Map();
-  for (const s of rest) {
-    if (!s.album || !s.album_mbid) continue;
-    const k = `${norm(s.artist)}␟${norm(s.album)}`;
-    if (!groups.has(k)) {
-      groups.set(k, { artist: s.artist, album: s.album, ids: new Map() });
-    }
-    const g = groups.get(k);
-    g.ids.set(s.album_mbid, (g.ids.get(s.album_mbid) || 0) + 1);
-  }
-
-  const issues = [];
-  for (const g of groups.values()) {
-    if (g.ids.size < 2) continue;
-    const total = [...g.ids.values()].reduce((a, b) => a + b, 0);
-    if (total < minPlays) continue;
-    // A lone stray MBID is a scrobbler quirk, not two releases.
-    const order = ranked(g.ids);
-    if (order[1][1] < 2) continue;
-
-    issues.push({
-      detector: "D3", class: "review", confidence: 0.5,
-      artist: g.artist, album: g.album,
-      title: `${g.artist} - '${g.album}' covers ${g.ids.size} different ` +
-             `MusicBrainz releases`,
-      plays_affected: total,
-      suggest:
-        `These plays share one album name but MusicBrainz says they are ` +
-        `${g.ids.size} separate releases, usually different pressings or a ` +
-        `reissue. Nothing to merge: they are already pooled under one name. ` +
-        `Worth knowing because it explains a play count that looks off, and it ` +
-        `is why no split is reported for this album.`,
-      members: order.map(([id, plays]) => ({
-        album: g.album, plays, looks_like: `release ${id.slice(0, 8)}`,
-      })),
-      no_auto_action: true,
-    });
-  }
-  return issues;
-}
 
 /* ------------------------------------------------- D4 splits, D0 temporal */
 
@@ -2559,7 +2529,6 @@ export const DETECTOR_ORDER = [
   ["D0", "D4", "D15"],               // album splits, including album-artist ones
   ["D8"],                            // one track split across title variants
   ["D1"],                            // artist name variants
-  ["D3"],                            // MBID conflicts, informational
   ["D11"],                           // Various Artists
   ["D6", "D12"],                     // duplicate and impossible scrobbles
   ["D14a", "D14c", "D14e", "D14f"],  // unreleased tagging, mostly review
@@ -2615,7 +2584,7 @@ export const byImportance = (a, b) =>
  * not listed here now throws in development rather than quietly scoring zero.
  */
 const BUCKETS = {
-  album_integrity:  ["D0", "D4", "D5", "D3", "D15"],
+  album_integrity:  ["D0", "D4", "D5", "D15"],
   artist_integrity: ["D1", "D8", "D11"],
   duplicate_rate:   ["D6", "D12"],
   era_consistency:  ["D14a", "D14c", "D14e", "D14f"],
@@ -2770,7 +2739,6 @@ export function analyse(scrobbles, { official, topAlbums } = {}) {
     ...d6Duplicates(scrobbles),
     ...d11VariousArtists(rest),
     ...d12Impossible(scrobbles),
-    ...d3MbidConflicts(rest),
     // Needs the album chart, which carries the album artist. Absent when the
     // caller could not fetch it, in which case this simply contributes nothing.
     ...d15AlbumArtistSplits(topAlbums || []),

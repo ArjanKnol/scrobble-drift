@@ -40,7 +40,6 @@ Python copy before it.
 | **D14f** | A whole artist's unreleased output in one undifferentiated bucket (informational, unscored) |
 | **D15** | One album split across two **album artists** (`Cruel Winter` by Kanye West and by Various Artists) |
 | **D1** | Artist name variants |
-| **D3** | One album name covering two MusicBrainz releases (informational) |
 | **D5 / D6 / D11 / D12** | Missing albums, duplicate scrobbles, Various Artists, impossible timestamps |
 
 ---

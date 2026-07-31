@@ -211,8 +211,28 @@ function issueLinks(issue, user) {
     // A member may name its own artist. D5 spans many artists, so linking every
     // track under issue.artist would build wrong URLs for most of them.
     const who = m.artist || artist;
-    if (m.album && artist && m.album !== "(no album)") {
-      push("album", m.album, libUrl(user, artist, { album: m.album }));
+    if (m.album && who && m.album !== "(no album)") {
+      /*
+       * `who`, not `artist`.
+       *
+       * This used the finding's own artist for every album link, which is wrong
+       * for exactly the finding that needs it most. D15 is about one album title
+       * existing twice under two different ALBUM artists, so both members share a
+       * title and differ only in artist. Building both URLs from the same artist
+       * produced two identical links, `seen` discarded one, and the report offered
+       * a single link to a split whose entire point is that there are two of them.
+       *
+       * Reported as "I don't see this in my scrobbles", which was the right
+       * conclusion from what was on screen: the second album was unreachable and
+       * the two evidence chips read identically.
+       *
+       * Labelled with the artist when the titles match, since the title is
+       * already in the heading and repeating it distinguishes nothing.
+       */
+      const sameTitleTwice = (issue.members || [])
+        .filter((o) => o.album === m.album).length > 1;
+      push("album", sameTitleTwice && m.artist ? `${m.artist}` : m.album,
+           libUrl(user, who, { album: m.album }));
     } else if (m.track && who) {
       push("track", m.track, libUrl(user, who, { track: m.track }));
     } else if (m.artist) {
@@ -1804,15 +1824,37 @@ function issues() {
       </div>
       ${i.suggest ? `<p>${esc(i.suggest)}</p>` : ""}
       ${i.temporal ? `<p style="color:var(--warn)">${esc(i.temporal.note)}</p>` : ""}
-      ${(i.members || []).length ? `<div class="mem">${i.members.slice(0, 12).map((m) => {
+      ${(i.members || []).length ? (() => {
+        const mem = i.members.slice(0, 12);
+        /*
+         * Label each chip with the field that DISTINGUISHES the members.
+         *
+         * The old rule was a fixed preference order ending at `m.album`, which
+         * broke on D15: both members carry the same album title and differ only in
+         * album artist, so the evidence read
+         *
+         *   Desire (Gryffin Remix) 17 (artist credit) · Desire (Gryffin Remix) 2
+         *
+         * Two identical chips presented as proof that two things differ. The one
+         * field that mattered was the one being dropped.
+         *
+         * Deciding from the data instead of from a fixed order handles every
+         * detector without special-casing: whatever varies is what gets shown.
+         */
+        const varies = (key) =>
+          new Set(mem.map((x) => x[key]).filter(Boolean)).size > 1;
+        const titlesDiffer = varies("album");
+        const artistsDiffer = varies("artist");
+        return `<div class="mem">${mem.map((m) => {
         // artist + track together when both are present, so a multi-artist list
         // like D5's says whose track each one is.
         const label = (m.artist && m.track) ? `${m.artist} - ${m.track}`
+          : (m.album && m.artist && !titlesDiffer && artistsDiffer) ? m.artist
           : m.album ?? m.artist ?? m.track ?? m.era ?? m.month ?? "";
         const n = m.plays ?? m.dupes ?? null;
         return `<code>${esc(label)}</code>${n !== null ? " " + N(n) : ""}${
           m.looks_like ? ` <span style="opacity:.65">(${esc(m.looks_like)})</span>` : ""}`;
-      }).join(" &nbsp;·&nbsp; ")}</div>` : ""}
+      }).join(" &nbsp;·&nbsp; ")}</div>`; })() : ""}
       ${(i.months || []).length > 1 ? `<div class="mem months">
         <span class="lk">when</span>${i.months.slice(0, 8).map((m) =>
           `${esc(m.month)}&nbsp;<span style="opacity:.6">${N(m.plays)}</span>`)
