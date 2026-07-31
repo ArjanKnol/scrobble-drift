@@ -543,7 +543,7 @@ $("f").onsubmit = async (e) => {
     $("prog").classList.add("hide");
     render();                         // re-render so the summary panel appears
   } catch (err) {
-    fail(err.message || String(err));
+    fail(err.message || String(err), err.detail || "");
   } finally {
     /*
      * In `finally`, not on the success path.
@@ -658,6 +658,17 @@ function scanSummary() {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * An Error carrying a second line of detail.
+ *
+ * Errors here have two audiences at once: the visitor, who needs to know what to
+ * do next, and whoever is debugging, who needs to know what actually broke. One
+ * string cannot serve both without reading as either cryptic or alarming, so the
+ * headline stays plain and the technical part goes underneath in dim text.
+ */
+const failure = (msg, detail = "") =>
+  Object.assign(new Error(msg), { detail });
 
 /**
  * Say which step is running, and that there are two of them.
@@ -902,7 +913,22 @@ async function fetchAll(user, cap, apiKey) {
         await waitVisibly(4 * attempt, body.error || `Server error ${res.status}.`);
         continue;
       }
-      throw new Error(body.error || `Request failed (${res.status}).`);
+      /*
+       * Carry the Worker's `reason` through to the user.
+       *
+       * The Worker deliberately attaches a short scrubbed reason to every 502
+       * precisely so a failure can be diagnosed without `wrangler tail`, which
+       * only the operator has. This threw the field away and surfaced the bare
+       * `error` string, so every possible upstream problem rendered as the two
+       * words "upstream failure" with nothing to act on.
+       */
+      throw failure(
+        body.error === "upstream failure"
+          ? "Last.fm or the API proxy did not answer."
+          : (body.error || `Request failed (${res.status}).`),
+        [body.reason, all.length ? `Kept the ${N(all.length)} scrobbles ` +
+          `fetched so far, so trying again resumes rather than starting over.`
+          : ""].filter(Boolean).join(" "));
     }
 
     attempt = 0;                       // a clean response resets the budget
@@ -1455,16 +1481,38 @@ async function resolvePhase(scrobbles, apiKey) {
  * If there is nothing on screen yet, the error box IS the output. If there is,
  * the error goes above it as a banner and the findings stay put.
  */
-function fail(msg) {
+function fail(msg, detail = "") {
   $("prog").classList.add("hide");
+
+  // Never stack error panels. A retry that fails again should replace the
+  // previous message, not add a second one below it.
+  for (const old of $("out").querySelectorAll(".panel.err")) old.remove();
+
   const box = `
     <div class="panel err" style="margin-top:16px">
-      ${esc(msg)}
-      <p class="note" style="color:var(--dim)">If this keeps happening, try a
-      shallower scan, or use your own Last.fm API key.</p>
+      <strong>${esc(msg)}</strong>
+      ${detail ? `<p class="note" style="color:var(--dim);margin-top:6px">
+        ${esc(detail)}</p>` : ""}
+      <p style="margin:13px 0 0;display:flex;gap:9px;align-items:center;
+                flex-wrap:wrap">
+        <button class="retry ghost" type="button">Try again</button>
+        <span class="note" style="color:var(--dim);margin:0">Or scan fewer
+          months, or use your own Last.fm API key for unlimited scanning.</span>
+      </p>
     </div>`;
   if (report) $("out").insertAdjacentHTML("afterbegin", box);
   else        $("out").innerHTML = box;
+
+  /*
+   * A retry button, because there was none.
+   *
+   * Every failure path told the visitor to try again and gave them nothing to
+   * click, so the only way to retry was to notice the Scan button was live
+   * again. Scanning is idempotent and resumes from whatever is already cached on
+   * the device, so re-running is cheap and safe.
+   */
+  const btn = $("out").querySelector(".panel.err .retry");
+  if (btn) btn.onclick = () => { btn.disabled = true; $("go").click(); };
 }
 
 /**

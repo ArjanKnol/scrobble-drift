@@ -94,8 +94,23 @@ export default {
             burst: Boolean(env.RL_BURST),
             pages: Boolean(env.RL_PAGES),
             shared: Boolean(env.RL_SHARED),
+            // MusicBrainz protection is reported separately, because it was
+            // absent entirely for a while and "the limiters are configured" was
+            // true the whole time. A single boolean that hides a missing layer
+            // is worse than no boolean.
+            mb_client: Boolean(env.RL_MB),
+            mb_shared: Boolean(env.RL_MB_SHARED),
           },
+          // Whether the shared MusicBrainz answer cache is wired up. Optional by
+          // design, so this says which mode the Worker is really in rather than
+          // leaving it to be inferred from response times.
+          mb_cache: Boolean(env.MB_CACHE),
+          mb_cache_rows: env.MB_CACHE
+            ? await env.MB_CACHE.prepare("SELECT COUNT(*) AS n FROM mb_cache")
+                .first("n").catch(() => null)
+            : null,
           cooling_down: await breakerActive(),
+          mb_cooling_down: await mbBreakerActive(),
         }, 200, cors);
       }
 
@@ -114,16 +129,16 @@ export default {
         return await scrobbles(url, request, env, cors);
       }
       if (url.pathname === "/api/mb/recording") {
-        return await mbRecording(url, cors);
+        return await mbRecording(url, env, request, cors);
       }
       if (url.pathname === "/api/mb/artist-id") {
-        return await mbArtistId(url, cors);
+        return await mbArtistId(url, env, request, cors);
       }
       if (url.pathname === "/api/mb/artist-catalogue") {
-        return await mbArtistCatalogue(url, cors);
+        return await mbArtistCatalogue(url, env, request, cors);
       }
       if (url.pathname === "/api/mb/release-group") {
-        return await mbReleaseGroup(url, cors);
+        return await mbReleaseGroup(url, env, request, cors);
       }
 
       if (url.pathname === "/api/spotify/artist-albums") {
@@ -234,6 +249,153 @@ async function tripBreaker() {
       headers: { "Cache-Control": `max-age=${BREAKER_SECONDS}` },
     }),
   );
+}
+
+/* ------------------------------------------------------- MusicBrainz load --
+ * MusicBrainz asks for ONE request per second per application and says plainly
+ * what happens otherwise: "If you impact the server by making more than one
+ * call per second, your IP address may be blocked preventing all further access
+ * to MusicBrainz."
+ *
+ * The pacing that existed was a Pacer in each visitor's browser at 1/s. That is
+ * per TAB. Thirty people scanning at once is thirty calls a second, arriving from
+ * Cloudflare IPs under one User-Agent, and the thing that gets blocked is shared
+ * by everyone. The `cf.cacheTtl` on each fetch helped, but Cloudflare's cache is
+ * per LOCATION, so the same artist can still be fetched once per datacentre, and
+ * a cache does nothing at all about the rate when the requests are for different
+ * artists.
+ *
+ * Three layers, in order of how much they actually help:
+ *
+ *   1. SHARED CACHE  - one D1 row per answer, global and persistent, so an artist
+ *                      any visitor has ever looked up is never fetched again.
+ *                      This is the real fix. Listening is heavily power-law
+ *                      distributed, so a few thousand artists cover most users
+ *                      and the hit rate climbs steeply with traffic. It also
+ *                      collapses demand ACROSS locations, which the edge cache
+ *                      cannot do.
+ *   2. BREAKER       - if MusicBrainz pushes back, stop for a cooldown instead of
+ *                      continuing to knock. Separate from the Last.fm breaker:
+ *                      they are different quotas and conflating them would let
+ *                      one service's trouble silence the other.
+ *   3. PER-IP BUDGET - one visitor cannot spend the whole allowance.
+ *
+ * What this does NOT do is make exceeding 1/s impossible. Only a single global
+ * queue draining at exactly one per second could promise that, and that needs
+ * Durable Objects plus an asynchronous first-scan experience. This reduces the
+ * load by a large factor and stops the runaway cases; it is a mitigation, not a
+ * guarantee, and it should not be described as one.
+ */
+const MB_UA = "ScrobbleDrift/0.1 (+https://github.com/ArjanKnol/scrobble-drift)";
+const MB_BREAKER_URL = "https://scrobble-drift.internal/mb-breaker";
+const MB_BREAKER_SECONDS = 60;
+const MB_TTL_DAYS = 30;        // artist catalogues change slowly
+
+/** Upstream said no. Thrown, never returned, so a failure is never cached. */
+export class Upstream extends Error {}
+
+async function mbBreakerActive() {
+  return Boolean(await caches.default.match(new Request(MB_BREAKER_URL)));
+}
+
+async function tripMbBreaker() {
+  await caches.default.put(
+    new Request(MB_BREAKER_URL),
+    new Response("cooling down", {
+      headers: { "Cache-Control": `max-age=${MB_BREAKER_SECONDS}` },
+    }),
+  );
+}
+
+/** Per-visitor MusicBrainz budget. Missing binding fails open, as elsewhere. */
+export async function chargeMb(env, ip) {
+  if (env.RL_MB) {
+    const { success } = await env.RL_MB.limit({ key: ip });
+    if (!success) {
+      throw new Retryable(
+        "You have looked up a lot of releases in the last minute. MusicBrainz " +
+        "allows one request per second in total, shared by everyone using this " +
+        "site, so this pauses briefly.", 60);
+    }
+  }
+  if (env.RL_MB_SHARED) {
+    const { success } = await env.RL_MB_SHARED.limit({ key: "mb" });
+    if (!success) {
+      throw new Retryable(
+        "Release lookups are busy right now. Your findings are unaffected: " +
+        "this step only adds release dates. Try again in a minute.", 60);
+    }
+  }
+}
+
+/**
+ * One fetch to MusicBrainz, with the mandatory User-Agent and consistent
+ * handling of pushback.
+ *
+ * Every handler used to inline its own copy of the headers, and they had drifted:
+ * two checked for 503 and two did not, so half of MusicBrainz's "slow down"
+ * responses were reported to the visitor as a generic 502 while we carried on
+ * requesting at the same rate. 429 was checked nowhere.
+ */
+async function mbFetch(path) {
+  if (await mbBreakerActive()) {
+    throw new Retryable(
+      "Pausing release lookups: MusicBrainz asked us to slow down.",
+      MB_BREAKER_SECONDS);
+  }
+  const res = await fetch(`${MB}${path}`, {
+    headers: { "User-Agent": MB_UA, Accept: "application/json" },
+    cf: { cacheTtl: MB_TTL_DAYS * 86400, cacheEverything: true },
+  });
+  if (res.status === 503 || res.status === 429) {
+    await tripMbBreaker();
+    throw new Retryable("MusicBrainz is rate limiting us.", 5);
+  }
+  return res;
+}
+
+/**
+ * Answer from the shared cache, or produce the answer and store it.
+ *
+ * `produce` must THROW on failure rather than returning an error body, so that a
+ * transient outage is never written to the cache and served for thirty days. A
+ * negative answer is different: "MusicBrainz has never heard of this" is a real
+ * and stable result, and genuinely unreleased material is exactly what this tool
+ * is about, so those are cached deliberately.
+ *
+ * Every cache fault is swallowed. A cache is an optimisation, and a broken one
+ * must degrade to "ask MusicBrainz" rather than break the request. If the D1
+ * binding is absent entirely, this is a pass-through, so the Worker deploys and
+ * works before the database exists.
+ */
+export async function mbShared(env, key, produce) {
+  const db = env.MB_CACHE;
+  const cutoff = Math.floor(Date.now() / 1000) - MB_TTL_DAYS * 86400;
+
+  if (db) {
+    try {
+      const row = await db
+        .prepare("SELECT v FROM mb_cache WHERE k = ?1 AND created > ?2")
+        .bind(key, cutoff).first();
+      if (row?.v) return { body: JSON.parse(row.v), shared: true };
+    } catch (err) {
+      console.error("mb_cache read failed: " + (err?.message || err));
+    }
+  }
+
+  const body = await produce();
+
+  if (db) {
+    try {
+      await db.prepare(
+        "INSERT INTO mb_cache (k, v, created) VALUES (?1, ?2, ?3) " +
+        "ON CONFLICT(k) DO UPDATE SET v = excluded.v, created = excluded.created")
+        .bind(key, JSON.stringify(body), Math.floor(Date.now() / 1000)).run();
+    } catch (err) {
+      console.error("mb_cache write failed: " + (err?.message || err));
+    }
+  }
+  return { body, shared: false };
 }
 
 /**
@@ -471,25 +633,20 @@ async function scrobbles(url, request, env, cors) {
  * matches after normalisation, and callers must use that rather than counting
  * results.
  */
-async function mbReleaseGroup(url, cors) {
+async function mbReleaseGroup(url, env, request, cors) {
   const artist = (url.searchParams.get("artist") || "").slice(0, 200);
   const title = (url.searchParams.get("title") || "").slice(0, 200);
   if (!artist || !title) {
     return json({ error: "artist and title required" }, 400, cors);
   }
+  await chargeMb(env, clientId(request));
+  const { body, shared } = await mbShared(
+    env, `rg:${spNorm(artist)}\u241f${spNorm(title)}`, async () => {
   const esc = (s) => s.replace(/[\\+\-!(){}\[\]^"~*?:/&|]/g, (c) => "\\" + c);
   const query = `artist:"${esc(artist)}" AND releasegroup:"${esc(title)}"`;
-  const res = await fetch(
-    `${MB}/release-group?query=${encodeURIComponent(query)}&fmt=json&limit=25`,
-    {
-      headers: {
-        "User-Agent": "ScrobbleDrift/0.1 (+https://github.com/ArjanKnol/scrobble-drift)",
-        Accept: "application/json",
-      },
-      cf: { cacheTtl: 2592000, cacheEverything: true },
-    },
-  );
-  if (!res.ok) return json({ error: `musicbrainz http ${res.status}` }, 502, cors);
+  const res = await mbFetch(
+    `/release-group?query=${encodeURIComponent(query)}&fmt=json&limit=25`);
+  if (!res.ok) throw new Upstream(`musicbrainz http ${res.status}`);
   const data = await res.json();
 
   // Normalise the same way the detectors do, so "Drip Season" and
@@ -507,11 +664,14 @@ async function mbReleaseGroup(url, cors) {
     exact: norm(g.title) === want,
   }));
 
-  return json({
+  return {
     exists: groups.some((g) => g.exact),
     matches: groups.filter((g) => g.exact).slice(0, 5),
     near: groups.filter((g) => !g.exact).slice(0, 5),
-  }, 200, { ...cors, "Cache-Control": "public, max-age=86400" });
+  };
+  });
+  return json({ ...body, shared }, 200,
+              { ...cors, "Cache-Control": "public, max-age=86400" });
 }
 
 /**
@@ -546,30 +706,27 @@ async function mbReleaseGroup(url, cors) {
  * be advanced by the number of releases ACTUALLY RETURNED, not by the limit, or
  * pages get silently skipped.
  */
-async function mbArtistCatalogue(url, cors) {
+async function mbArtistCatalogue(url, env, request, cors) {
   const mbid = (url.searchParams.get("mbid") || "").trim();
   if (!/^[0-9a-f-]{36}$/i.test(mbid)) {
     return json({ error: "valid mbid required" }, 400, cors);
   }
   const offset = Math.max(0, Number(url.searchParams.get("offset") || 0));
+  await chargeMb(env, clientId(request));
 
-  const res = await fetch(
-    `${MB}/release?artist=${mbid}&inc=recordings&status=official` +
-    `&limit=100&offset=${offset}&fmt=json`,
-    {
-      headers: {
-        // MusicBrainz blocks requests without a meaningful User-Agent. This is
-        // not optional politeness, it is enforced.
-        "User-Agent": "ScrobbleDrift/0.1 (+https://github.com/ArjanKnol/scrobble-drift)",
-        Accept: "application/json",
-      },
-      cf: { cacheTtl: 2592000, cacheEverything: true },   // 30 days
-    },
-  );
-  if (res.status === 503) {
-    throw new Retryable("MusicBrainz is rate limiting us.", 5);
-  }
-  if (!res.ok) return json({ error: `musicbrainz http ${res.status}` }, 502, cors);
+  /*
+   * The most valuable row in the cache by a wide margin.
+   *
+   * One request returns an artist's whole official catalogue with tracklists, it
+   * is identical for every visitor, and it barely changes. Two people who both
+   * listen to Kanye West should cost MusicBrainz one lookup between them, not
+   * two, and with a persistent shared cache they cost one lookup ever.
+   */
+  const { body, shared } = await mbShared(env, `cat:${mbid}:${offset}`, async () => {
+  const res = await mbFetch(
+    `/release?artist=${mbid}&inc=recordings&status=official` +
+    `&limit=100&offset=${offset}&fmt=json`);
+  if (!res.ok) throw new Upstream(`musicbrainz http ${res.status}`);
   const data = await res.json();
 
   const releases = [];
@@ -602,11 +759,14 @@ async function mbArtistCatalogue(url, cors) {
   // Advance by releases RETURNED, per the docs, not by the limit.
   const got = (data.releases || []).length;
   const total = Number(data["release-count"] ?? 0);
-  return json({
+  return {
     releases,
     next_offset: got > 0 && offset + got < total ? offset + got : null,
     total,
-  }, 200, { ...cors, "Cache-Control": "public, max-age=86400" });
+  };
+  });
+  return json({ ...body, shared }, 200,
+              { ...cors, "Cache-Control": "public, max-age=86400" });
 }
 
 /**
@@ -617,56 +777,50 @@ async function mbArtistCatalogue(url, cors) {
  * artist search: silently browsing the wrong artist's catalogue would produce
  * confident, wrong answers rather than no answer.
  */
-async function mbArtistId(url, cors) {
+async function mbArtistId(url, env, request, cors) {
   const name = (url.searchParams.get("artist") || "").slice(0, 200);
   if (!name) return json({ error: "artist required" }, 400, cors);
+  await chargeMb(env, clientId(request));
 
-  const esc = (x) => x.replace(/[\\+\-!(){}\[\]^"~*?:/&|]/g, (c) => "\\" + c);
-  const res = await fetch(
-    `${MB}/artist?query=artist:"${encodeURIComponent(esc(name))}"&limit=5&fmt=json`,
-    {
-      headers: {
-        "User-Agent": "ScrobbleDrift/0.1 (+https://github.com/ArjanKnol/scrobble-drift)",
-        Accept: "application/json",
-      },
-      cf: { cacheTtl: 2592000, cacheEverything: true },
-    },
-  );
-  if (res.status === 503) {
-    throw new Retryable("MusicBrainz is rate limiting us.", 5);
-  }
-  if (!res.ok) return json({ error: `musicbrainz http ${res.status}` }, 502, cors);
-  const data = await res.json();
+  // Keyed on the NORMALISED name, so "Playboi Carti" and "playboi  carti" share
+  // one row rather than each costing a lookup.
+  const { body, shared } = await mbShared(env, `aid:${spNorm(name)}`, async () => {
+    const esc = (x) => x.replace(/[\\+\-!(){}\[\]^"~*?:/&|]/g, (c) => "\\" + c);
+    const res = await mbFetch(
+      `/artist?query=artist:"${encodeURIComponent(esc(name))}"&limit=5&fmt=json`);
+    if (!res.ok) throw new Upstream(`musicbrainz http ${res.status}`);
+    const data = await res.json();
 
-  const want = spNorm(name);
-  const hit = (data.artists || []).find((a) => spNorm(a.name) === want);
-  return json({
-    found: Boolean(hit),
-    mbid: hit?.id || null,
-    name: hit?.name || null,
-    near: (data.artists || []).slice(0, 3).map((a) => a.name),
-  }, 200, { ...cors, "Cache-Control": "public, max-age=86400" });
+    const want = spNorm(name);
+    const hit = (data.artists || []).find((a) => spNorm(a.name) === want);
+    // `found: false` is cached deliberately: an artist MusicBrainz has never
+    // heard of will not appear next week, and this tool exists for exactly that
+    // kind of catalogue.
+    return {
+      found: Boolean(hit),
+      mbid: hit?.id || null,
+      name: hit?.name || null,
+      near: (data.artists || []).slice(0, 3).map((a) => a.name),
+    };
+  });
+  return json({ ...body, shared }, 200,
+              { ...cors, "Cache-Control": "public, max-age=86400" });
 }
 
-async function mbRecording(url, cors) {
+async function mbRecording(url, env, request, cors) {
   const artist = (url.searchParams.get("artist") || "").slice(0, 200);
   const track = (url.searchParams.get("track") || "").slice(0, 200);
   if (!artist || !track) {
     return json({ error: "artist and track required" }, 400, cors);
   }
+  await chargeMb(env, clientId(request));
+  const { body, shared } = await mbShared(
+    env, `rec:${spNorm(artist)}\u241f${spNorm(track)}`, async () => {
   const esc = (s) => s.replace(/[\\+\-!(){}\[\]^"~*?:/&|]/g, (c) => "\\" + c);
   const query = `artist:"${esc(artist)}" AND recording:"${esc(track)}"`;
-  const res = await fetch(
-    `${MB}/recording?query=${encodeURIComponent(query)}&fmt=json&limit=25`,
-    {
-      headers: {
-        "User-Agent": "ScrobbleDrift/0.1 (+https://github.com/ArjanKnol/scrobble-drift)",
-        Accept: "application/json",
-      },
-      cf: { cacheTtl: 2592000, cacheEverything: true },   // 30 days
-    },
-  );
-  if (!res.ok) return json({ error: `musicbrainz http ${res.status}` }, 502, cors);
+  const res = await mbFetch(
+    `/recording?query=${encodeURIComponent(query)}&fmt=json&limit=25`);
+  if (!res.ok) throw new Upstream(`musicbrainz http ${res.status}`);
   const data = await res.json();
 
   const best = new Map();
@@ -692,7 +846,10 @@ async function mbRecording(url, cors) {
   const groups = [...best.values()].sort(
     (a, b) => (a.first_release || "9999").localeCompare(b.first_release || "9999"),
   );
-  return json({ groups }, 200, { ...cors, "Cache-Control": "public, max-age=86400" });
+  return { groups };
+  });
+  return json({ ...body, shared }, 200,
+              { ...cors, "Cache-Control": "public, max-age=86400" });
 }
 
 /* ---------------------------------------------------------------- Spotify */

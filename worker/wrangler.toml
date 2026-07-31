@@ -83,5 +83,61 @@ namespace_id = "1003"
   limit = 240
   period = 60
 
+# ---------------------------------------------------------------------------
+# MusicBrainz
+# ---------------------------------------------------------------------------
+# MusicBrainz allows ONE request per second per application and blocks IPs that
+# exceed it. The only pacing that existed was a 1/s limiter in each visitor's
+# BROWSER, which is per tab, so N concurrent visitors made N requests per second
+# from Cloudflare IPs under one shared User-Agent.
+#
+# These two need no provisioning and take effect on the next deploy.
+
+# Per-visitor MusicBrainz budget. A big first scan legitimately needs a few
+# hundred lookups, so this is deliberately loose: it exists to stop a script,
+# not to slow down a real scan.
+[[ratelimits]]
+name = "RL_MB"
+namespace_id = "1004"
+  [ratelimits.simple]
+  limit = 90
+  period = 60
+
+# Shared MusicBrainz ceiling. 60/min is one per second, which is exactly what
+# MusicBrainz asks for. Per location and eventually consistent, as with
+# RL_SHARED, so it overshoots: the breaker and the shared cache are what carry
+# the load. Set below the true limit on purpose, because the cost of guessing
+# high is having our User-Agent blocked for everyone.
+[[ratelimits]]
+name = "RL_MB_SHARED"
+namespace_id = "1005"
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
+# ---------------------------------------------------------------------------
+# Shared MusicBrainz answer cache (D1)
+# ---------------------------------------------------------------------------
+# COMMENTED OUT because a D1 binding with no database makes `wrangler deploy`
+# fail, and src/index.js treats the binding as optional on purpose: with no
+# MB_CACHE it falls through to asking MusicBrainz, exactly as before. So the
+# Worker deploys and works today, and the cache is two commands away.
+#
+# To turn it on:
+#
+#   npx wrangler d1 create scrobble-drift-cache
+#       -> prints a database_id, paste it below
+#   npx wrangler d1 execute scrobble-drift-cache --remote --file=./schema.sql
+#   uncomment this block, then npx wrangler deploy
+#
+# Free tier is 5 GB, 5 million rows read and 100,000 written per day. One row
+# per answer, a few KB each, so the practical ceiling is hundreds of thousands
+# of cached artists: far more than this will ever hold.
+#
+# [[d1_databases]]
+# binding = "MB_CACHE"
+# database_name = "scrobble-drift-cache"
+# database_id = "PASTE-THE-ID-FROM-WRANGLER-HERE"
+
 [observability]
 enabled = true
