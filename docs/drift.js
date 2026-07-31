@@ -713,7 +713,34 @@ export function d14cTrackInTwoEras(era) {
  * three tracks by era gains nothing; splitting sixty makes the collection
  * navigable and makes the "released since" check far more informative.
  */
-export function d14fSingleBucket(era, { minTracks = 8 } = {}) {
+export function d14fSingleBucket(era, { minTracks = 8, rest = [] } = {}) {
+  /*
+   * `rest` is the non-unreleased half of the library, used for two things the
+   * earlier version could not do.
+   *
+   * 1. CHART RANK. The information-loss argument ("you cannot see which project
+   *    each track came from") is true but abstract. The concrete consequence is
+   *    that one `Unreleased` bucket becomes a single enormous album: 340 leaks
+   *    pooled under one name can outrank every real record in the chart. That is
+   *    a distortion of the same kind D4 exists for, and it is measurable.
+   *
+   * 2. REAL EXAMPLES. It used to suggest "e.g. 'Unreleased (Rodeo Era)'"
+   *    regardless of who the artist was, which is useless for anyone who does not
+   *    listen to Travis Scott. The artist's own released albums are sitting in the
+   *    library, so the suggestion can name their actual projects.
+   */
+  const albumPlays = counter(rest.filter((x) => x.album),
+                             (x) => `${x.artist}␟${x.album}`);
+  // Real albums per artist, most played first, for the examples.
+  const realAlbums = new Map();
+  for (const [key, plays] of ranked(albumPlays)) {
+    const [artist, album] = key.split("␟");
+    const k = norm(artist);
+    if (!realAlbums.has(k)) realAlbums.set(k, []);
+    const list = realAlbums.get(k);
+    if (list.length < 3) list.push({ album, plays });
+  }
+
   const buckets = new Map();
   for (const s of era) {
     if (!isUndifferentiated(s.album)) continue;
@@ -726,9 +753,26 @@ export function d14fSingleBucket(era, { minTracks = 8 } = {}) {
     b.tracks.add(normTitle(s.track));
   }
 
+  // Where this bucket would sit if it were a real album, so the inflation is a
+  // number rather than an assertion.
+  const realRanking = ranked(albumPlays).map(([, plays]) => plays);
+  const rankOf = (plays) => realRanking.filter((p) => p > plays).length + 1;
+
   const issues = [];
   for (const b of [...buckets.values()].sort((x, y) => y.plays - x.plays)) {
     if (b.tracks.size < minTracks) continue;
+
+    const rank = rankOf(b.plays);
+    const biggestReal = realRanking[0] || 0;
+    const outranksAll = b.plays > biggestReal && biggestReal > 0;
+
+    // Examples from THIS artist's own catalogue, falling back to a generic
+    // phrasing rather than naming someone else's albums.
+    const examples = (realAlbums.get(norm(b.artist)) || []).slice(0, 2);
+    const suggestion = examples.length
+      ? examples.map((e) => `'${b.album} (${e.album} Era)'`).join(" and ")
+      : `'${b.album} (Era name)'`;
+
     issues.push({
       detector: "D14f",
       class: "review",
@@ -736,17 +780,34 @@ export function d14fSingleBucket(era, { minTracks = 8 } = {}) {
       style_choice: true,
       artist: b.artist,
       album: b.album,
-      title: `${b.artist} - ${b.tracks.size} unreleased tracks in one ` +
-             `'${b.album}' bucket`,
+      title: `${b.artist} - ${b.tracks.size} unreleased tracks pooled into one ` +
+             `'${b.album}' album` +
+             (rank <= 10 ? `, now your #${rank} album` : ""),
       plays_affected: b.plays,
+      chart_rank: rank,
       suggest:
-        `All of it sits under a single album string, so there is no way to see ` +
-        `which project each track came from. This is a common and perfectly ` +
-        `valid way to tag, so nothing here is wrong. If you ever want the ` +
-        `detail, naming the period, e.g. '${b.album} (Rodeo Era)' or ` +
-        `'${b.album} (Rodeo Sessions)', would let Scrobble Drift group them by ` +
-        `project and tell you which ones have since been officially released.`,
-      members: [{ album: b.album, plays: b.plays }],
+        `${b.plays} plays across ${b.tracks.size} tracks all sit under one album ` +
+        `name, which makes it a single enormous album in your chart` +
+        (outranksAll
+          ? `: it currently outranks every real album you own.`
+          : rank <= 10
+          ? `, ranking #${rank}.`
+          : `.`) +
+        ` This is a common and perfectly valid way to tag, so nothing here is ` +
+        `wrong. Splitting it by period would both fix the chart and let ` +
+        `Scrobble Drift tell you which of these have since been officially ` +
+        `released. For ${b.artist} that would look like ${suggestion}` +
+        (examples.length
+          ? `, using the projects you already listen to.`
+          : `, naming whichever period each track came from.`),
+      members: [
+        { album: b.album, plays: b.plays,
+          looks_like: `${b.tracks.size} distinct tracks` },
+        ...examples.map((e) => ({
+          album: e.album, plays: e.plays,
+          looks_like: "a real album of theirs, for comparison",
+        })),
+      ],
       no_auto_action: true,
     });
   }
@@ -1084,25 +1145,50 @@ export function d4AlbumSplits(rest, minPlays = 2) {
     // A verified MBID match overrides every doubt below it: the strings are the
     // same release, whatever they look like. A verified mismatch overrides the
     // other way.
-    const weak = verdict === "same" ? false : (plainAlbums || stray);
-    const proven = verdict === "same";
-    const disproven = verdict === "different";
+    /*
+     * ONE decision, from which class and confidence are both derived.
+     *
+     * These used to be two independent ternary ladders with DIFFERENT orderings:
+     * `class` tested stray before migration, `confidence` tested migration before
+     * stray. A finding that was both — a chronologically clean split with only 4
+     * plays — came out as class "review" carrying 0.9 confidence, which is a
+     * contradiction the report has no way to render sensibly.
+     *
+     * Real data found it. A 541-scrobble library produced exactly one finding and
+     * it was this: "review 90%". Two ladders that must agree will eventually
+     * disagree, so there is now one.
+     *
+     * Order is most-conclusive-first. `stray` deliberately outranks `migration`:
+     * a one-play minority is too small to trust any signal, including a clean
+     * chronological separation, and nothing with four total plays is worth
+     * acting on either way.
+     */
+    const reason =
+      verdict === "same" ? "proven"
+      : verdict === "different" ? "disproven"
+      : structural ? "structural"
+      : stray ? "stray"
+      : plainAlbums ? "plain-albums"
+      : migration ? "migration"
+      : "candidate";
+
+    const DECISION = {
+      "proven":       { class: "error",  confidence: 0.97 },
+      "disproven":    { class: "review", confidence: 0.15 },
+      "structural":   { class: "review", confidence: 0.25 },
+      "stray":        { class: "review", confidence: 0.30 },
+      "plain-albums": { class: "review", confidence: 0.20 },
+      "migration":    { class: "split",  confidence: 0.90 },
+      "candidate":    { class: "split",  confidence: 0.70 },
+    };
+    const decided = DECISION[reason];
 
     issues.push({
       detector: "D4",
-      // A structural title almost certainly means several distinct tracks, so
-      // it is a question rather than a finding.
-      class: proven ? "error"
-        : disproven ? "review"
-        : (structural || weak) ? "review"
-        : "split",
-      confidence: proven ? 0.97
-        : disproven ? 0.15
-        : structural ? 0.25
-        : migration ? 0.9
-        : plainAlbums ? 0.2     // checked before stray: it explains more
-        : stray ? 0.3
-        : 0.7,
+      class: decided.class,
+      confidence: decided.confidence,
+      // Carried so a reader (or a future test) can see WHY, not just how sure.
+      reason,
       // Carried so the resolver can skip a lookup it cannot improve on.
       mbid_verdict: verdict,
       artist: g.artist, track: g.track,
@@ -1110,30 +1196,30 @@ export function d4AlbumSplits(rest, minPlays = 2) {
         ? `${g.artist} - '${g.track}' appears on ${g.albums.size} albums`
         : `${g.artist} - '${g.track}' split across ${g.albums.size} album strings`,
       plays_affected: total,
-      suggest: proven
+      suggest: reason === "proven"
         ? `MusicBrainz confirms these are the same release under two different ` +
           `names, so this is certain rather than a guess. Consolidate to ` +
           `'${members[0].album}' (${members[0].plays} plays).`
-        : disproven
+        : reason === "disproven"
         ? `MusicBrainz says these two album names are different releases, so ` +
           `this is probably a song that genuinely appears on both rather than a ` +
           `split. Note it identifies pressings, so a deluxe and a standard ` +
           `edition of one album will also look different here. Nothing to fix ` +
           `unless you know they are the same record.`
-        : structural
+        : reason === "structural"
         ? `'${g.track}' is a structural track title, so these are almost ` +
           `certainly different recordings, one per album, rather than one ` +
           `track split in two. Nothing to fix unless you know otherwise.`
-        : migration
+        : reason === "migration"
         ? `consolidate to '${temporal.later}': the earlier string looks like ` +
           `the pre-album release.`
-        : plainAlbums
+        : reason === "plain-albums"
         ? `Both of these look like ordinary albums, and there is no sign of one ` +
           `absorbing the other, so this is probably just a song that appears on ` +
           `two releases. Common with lead singles that get their own album, ` +
           `reissues and label compilations. Nothing to fix unless you know ` +
           `these are the same record.`
-        : stray
+        : reason === "stray"
         ? `${minority} play sits under '${members[members.length - 1].album}' ` +
           `against ${members[0].plays} under '${members[0].album}'. Too small ` +
           `to be a tagging habit, so probably a one-off. The dates are below if ` +
@@ -1142,9 +1228,11 @@ export function d4AlbumSplits(rest, minPlays = 2) {
           `like editions of one release. Enable release lookups to confirm ` +
           `before merging anything.`,
       members,
-      // The temporal note is suppressed for structural titles: the chronology
-      // is real but says nothing useful about two different albums.
-      temporal: structural ? undefined : temporal,
+      // The temporal note is suppressed for structural titles, and for anything
+      // decided on other grounds: quoting a chronology under a finding that says
+      // "these are two different albums" reads as contradictory evidence.
+      temporal: (reason === "structural" || reason === "disproven")
+        ? undefined : temporal,
     });
   }
   return issues.sort((a, b) => b.plays_affected - a.plays_affected);
@@ -2565,7 +2653,7 @@ export function analyse(scrobbles, { official, topAlbums } = {}) {
   const issues = [
     ...d14aFormatVariants(era),
     ...d14cTrackInTwoEras(era),
-    ...d14fSingleBucket(era),
+    ...d14fSingleBucket(era, { rest }),
     ...splits,
     ...d8FeatureCredits(rest),
     ...d1ArtistVariants(rest),

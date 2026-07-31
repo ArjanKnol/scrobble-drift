@@ -363,8 +363,70 @@ console.log("\nD14f: the single-bucket convention");
   ok(found[0].style_choice, "flagged as a style choice");
   ok(/perfectly \s*valid|nothing here is wrong/i.test(found[0].suggest),
      "and the wording says explicitly that nothing is wrong");
-  ok(found[0].suggest.includes("Sessions"),
-     "offering both the Era and Sessions conventions");
+}
+
+{
+  /*
+   * The chart-inflation argument, which is the persuasive one.
+   *
+   * "You cannot see which project each track came from" is true but abstract.
+   * The concrete consequence is that one bucket becomes a single enormous album
+   * that can outrank every real record in the chart, and that is measurable.
+   *
+   * The examples also have to come from the artist's OWN catalogue. It used to
+   * suggest "e.g. 'Unreleased (Rodeo Era)'" to everyone, which is useless to
+   * anyone who does not listen to Travis Scott.
+   */
+  const sc = []; let uts = 1600000000;
+  const add = (artist, album, track, n) => {
+    for (let i = 0; i < n; i++) sc.push({ uts: uts += 300, artist, album, track });
+  };
+  for (let i = 0; i < 40; i++) add("Playboi Carti", "Unreleased", `Leak ${i}`, 9);
+  add("Playboi Carti", "Whole Lotta Red", "Rockstar Made", 120);
+  add("Playboi Carti", "Die Lit", "Shoota", 95);
+  add("Drake", "Certified Lover Boy", "Knife Talk", 200);
+
+  const f = analyse(sc).issues.filter((i) => i.detector === "D14f");
+  eq(f.length, 1, "the bucket is reported");
+  const i = f[0];
+
+  eq(i.chart_rank, 1, "its chart rank is computed");
+  ok(/#1 album/.test(i.title), "and named in the title");
+  ok(/outranks every real album/.test(i.suggest),
+     "the inflation is stated concretely, not as information loss");
+  ok(/360 plays across 40 tracks/.test(i.suggest),
+     "with the actual numbers");
+
+  // Examples from this artist, not a hardcoded one.
+  ok(i.suggest.includes("Unreleased (Whole Lotta Red Era)"),
+     "examples use the artist's own most-played album");
+  ok(i.suggest.includes("Unreleased (Die Lit Era)"),
+     "and their second");
+  ok(!/Rodeo/.test(i.suggest),
+     "and never someone else's albums");
+  ok(i.members.some((m) => m.looks_like?.includes("for comparison")),
+     "their real albums are listed alongside for scale");
+
+  // Still not scored: it remains a valid convention.
+  eq(analyse(sc).hygiene.actionable, 0, "and it is still not actionable");
+}
+
+{
+  // An artist with no released albums in the library must not borrow anyone
+  // else's names for the example.
+  const sc = []; let uts = 1600000000;
+  for (let i = 0; i < 12; i++)
+    for (let k = 0; k < 3; k++)
+      sc.push({ uts: uts += 300, artist: "Obscure Act", album: "Unreleased",
+                track: `Leak ${i}` });
+  const f = d14fSingleBucket(
+    sc, { rest: [{ uts: 1, artist: "Someone Else", album: "Their Album",
+                   track: "T" }] });
+  eq(f.length, 1, "still reported");
+  ok(!/Their Album/.test(f[0].suggest),
+     "another artist's album is never used as the example");
+  ok(/Era name|whichever period/.test(f[0].suggest),
+     "falling back to generic phrasing instead");
 }
 
 {
