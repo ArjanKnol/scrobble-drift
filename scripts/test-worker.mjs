@@ -14,6 +14,7 @@
  */
 
 import { spAlbumToGroup, spNorm } from "../worker/src/index.js";
+import { readFile } from "node:fs/promises";
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => {
@@ -286,6 +287,152 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
     ok(/findings are unaffected/.test(msg),
        "and a denied shared budget says the findings still stand");
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * Spotify rejects an explicit `limit` above 5.
+ *
+ * Not documented, and it is stranger than a plain cap: limit=20 is refused on the
+ * artist-albums endpoint even though 20 is the DEFAULT Spotify applies when the
+ * parameter is omitted. So the parameter itself is being validated, not the
+ * number, and every rejection said exactly {"status":400,"message":"Invalid
+ * limit"} and nothing about `market` or `include_groups`.
+ *
+ * The cost of getting this wrong is invisible rather than loud. Every catalogue
+ * call 400s, so Spotify resolves nothing, every lookup falls through to
+ * MusicBrainz at one request per second, and the only symptom is that release
+ * lookups take hours. It was reported as "Spotify: 0 of 289 tracks resolved" and
+ * read as a configuration problem.
+ *
+ * So it is asserted on the source, because the failure is silent and the obvious
+ * "optimisation" of raising the page size to 50 reintroduces it. The temporary
+ * /api/spotify/diag block is excluded: it contains the broken shape deliberately,
+ * as a control.
+ * ------------------------------------------------------------------------- */
+{
+  const src = await readFile(
+    new URL("../worker/src/index.js", import.meta.url), "utf8");
+
+  // Drop the probe, which holds the broken shape on purpose.
+  const live = src.replace(/\/\/ DIAG-BEGIN[\s\S]*?\/\/ DIAG-END/, "");
+  ok(!/DIAG-BEGIN/.test(live), "the diagnostic probe is excluded from this check");
+  ok(/DIAG-BEGIN/.test(src),
+     "and is still delimited, so it can be deleted in one go");
+
+  /*
+   * Scanned over a WINDOW around each `limit=`, not line by line.
+   *
+   * The line-by-line version of this check passed while the bug was present. A
+   * request path is built from several concatenated template literals:
+   *
+   *     `/artists/${hit.id}/albums?include_groups=album,single,compilation` +
+   *     `&limit=50&market=${SP_MARKET}`
+   *
+   * so the line holding `limit=50` contains no path at all and matched nothing. I
+   * only found that out by putting the bug back and watching the test stay green,
+   * which is the sole reason this comment exists.
+   *
+   * MusicBrainz legitimately uses limit=25 and limit=100 and must not be flagged.
+   * Its URLs always carry `fmt=json`, which Spotify's never do, so that is the
+   * discriminator rather than a list of paths.
+   */
+  const offenders = [];
+  for (const m of live.matchAll(/limit=(\d+)/g)) {
+    if (Number(m[1]) <= 5) continue;
+    const around = live.slice(Math.max(0, m.index - 250), m.index + 250);
+    const isMusicBrainz = /fmt=json|\/ws\/2|\$\{MB\}/.test(around);
+    const isSpotify = /SP_MARKET|\/search\?type=|\/artists\/|\/albums\?/.test(around);
+    if (isSpotify && !isMusicBrainz) {
+      offenders.push(around.split("\n").find((l) => l.includes(m[0]))?.trim() || m[0]);
+    }
+  }
+  ok(offenders.length === 0,
+     offenders.length
+       ? `Spotify refuses these: ${offenders.join("  |  ")}`
+       : "no Spotify call sends an explicit limit above 5");
+
+  // Prove the check can actually fail, on a copy of the real broken line.
+  {
+    const broken = live.replace(
+      "`&market=${SP_MARKET}` + (offset ? `&offset=${offset}` : \"\");",
+      "`&limit=50&market=${SP_MARKET}` + (offset ? `&offset=${offset}` : \"\");");
+    let caught = 0;
+    for (const m of broken.matchAll(/limit=(\d+)/g)) {
+      if (Number(m[1]) <= 5) continue;
+      const around = broken.slice(Math.max(0, m.index - 250), m.index + 250);
+      if (/SP_MARKET|\/search\?type=|\/artists\//.test(around) &&
+          !/fmt=json|\/ws\/2/.test(around)) caught++;
+    }
+    ok(caught > 0,
+       "and the check catches limit=50 when it is reintroduced on a continuation line");
+  }
+
+  // The paging loop must not follow Spotify's own `next` URL, because Spotify
+  // builds it WITH the limit it used. Following it would 400 on page two, which
+  // only shows up for artists with more than 20 releases: the case that matters.
+  const albumsFn = live.slice(live.indexOf("async function spArtistAlbums"));
+  const body = albumsFn.slice(0, albumsFn.indexOf("\n}"));
+  ok(!/page\.next\s*\?/.test(body) && !/page\.next\.replace/.test(body),
+     "the album loop does not follow page.next, which embeds the rejected limit");
+  ok(/offset=/.test(body), "it pages by offset instead");
+  ok(/page\.total|\.total\b/.test(body),
+     "and bounds itself on the reported total rather than trusting next");
+
+  // Paging is concurrent now, so there is no loop to terminate. What matters
+  // instead is that the offsets are derived from a reported total and bounded,
+  // and that overlapping pages cannot duplicate albums.
+  ok(/Promise\.all/.test(body), "remaining pages are fetched concurrently");
+  ok(/CONCURRENCY/.test(body),
+     "with a bounded batch size, so one artist cannot burst twenty requests");
+  ok(/step > 0/.test(body),
+     "a zero-length first page stops it, so a malformed reply cannot loop");
+  ok(/new Set\(\)/.test(body) && /seen\.has/.test(body),
+     "and pages are de-duplicated on id, since offsets are arithmetic against " +
+     "a catalogue that can shift mid-read");
+  ok(/SP_ALBUM_CAP/.test(body), "the album cap is still enforced");
+
+  // market and include_groups were proven innocent, so they must stay: dropping
+  // include_groups would pull in `appears_on` compilations and make almost
+  // anything look officially released.
+  ok(/include_groups=album,single,compilation/.test(body),
+     "include_groups is still sent, so appears_on stays excluded");
+  ok(/market=\$\{SP_MARKET\}/.test(body),
+     "market is still sent, which keeps available_markets out of the response");
+}
+
+/* ---------------------------------------------------------------------------
+ * An error response must never be cacheable.
+ *
+ * Observed live: with the Spotify fix deployed and provably working, the same URL
+ * kept returning the old 400 while the identical URL plus one throwaway query
+ * parameter returned data. The failure had been cached and was being served over
+ * a working Worker, which looks exactly like "the deploy did not land" and cost a
+ * round of confusion chasing the wrong thing.
+ *
+ * A success is a fact and may be cached. A failure describes one moment and must
+ * not be. This project has now been bitten by a cached negative three times.
+ * ------------------------------------------------------------------------- */
+{
+  const src = await readFile(
+    new URL("../worker/src/index.js", import.meta.url), "utf8");
+
+  // The 502 path.
+  const m502 = src.match(/error: "upstream failure",[\s\S]{0,400}?\}, 502, ([^;]+)\);/);
+  ok(Boolean(m502), "the 502 handler is found");
+  ok(m502 && /no-store/.test(m502[1]),
+     "the 502 response sets Cache-Control: no-store");
+
+  // The 429 path, which also carries Retry-After and so is easy to forget.
+  const m429 = src.match(/retry_after: err\.retryAfter \}, 429,([\s\S]{0,220}?)\);/);
+  ok(Boolean(m429), "the 429 handler is found");
+  ok(m429 && /no-store/.test(m429[1]),
+     "the 429 response sets no-store too, so a rate-limit reply is not pinned");
+  ok(m429 && /Retry-After/.test(m429[1]),
+     "and still sends Retry-After, which the client honours exactly");
+
+  // Successes must stay cacheable, or the shared cache is pointless.
+  ok(/"Cache-Control": "public, max-age=86400"/.test(src),
+     "successful lookups remain cacheable");
 }
 
 console.log(`\n${pass} passed, ${fail} failed (including MusicBrainz cache block)\n`);
