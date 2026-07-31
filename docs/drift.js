@@ -160,6 +160,37 @@ export function editDistance(a, b, max = 2) {
 }
 
 /**
+ * Do two names differ ONLY in their digits?
+ *
+ * `Artist 0` and `Artist 9`. `Front 242` and `Front 243`. `Section 80` and
+ * `Section 8`. These are different entities, never a misspelling of each other,
+ * and a one-character edit distance on a short name will happily pair them.
+ *
+ * This is the same rule already applied to era names via VERSION_TAIL — two era
+ * names differing only by a version marker are separate projects — and it was
+ * simply never applied to ARTIST names. A synthetic library of 300 scrobbles with
+ * no injected flaws produced 27 D1 findings, every one of them a pair like
+ * `Artist 0` / `Artist 9`, and the D1 gates could not stop it: generic names
+ * share track titles, which is exactly what the shared-title gate looks for.
+ *
+ * Deliberately narrow. Only fires when the two names are IDENTICAL once digits
+ * are removed AND their digits actually differ, so:
+ *
+ *   'Artist 0'  / 'Artist 9'   -> true,  suppressed
+ *   'Blink 182' / 'Blink-182'  -> false, same digits, still a real variant
+ *   'Yeat'      / 'Teat'       -> false, no digits involved
+ *   'Gunna'     / 'Gunnna'     -> false
+ */
+export const digitsOnlyDiffer = (a, b) => {
+  const A = norm(a), B = norm(b);
+  if (A === B) return false;
+  const strip = (x) => x.replace(/\d+/g, "#").replace(/\s+/g, " ").trim();
+  if (strip(A) !== strip(B)) return false;
+  const digits = (x) => (x.match(/\d+/g) || []).join(",");
+  return digits(A) !== digits(B);
+};
+
+/**
  * Do two names differ ONLY by capitalisation?
  *
  * Deliberately narrow. NFC-normalise (so a precomposed 'Ÿ' and a decomposed
@@ -1494,6 +1525,11 @@ export function d1ArtistVariants(rest) {
           // will; two different artists will not.
           const shared = [...tracks.get(a)].filter((t) => tracks.get(b).has(t));
           if (!shared.length) continue;
+
+          // Gate 0, before the others: a digit-only difference is a different
+          // entity, not a typo. Checked first because it is the cheapest and it
+          // defeats the shared-title gate, which generic names satisfy trivially.
+          if (digitsOnlyDiffer(a, b)) continue;
 
           // Gate 2: play-count asymmetry. A typo gets scrobbled a handful of
           // times; two genuinely different artists have comparable presence.
