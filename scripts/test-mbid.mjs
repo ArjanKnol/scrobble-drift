@@ -1,5 +1,5 @@
 /**
- * MusicBrainz-ID evidence (D3, D4) and album-artist splits (D15).
+ * MusicBrainz-ID evidence (D4) and album-artist splits (D15).
  *
  * Three gaps found by reading the code rather than the report:
  *
@@ -16,7 +16,7 @@
  * Run: node scripts/test-mbid.mjs
  */
 import {
-  albumMbids, mbidVerdict, d3MbidConflicts, d4AlbumSplits,
+  albumMbids, mbidVerdict, d4AlbumSplits,
   d15AlbumArtistSplits, analyse, DETECTOR_ORDER, SCORED_DETECTORS,
   trackMbids, trackMbidVerdict, d8FeatureCredits,
 } from "../docs/drift.js";
@@ -93,37 +93,6 @@ console.log("\nD4: MBID evidence outranks every string heuristic");
   eq(f[0].mbid_verdict, "unknown", "verdict is unknown");
   eq(f[0].class, "split", "and the migration heuristic still fires");
   eq(f[0].confidence, 0.9, "at its usual confidence");
-}
-
-/* ------------------------------------------------------------------------- */
-console.log("\nD3: one album name covering two releases");
-
-{
-  const rows = [];
-  for (let i = 0; i < 5; i++) rows.push(s("A", "Same Name", `T${i}`, "REL1", i));
-  for (let i = 0; i < 4; i++) rows.push(s("A", "Same Name", `U${i}`, "REL2", 100 + i));
-  const f = d3MbidConflicts(rows);
-  eq(f.length, 1, "reported");
-  eq(f[0].class, "review", "as review: there is nothing to merge");
-  ok(f[0].no_auto_action, "and never automatable");
-  ok(/already pooled under one name/.test(f[0].suggest),
-     "saying plainly that the plays are not split");
-  eq(f[0].plays_affected, 9, "counting both releases");
-}
-
-{
-  // A single stray MBID is a scrobbler quirk, not two releases.
-  const rows = [];
-  for (let i = 0; i < 8; i++) rows.push(s("A", "Album", `T${i}`, "REL1", i));
-  rows.push(s("A", "Album", "Odd", "REL2", 99));
-  eq(d3MbidConflicts(rows).length, 0, "one stray MBID is ignored");
-}
-
-{
-  eq(d3MbidConflicts([s("A", "Album", "T", "REL1")]).length, 0,
-     "a single release is not a conflict");
-  eq(d3MbidConflicts([s("A", "Album", "T", "")]).length, 0,
-     "no MBIDs, no finding");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -314,7 +283,7 @@ const d8 = (rows) => d8FeatureCredits(rows)
 /* ------------------------------------------------------------------------- */
 console.log("\nboth new detectors are scored and ordered");
 
-for (const d of ["D3", "D15"]) {
+for (const d of ["D15"]) {
   ok(SCORED_DETECTORS.has(d), `${d} contributes to the hygiene score`);
   ok(DETECTOR_ORDER.flat().includes(d), `${d} has an explicit report rank`);
 }
