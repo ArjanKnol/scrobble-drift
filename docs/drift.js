@@ -987,6 +987,25 @@ export function trackMbidVerdict(mbids, artist, a, b) {
 }
 
 /** Album MBIDs seen for each (artist, album string). */
+/**
+ * Artist name -> the set of MusicBrainz artist IDs seen for it.
+ *
+ * The decisive evidence for D8. If "Macklemore & Ryan Lewis" carries its own
+ * artist MBID then MusicBrainz holds it as an artist in its own right, and no
+ * amount of pattern matching should be allowed to argue otherwise. Free: the ID is
+ * already on every scrobble, it just was not being read.
+ */
+export function artistMbids(scrobbles) {
+  const out = new Map();
+  for (const s of scrobbles || []) {
+    if (!s?.artist || !s.artist_mbid) continue;
+    const k = norm(s.artist);
+    if (!out.has(k)) out.set(k, new Set());
+    out.get(k).add(s.artist_mbid);
+  }
+  return out;
+}
+
 export function albumMbids(scrobbles) {
   const map = new Map();
   for (const s of scrobbles) {
@@ -1308,7 +1327,53 @@ export function d4AlbumSplits(rest, minPlays = 2) {
 // in real titles ("Dancing With Myself", "With You"), and merging genuinely
 // different songs is the worst failure available here.
 const FEAT_SUFFIX = /\s*[([]\s*(?:feat\.?|ft\.?|featuring|with|w\/)\s+[^)\]]*[)\]]\s*$/i;
-const ARTIST_FEAT = /\s+(?:feat\.?|ft\.?|featuring|with|w\/|,|&|\bx\b)\s+/i;
+/*
+ * Feature markers in an ARTIST field, split by how ambiguous they are.
+ *
+ * `&` and `,` used to sit in here alongside `feat.`, and that was badly wrong. An
+ * ampersand is a band-name separator far more often than a feature marker, and the
+ * only gate was that the text before it also existed in the library, which is true
+ * for every duo whose frontman has solo work:
+ *
+ *   Macklemore & Ryan Lewis      Bob Marley & The Wailers
+ *   Tom Petty & The Heartbreakers    Nick Cave & The Bad Seeds
+ *   Simon & Garfunkel            Angus & Julia Stone
+ *
+ * All reported as `error` at 90% confidence, telling the owner to strip a real
+ * artist's name down to its first member. Reported by the person it was shown to:
+ * "this is one of the few times an & is correct". It is not few. Commas are the
+ * same story: Earth, Wind & Fire and Tyler, The Creator.
+ *
+ * So they are gone. What remains is unambiguous: nobody names a band "X feat. Y".
+ * `with` and ` x ` stay but only as WEAK evidence, because "Jack U x Skrillex" is a
+ * collaboration marker while a band could plausibly use either.
+ */
+const ARTIST_FEAT_STRONG = /\s+(?:feat\.?|ft\.?|featuring|w\/)\s+/i;
+const ARTIST_FEAT_WEAK = /\s+(?:with|\bx\b)\s+/i;
+
+/*
+ * `&` and `,` on their own prove nothing, but they are not always innocent either.
+ *
+ * The distinction is not the punctuation, it is DUO versus ONE-OFF COLLABORATION:
+ *
+ *   Macklemore & Ryan Lewis   a persistent act. Ryan Lewis has no solo catalogue,
+ *                             so the name is the artist and stripping it is wrong.
+ *   Future & Young Thug       made one album together. Both are major solo
+ *                             artists, so this tag invents a THIRD artist that
+ *                             takes plays from two real ones.
+ *
+ * Free signal that separates them: does the part AFTER the separator also stand on
+ * its own in this library? "Ryan Lewis" will not appear alone; "Young Thug" will,
+ * with hundreds of plays. When both halves are substantial artists in their own
+ * right, the combined string is very likely a collaboration credit.
+ *
+ * Reported as `review` and never as an error, because the judgement is genuinely
+ * the owner's: some people deliberately keep collaboration albums under a joint
+ * credit, and that is a defensible choice rather than a defect.
+ */
+const ARTIST_JOIN = /\s*(?:&|,|\+)\s*/;
+const ARTIST_FEAT = new RegExp(
+  `${ARTIST_FEAT_STRONG.source}|${ARTIST_FEAT_WEAK.source}`, "i");
 
 export function baseTitle(track) {
   let out = track || "", prev = null;
@@ -1547,20 +1612,107 @@ export function d8FeatureCredits(rest) {
   // Artist field polluted with a feature. Worse than an album split: it
   // invents a phantom artist that competes with the real one in the chart.
   const counts = counter(rest, (s) => s.artist);
+  const artistIds = artistMbids(rest);
   const primaries = new Set(
     [...counts.keys()].filter((a) => !ARTIST_FEAT.test(a)).map((a) => norm(a)),
   );
+  /*
+   * Distinct albums per artist string, which is the second collaboration signal.
+   * A one-off collaboration has one album under the joint name; an established duo
+   * usually has several.
+   */
+  const albumsPer = new Map();
+  for (const sc of rest) {
+    if (!sc?.artist) continue;
+    const k = norm(sc.artist);
+    if (!albumsPer.has(k)) albumsPer.set(k, new Set());
+    if (sc.album) albumsPer.get(k).add(norm(sc.album));
+  }
+  const soloPlays = (name) => counts.get(name) ??
+    [...counts].find(([a]) => norm(a) === norm(name))?.[1] ?? 0;
+
   for (const [artist, n] of counts) {
-    if (!ARTIST_FEAT.test(artist)) continue;
+    const strong = ARTIST_FEAT_STRONG.test(artist);
+    const weak = ARTIST_FEAT_WEAK.test(artist);
+
+    /* ---- joint credits: both halves standing alone is the tell ---------- */
+    if (!strong && !weak && ARTIST_JOIN.test(artist)) {
+      const parts = artist.split(ARTIST_JOIN).map((x) => x.trim()).filter(Boolean);
+      if (parts.length !== 2) continue;            // "Earth, Wind & Fire" and friends
+      const [a, b] = parts;
+      const aPlays = soloPlays(a), bPlays = soloPlays(b);
+      // BOTH sides must be real artists here, with enough plays to mean something.
+      // One side alone is the duo case and must stay silent.
+      if (aPlays < 5 || bPlays < 5) continue;
+
+      const joint = albumsPer.get(norm(artist))?.size ?? 0;
+      issues.push({
+        detector: "D8",
+        class: "review",
+        // One shared album reads as a collaboration; several reads as a duo that
+        // simply happens to contain two working solo artists.
+        confidence: joint <= 1 ? 0.6 : 0.35,
+        artist,
+        title: `'${artist}' may be a collaboration rather than an artist name`,
+        plays_affected: n,
+        suggest:
+          `Both '${a}' (${aPlays} plays) and '${b}' (${bPlays} plays) also ` +
+          `exist on their own in your library, so this joint credit is a third ` +
+          `artist competing with two real ones` +
+          (joint <= 1
+            ? `, and it covers a single album, which is what a one-off ` +
+              `collaboration looks like.`
+            : `, though it covers ${joint} albums, which is more like a ` +
+              `established duo.`) +
+          ` Crediting the tracks to one artist with the other as a feature would ` +
+          `merge the plays. If you prefer keeping collaboration albums under a ` +
+          `joint credit, that is a reasonable choice and nothing is broken.`,
+        members: [
+          { artist, plays: n, looks_like: `joint credit, ${joint} album${joint === 1 ? "" : "s"}` },
+          { artist: a, plays: aPlays, looks_like: "also solo" },
+          { artist: b, plays: bPlays, looks_like: "also solo" },
+        ],
+      });
+      continue;
+    }
+
+    if (!strong && !weak) continue;
+
+    /*
+     * A name with its own MusicBrainz artist ID is a real artist. Full stop.
+     *
+     * This is the check that would have kept "Macklemore & Ryan Lewis" quiet, and
+     * it settles every similar case for free, because the ID is already on the
+     * scrobble. No pattern is allowed to overrule it.
+     */
+    if (artistIds.get(norm(artist))?.size) continue;
+
     const head = artist.split(ARTIST_FEAT)[0].trim();
     if (!primaries.has(norm(head)) || norm(head) === norm(artist)) continue;
+
+    /*
+     * `with` and ` x ` are reported, but as a question rather than a defect. A
+     * duo could reasonably use either, and the cost of being wrong here is that
+     * someone destroys a correct artist credit on our say-so.
+     */
     issues.push({
-      detector: "D8", class: "error", confidence: 0.9, artist,
-      title: `Artist field contains a feature credit: '${artist}'`,
+      detector: "D8",
+      class: strong ? "error" : "review",
+      confidence: strong ? 0.9 : 0.4,
+      artist,
+      title: strong
+        ? `Artist field contains a feature credit: '${artist}'`
+        : `Artist field may contain a feature credit: '${artist}'`,
       plays_affected: n,
-      suggest: `artist should be '${head}', with the feature moved into the ` +
-               `track title. This phantom artist is competing with '${head}' ` +
-               `in your artist chart.`,
+      suggest: strong
+        ? `artist should be '${head}', with the feature moved into the track ` +
+          `title. This phantom artist is competing with '${head}' in your ` +
+          `artist chart.`
+        : `If this is a collaboration rather than a band name, the artist should ` +
+          `be '${head}' with the rest moved into the track title, since it is ` +
+          `competing with '${head}' in your artist chart. If it IS the band's ` +
+          `name, leave it: plenty of acts have one like this and MusicBrainz has ` +
+          `no ID on these scrobbles to settle it either way.`,
       members: [{ artist, plays: n }, { artist: head, plays: counts.get(head) || 0 }],
     });
   }

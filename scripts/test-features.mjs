@@ -281,5 +281,143 @@ console.log("\ntrack identity preserves symbols");
   eq(d4AlbumSplits(rest2).length, 1, "a real split is still detected");
 }
 
+/* ---------------------------------------------------------------------------
+ * `&` and `,` are band-name separators, not feature markers.
+ *
+ * They used to sit in the same set as `feat.`, gated only on the text before the
+ * separator also existing in the library. That is true for every duo whose
+ * frontman has solo work, so D8 reported "Macklemore & Ryan Lewis" as an ERROR at
+ * 90% confidence and told the owner to strip it to "Macklemore". Macklemore &
+ * Ryan Lewis is an artist on Spotify, MusicBrainz and Last.fm; acting on that
+ * advice would have damaged a correct library.
+ *
+ * Reported as "this is one of the few times an & is correct". It is not few, and
+ * that is the point: the false-positive class here is enormous.
+ * ------------------------------------------------------------------------- */
+{
+  const play = (artist, track, n, mbid = "") =>
+    Array.from({ length: n }, (_, i) =>
+      ({ artist, track, album: "Album", uts: 1e9 + i, artist_mbid: mbid }));
+  const run = (combined, head, mbid = "") => {
+    const rest = [...play(combined, "Track", 11, mbid), ...play(head, "Solo", 29)];
+    return d8FeatureCredits(rest).find((i) => i.artist === combined) || null;
+  };
+
+  // Real acts that must never be flagged, all with the frontman present solo.
+  for (const [combined, head] of [
+    ["Macklemore & Ryan Lewis", "Macklemore"],
+    ["Bob Marley & The Wailers", "Bob Marley"],
+    ["Tom Petty & The Heartbreakers", "Tom Petty"],
+    ["Nick Cave & The Bad Seeds", "Nick Cave"],
+    ["Simon & Garfunkel", "Simon"],
+    ["Angus & Julia Stone", "Angus"],
+    ["Tyler, The Creator", "Tyler"],
+    ["Earth, Wind & Fire", "Earth"],
+  ]) {
+    ok(run(combined, head) === null, `'${combined}' is not a feature credit`);
+  }
+
+  // Unambiguous markers must still be caught, and still as errors.
+  for (const [combined, head] of [
+    ["Drake feat. Future", "Drake"],
+    ["Travis Scott ft. Drake", "Travis Scott"],
+    ["Kanye West featuring Jay-Z", "Kanye West"],
+    ["Future w/ Metro Boomin", "Future"],
+  ]) {
+    const f = run(combined, head);
+    ok(f !== null, `'${combined}' is still caught`);
+    eq(f?.class, "error", `  and is an error`);
+    eq(f?.confidence, 0.9, `  at full confidence`);
+  }
+
+  // Genuinely ambiguous separators are reported as a question, not a defect.
+  const x = run("Jack U x Skrillex", "Jack U");
+  ok(x !== null, "' x ' is still reported");
+  eq(x?.class, "review", "  but only as a review");
+  ok(x?.confidence < 0.5, `  at low confidence  (${x?.confidence})`);
+  ok(/If it IS the band's name, leave it/.test(x?.suggest || ""),
+     "  and it says outright that leaving it alone may be correct");
+
+  /*
+   * The MBID gate. A name with its own MusicBrainz artist ID is a real artist and
+   * no pattern may overrule that. Free evidence: the ID is already on the scrobble.
+   */
+  ok(run("Drake feat. Future", "Drake", "b4f7-mbid") === null,
+     "an artist MBID silences even an unambiguous marker, because it proves the " +
+     "name is a real MusicBrainz entity");
+  ok(run("Jack U x Skrillex", "Jack U", "abc-mbid") === null,
+     "and the same for a weak marker");
+
+  // The head must still exist in the library, or there is no phantom to report.
+  const orphan = d8FeatureCredits(play("Drake feat. Future", "Track", 11));
+  eq(orphan.length, 0,
+     "no finding when the bare artist is absent: nothing is competing with it");
+}
+
+/* ---------------------------------------------------------------------------
+ * Duo versus one-off collaboration.
+ *
+ * Removing `&` from the marker set stopped D8 damaging real duos, but it also went
+ * blind to a case that IS worth raising: "Future & Young Thug" made one album
+ * together, both are major solo artists, and that joint credit is a third artist
+ * taking plays from two real ones. "Macklemore & Ryan Lewis" looks identical as a
+ * string and is completely different, because Ryan Lewis has no solo catalogue.
+ *
+ * The signal that separates them is free and comes from the library: does the part
+ * AFTER the separator also stand on its own with real plays? Always `review`,
+ * because keeping collaboration albums under a joint credit is a defensible choice
+ * rather than a defect.
+ * ------------------------------------------------------------------------- */
+{
+  const P = (artist, album, track, n) =>
+    Array.from({ length: n }, (_, i) =>
+      ({ artist, album, track: track + i, uts: 1e9 + i }));
+  const joint = (rest) =>
+    d8FeatureCredits(rest).find((i) => /may be a collaboration/.test(i.title)) || null;
+
+  // The case that must fire: both halves substantial, one shared album.
+  const collab = joint([
+    ...P("Future & Young Thug", "Super Slimey", "t", 11),
+    ...P("Future", "DS2", "s", 40),
+    ...P("Young Thug", "Punk", "u", 35),
+  ]);
+  ok(collab !== null, "a joint credit whose halves both stand alone is reported");
+  eq(collab?.class, "review", "  as a review, never an error");
+  ok(collab?.confidence === 0.6, `  at 0.6 for a single shared album  (${collab?.confidence})`);
+  ok(/Future.*40 plays/.test(collab?.suggest || "") &&
+     /Young Thug.*35 plays/.test(collab?.suggest || ""),
+     "  and names both solo play counts as the evidence");
+  ok(/reasonable choice and nothing is broken/.test(collab?.suggest || ""),
+     "  while saying plainly that keeping it is legitimate");
+  eq(collab?.members.length, 3,
+     "  three members: the joint credit and both artists it competes with");
+
+  // The case that must stay silent: a duo where only one half has solo work.
+  ok(joint([...P("Macklemore & Ryan Lewis", "The Heist", "t", 11),
+            ...P("Macklemore", "Gemini", "s", 29)]) === null,
+     "a duo stays silent when the second name has no solo plays");
+
+  // Several joint albums reads more like a duo, so confidence drops.
+  const many = joint([
+    ...P("A & B", "R1", "t", 6), ...P("A & B", "R2", "u", 6), ...P("A & B", "R3", "v", 6),
+    ...P("A", "Solo", "s", 40), ...P("B", "Solo", "w", 35),
+  ]);
+  ok(many !== null && many.confidence < 0.5,
+     `three shared albums lowers confidence  (${many?.confidence})`);
+  ok(/more like a/.test(many?.suggest || ""),
+     "  and the wording says it looks like an established duo");
+
+  // Three-part names must not be split into a false pair.
+  for (const [name, head] of [["Earth, Wind & Fire", "Earth"],
+                              ["Tyler, The Creator", "Tyler"]]) {
+    ok(joint([...P(name, "Album", "t", 11), ...P(head, "X", "s", 29)]) === null,
+       `'${name}' is not treated as a two-artist join`);
+  }
+
+  // A trivial number of solo plays is not evidence of a solo career.
+  ok(joint([...P("A & B", "R", "t", 11), ...P("A", "X", "s", 40), ...P("B", "Y", "u", 2)]) === null,
+     "two solo plays does not make the second name a real artist");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
