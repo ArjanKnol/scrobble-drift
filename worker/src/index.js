@@ -58,7 +58,7 @@
  *
  * Bump this in the same commit as any Worker change. /api/health reports it.
  */
-const BUILD = "2026-07-31-7-health-no-store";
+const BUILD = "2026-07-31-9-spotify-shared-cache-batch-20";
 
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";

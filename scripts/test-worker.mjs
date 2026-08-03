@@ -15,6 +15,8 @@
 
 import { spAlbumToGroup, spNorm } from "../worker/src/index.js";
 import { readFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => {
@@ -479,8 +481,41 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
   ok(Boolean(m), "a BUILD constant exists");
   ok(m && /^\d{4}-\d{2}-\d{2}/.test(m[1]),
      `and starts with a date so staleness is obvious at a glance (${m?.[1]})`);
-  ok(m && /health-no-store/.test(m[1]),
-     "and was bumped for the latest Worker change, per the note on BUILD");
+  /*
+   * Checked against GIT, not against a string written here.
+   *
+   * This used to assert that BUILD matched a literal in this file, which cannot
+   * catch a forgotten bump: it only catches a bump that disagrees with a second
+   * constant you also had to remember to update. Both were then missed in the same
+   * edit, the Worker shipped reporting a stale version, and the marker whose entire
+   * purpose is answering "is the running code current" gave the wrong answer.
+   *
+   * The invariant that actually matters: if worker/src/index.js differs from HEAD,
+   * BUILD must differ from HEAD's BUILD too. That needs no second constant and no
+   * memory. Skipped rather than failed where git is unavailable, because a missing
+   * git is not a bug in the Worker.
+   */
+  let headSrc = null;
+  try {
+    headSrc = execFileSync("git", ["show", "HEAD:worker/src/index.js"],
+      // fileURLToPath, not URL.pathname: this repo's path contains a space, and
+      // pathname hands back "Last.fm%20app", which git cannot chdir into. The
+      // check then skipped silently, which is how a guard passes while testing
+      // nothing.
+      { cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"] });
+  } catch { /* no git, no HEAD, or a fresh repo */ }
+
+  if (headSrc === null) {
+    ok(true, "BUILD-vs-git check skipped: git or HEAD unavailable");
+  } else if (headSrc === src) {
+    ok(true, "the Worker matches HEAD, so BUILD needs no bump");
+  } else {
+    const headBuild = headSrc.match(/const BUILD = "([^"]+)"/)?.[1];
+    ok(m[1] !== headBuild,
+       `worker/src/index.js changed, so BUILD must change too ` +
+       `(HEAD ${JSON.stringify(headBuild)}, now ${JSON.stringify(m?.[1])})`);
+  }
   ok(/build: BUILD/.test(src), "and /api/health reports it");
 }
 
