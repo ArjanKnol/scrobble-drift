@@ -333,6 +333,7 @@ for (const [label, lib] of [
     "norm", "normTitle", "trackIdentity", "baseTitle", "eraName",
     "isEraTagged", "isUndifferentiated", "isStructuralTitle", "featCredits",
     "officialKey", "d5Resolve", "digitsOnlyDiffer", "caseOnly",
+    "singleShaped",
   ];
   const unary = STRING_FNS.map((n) => [n, drift[n]]).filter(([, v]) => typeof v === "function");
   ok(unary.length === STRING_FNS.length,
@@ -353,8 +354,18 @@ for (const [label, lib] of [
   for (const [name, fn] of unary) {
     let worst = 0, worstIn = "";
     for (const input of nasty) {
+      /*
+       * Passed to EVERY parameter, not just the first.
+       *
+       * `singleShaped(album, track)` returns false immediately when the second
+       * argument is missing, so calling it with one argument exercised none of
+       * its regex and would have reported a clean pass over a pattern that took
+       * 16 seconds on a 200k-character title. A fuzzer that cannot reach the code
+       * is worse than no fuzzer, because it reads as evidence.
+       */
+      const args = Array.from({ length: Math.max(fn.length, 1) }, () => input);
       const t = process.hrtime.bigint();
-      try { fn(input); } catch { /* throwing is fine, hanging is not */ }
+      try { fn(...args); } catch { /* throwing is fine, hanging is not */ }
       const ms = Number(process.hrtime.bigint() - t) / 1e6;
       if (ms > worst) { worst = ms; worstIn = input.slice(0, 24); }
     }

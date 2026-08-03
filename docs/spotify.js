@@ -82,11 +82,16 @@ export async function fetchCatalogue(artist, api) {
   let partial = false;
   let failed = 0;
 
-  // 10, matching SP_BATCH in the Worker. Was 20, which made the response large
-  // enough that parsing it exceeded the Worker's 10ms CPU budget and every call
-  // returned 500.
-  for (let i = 0; i < ids.length; i += 10) {
-    const batch = ids.slice(i, i + 10);
+  /*
+   * Must match SP_BATCH in the Worker, which rejects anything larger.
+   *
+   * Back to 20, Spotify's documented maximum. It was 10 as a workaround for the
+   * `available_markets` CPU blowup, which was actually fixed by pinning a market
+   * on that call, so the halved batch was costing twice the requests for nothing.
+   */
+  const BATCH = 20;
+  for (let i = 0; i < ids.length; i += BATCH) {
+    const batch = ids.slice(i, i + BATCH);
     const res = await api(`/api/spotify/album-tracks?ids=${batch.join(",")}`);
 
     // A failed batch is missing evidence, not an empty catalogue. Counted so the

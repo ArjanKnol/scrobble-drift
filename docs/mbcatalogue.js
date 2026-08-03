@@ -170,6 +170,21 @@ export function splitByStrategy(jobs, { catalogueCost = 2 } = {}) {
     byArtist.set(k, rec);
   }
 
+  /*
+   * The threshold stays at 2, and it was a mistake to lower it.
+   *
+   * The argument for lowering was that catalogues are now shared-cached, so the
+   * first visitor pays and everyone after reads one row. True, but it is an
+   * argument about SPOTIFY catalogues. This function splits MUSICBRAINZ work, and
+   * a MusicBrainz catalogue is a paginated browse capped at 500 tracks per page
+   * against a hard one-request-per-second limit, so a prolific artist is many
+   * sequential requests. For a single track that is far worse than one recording
+   * lookup, cached or not, because somebody still pays the first time and the
+   * politeness limit is what makes it slow.
+   *
+   * Caught by four tests that encoded the original economics correctly. Left as a
+   * note because the reasoning is easy to re-apply to the wrong place.
+   */
   const catalogue = [], perTrack = [];
   for (const rec of byArtist.values()) {
     // An artist with a known MBID costs one call less, so the threshold drops.

@@ -119,7 +119,11 @@ export default {
           // Whether the shared MusicBrainz answer cache is wired up. Optional by
           // design, so this says which mode the Worker is really in rather than
           // leaving it to be inferred from response times.
+          // One binding backs both upstreams now, so this reports the shared
+          // cache rather than a MusicBrainz-specific one. Name kept for
+          // compatibility with anything already reading it.
           mb_cache: Boolean(env.MB_CACHE),
+          shared_cache: Boolean(env.MB_CACHE) ? ["musicbrainz", "spotify"] : [],
           mb_cache_rows: env.MB_CACHE
             ? await env.MB_CACHE.prepare("SELECT COUNT(*) AS n FROM mb_cache")
                 .first("n").catch(() => null)
@@ -169,6 +173,9 @@ export default {
         return await mbReleaseGroup(url, env, request, cors);
       }
 
+      if (url.pathname === "/api/spotify/track") {
+        return await spTrack(url, env, cors);
+      }
       if (url.pathname === "/api/spotify/artist-albums") {
         return await spArtistAlbums(url, env, cors);
       }
@@ -425,8 +432,37 @@ async function mbFetch(path) {
  * works before the database exists.
  */
 export async function mbShared(env, key, produce) {
+  return sharedCache(env, key, produce, MB_TTL_DAYS);
+}
+
+/**
+ * Spotify's TTL is shorter than MusicBrainz's, on purpose.
+ *
+ * A MusicBrainz release group is a historical fact and barely moves. A Spotify
+ * catalogue does: records get re-released, editions appear, regional
+ * availability shifts. Seven days matches the edge cache that was already in
+ * place for these calls.
+ */
+const SP_TTL_DAYS = 7;
+
+/**
+ * The shared answer cache, used by both upstreams.
+ *
+ * One table for both, and the table is still called `mb_cache` because renaming
+ * it would mean a migration for no behavioural gain. Key prefixes keep the two
+ * apart: `aid:` `cat:` `rec:` `rg:` for MusicBrainz, `sp*:` for Spotify.
+ *
+ * The point of extending this to Spotify is that an artist catalogue costs about
+ * eight round trips and is byte-identical for every visitor. It was already
+ * cached in the browser and at the Cloudflare edge, but the edge cache is per
+ * LOCATION, so the same artist could still be fetched once per datacentre, and a
+ * new visitor's first scan paid full price for artists thousands of people had
+ * already looked up. In the shared database the first scan pays and nobody else
+ * does, which is the only one of these optimisations whose cost falls over time.
+ */
+async function sharedCache(env, key, produce, ttlDays) {
   const db = env.MB_CACHE;
-  const cutoff = Math.floor(Date.now() / 1000) - MB_TTL_DAYS * 86400;
+  const cutoff = Math.floor(Date.now() / 1000) - ttlDays * 86400;
 
   if (db) {
     try {
@@ -452,6 +488,11 @@ export async function mbShared(env, key, produce) {
     }
   }
   return { body, shared: false };
+}
+
+/** Spotify's half of the shared cache. Same table, shorter TTL, own prefix. */
+async function spShared(env, key, produce) {
+  return sharedCache(env, `sp:${key}`, produce, SP_TTL_DAYS);
 }
 
 /**
@@ -963,7 +1004,21 @@ const SP_ALBUM_CAP = 100;    // albums per artist, keeps subrequests bounded
  */
 const SP_PAGE = 10;
 const SP_TTL = 604800;       // 7 days. Catalogues change; release dates do not.
-const SP_BATCH = 10;         // albums per tracklist call, see SP_MARKET below
+/*
+ * 20, which is Spotify's documented maximum for /albums?ids=.
+ *
+ * It was 10, and that was a workaround for a bug that got fixed a different way.
+ * The original problem was `available_markets`, ~180 country codes per track, so
+ * a 20-album batch carried roughly 200,000 redundant strings and JSON.parse alone
+ * exceeded the free plan's 10ms CPU budget. The real fix was pinning `market`,
+ * which makes Spotify omit that array entirely, and the tracklist call has passed
+ * `market=SP_MARKET` ever since. So the batch size stayed halved for no remaining
+ * reason, costing twice the requests on the slowest phase of a scan.
+ *
+ * Worth watching after deploy: if this ever starts returning 500 on the tracklist
+ * call, CPU is the first suspect and 10 is the known-safe value.
+ */
+const SP_BATCH = 20;
 
 /**
  * Every Spotify request pins a market, and this is not about regional content.
@@ -1130,10 +1185,73 @@ export function spAlbumToGroup(al) {
  * both in one request would blow the CPU budget on JSON parsing for prolific
  * artists. The browser pipelines the two calls instead.
  */
+/**
+ * Which releases contain one track, from Spotify.
+ *
+ * The authoritative equivalent of Last.fm's `track.getInfo`, and the fast
+ * equivalent of `/api/mb/recording`: three per second against MusicBrainz's one,
+ * with no crowd-edited data anywhere in the answer.
+ *
+ * Returns `{ groups }` in exactly the shape `/api/mb/recording` returns, which is
+ * the whole point. `d0Resolve`, `d14eReleasedSince` and `d16StrandedSingles` all
+ * take a `lookup(artist, track)` and read `.groups`, so this is a drop-in
+ * alternative rather than a second code path to keep in step.
+ *
+ * Exact normalised match on BOTH track and artist. Spotify's track search is
+ * generous, and a near miss here would attribute a release to the wrong recording
+ * and produce a confident, wrong "already released" claim.
+ */
+async function spTrack(url, env, cors) {
+  const artist = (url.searchParams.get("artist") || "").slice(0, 200);
+  const track = (url.searchParams.get("track") || "").slice(0, 200);
+  if (!artist || !track) {
+    return json({ error: "artist and track required" }, 400, cors);
+  }
+
+  const { body, shared } = await spShared(
+    env, `one:${spNorm(artist)}\u241f${spNorm(track)}`, async () => {
+    // No `limit`: Spotify refuses an explicit one above 10 on these endpoints and
+    // its default is adequate. See SP_PAGE.
+    const q = `track:${JSON.stringify(track)} artist:${JSON.stringify(artist)}`;
+    const data = await spFetch(
+      `/search?type=track&market=${SP_MARKET}&q=${encodeURIComponent(q)}`, env);
+
+    const wantTrack = spNorm(track);
+    const wantArtist = spNorm(artist);
+    const best = new Map();
+    for (const t of data.tracks?.items || []) {
+      if (!t?.album?.id) continue;
+      const exact = spNorm(t.name) === wantTrack &&
+                    (t.artists || []).some((a) => spNorm(a.name) === wantArtist);
+      if (!exact) continue;
+      const g = spAlbumToGroup(t.album);
+      const cur = best.get(g.rg_id);
+      // Earliest edition wins, so a deluxe reissue does not shadow the original.
+      if (!cur || (g.first_release || "9999") < (cur.first_release || "9999")) {
+        best.set(g.rg_id, g);
+      }
+    }
+    const groups = [...best.values()].sort(
+      (a, b) => (a.first_release || "9999").localeCompare(b.first_release || "9999"));
+    return { groups };
+  });
+  return json({ ...body, shared }, 200,
+              { ...cors, "Cache-Control": "public, max-age=86400" });
+}
+
 async function spArtistAlbums(url, env, cors) {
   const artist = (url.searchParams.get("artist") || "").slice(0, 200);
   if (!artist) return json({ error: "artist required" }, 400, cors);
 
+  /*
+   * The single most valuable row in the shared cache.
+   *
+   * One catalogue is about eight round trips, is byte-identical for every
+   * visitor, and is what every release question about that artist is answered
+   * from. Keyed on the NORMALISED name so "Playboi Carti" and "playboi  carti"
+   * share it.
+   */
+  const { body, shared } = await spShared(env, `alb:${spNorm(artist)}`, async () => {
   const found = await spFetch(
     `/search?type=artist&limit=5&market=${SP_MARKET}` +
     `&q=${encodeURIComponent(artist)}`, env);
@@ -1144,9 +1262,10 @@ async function spArtistAlbums(url, env, cors) {
   // and silently analysing the wrong artist's catalogue is worse than no
   // answer at all: it would produce confident, wrong "already released" claims.
   const hit = items.find((a) => spNorm(a.name) === want);
+  // A miss is a real, stable answer and is cached: Spotify not having an artist
+  // under this exact name will not change next week.
   if (!hit) {
-    return json({ found: false, artist, near: items.slice(0, 3).map((a) => a.name) },
-                200, { ...cors, "Cache-Control": "public, max-age=86400" });
+    return { found: false, artist, near: items.slice(0, 3).map((a) => a.name) };
   }
 
   /*
@@ -1235,14 +1354,17 @@ async function spArtistAlbums(url, env, cors) {
   albums.length = 0;
   albums.push(...unique.slice(0, SP_ALBUM_CAP));
 
-  return json({
+  return {
     found: true,
     artist_id: hit.id,
     artist_name: hit.name,
     albums,
     truncated: Number(first.total ?? 0) > SP_ALBUM_CAP,
     page_size: step,
-  }, 200, { ...cors, "Cache-Control": "public, max-age=86400" });
+  };
+  });
+  return json({ ...body, shared }, 200,
+              { ...cors, "Cache-Control": "public, max-age=86400" });
 }
 
 /**
@@ -1261,6 +1383,17 @@ async function spAlbumTracks(url, env, cors) {
     return json({ error: `max ${SP_BATCH} ids` }, 400, cors);
   }
 
+  /*
+   * Keyed on the SORTED id list, so batch composition does not fragment the cache.
+   *
+   * Caching per individual album would give a better hit rate in theory, but the
+   * ids here are generated from the artist catalogue, which is itself now cached
+   * and therefore returns albums in a stable order. So the same artist produces
+   * the same batches, and batch-level keys hit in practice while keeping this to
+   * one row and one round trip instead of twenty lookups and a re-assembly step.
+   */
+  const { body, shared } = await spShared(
+    env, `trk:${[...ids].sort().join(",")}`, async () => {
   const data = await spFetch(
     `/albums?ids=${ids.join(",")}&market=${SP_MARKET}`, env);
 
@@ -1286,7 +1419,9 @@ async function spAlbumTracks(url, env, cors) {
   const partial = (data.albums || []).some(
     (al) => al && Number(al.total_tracks || 0) > (al.tracks?.items?.length || 0));
 
-  return json({ tracks: out, partial }, 200,
+  return { tracks: out, partial };
+  });
+  return json({ ...body, shared }, 200,
               { ...cors, "Cache-Control": "public, max-age=86400" });
 }
 
@@ -1305,6 +1440,8 @@ async function spAlbum(url, env, cors) {
     return json({ error: "artist and title required" }, 400, cors);
   }
 
+  const { body, shared } = await spShared(
+    env, `srch:${spNorm(artist)}\u241f${spNorm(title)}`, async () => {
   const q = `album:${JSON.stringify(title)} artist:${JSON.stringify(artist)}`;
   const data = await spFetch(
     // No `limit`: see the note in spArtistAlbums. Spotify's default for search
@@ -1322,9 +1459,12 @@ async function spAlbum(url, env, cors) {
            (al.artists || []).some((a) => spNorm(a.name) === wantArtist),
   }));
 
-  return json({
+  return {
     exists: groups.some((g) => g.exact),
     matches: groups.filter((g) => g.exact).slice(0, 5),
     near: groups.filter((g) => !g.exact).slice(0, 5),
-  }, 200, { ...cors, "Cache-Control": "public, max-age=86400" });
+  };
+  });
+  return json({ ...body, shared }, 200,
+              { ...cors, "Cache-Control": "public, max-age=86400" });
 }

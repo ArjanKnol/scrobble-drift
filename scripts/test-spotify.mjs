@@ -8,6 +8,7 @@
  * Run: node scripts/test-spotify.mjs
  */
 
+import { readFile } from "node:fs/promises";
 import { fetchCatalogue, matchTrack, byArtist, estimate }
   from "../docs/spotify.js";
 
@@ -224,18 +225,40 @@ console.log("\nmatchTrack: safety");
 }
 
 {
-  // Batches are 10, not 20: at 20 the Worker response was large enough to
-  // exceed its CPU budget. 25 albums must therefore cost 3 tracklist calls.
+  /*
+   * The client's batch size must EQUAL the Worker's SP_BATCH.
+   *
+   * The Worker rejects `ids` longer than SP_BATCH with a 400, so a client that
+   * batches higher fails every tracklist call, and one that batches lower just
+   * wastes requests. Two constants in two files that must agree is exactly the
+   * kind of thing that drifts, so this reads the Worker's value rather than
+   * restating it.
+   *
+   * Both are 20, Spotify's documented maximum. They were 10 as a workaround for
+   * the `available_markets` CPU blowup, which was really fixed by pinning a
+   * market on that call.
+   */
+  const workerSrc = await readFile(
+    new URL("../worker/src/index.js", import.meta.url), "utf8");
+  const SP_BATCH = Number(workerSrc.match(/const SP_BATCH = (\d+);/)?.[1]);
+  eq(SP_BATCH, 20, "the Worker's SP_BATCH is Spotify's documented maximum");
+
   const many = Array.from({ length: 25 }, (_, i) =>
     ({ name: `Album ${i}`, primary: "Album", date: "2020-01-01",
        tracks: [`Track ${i}`] }));
   const { api, calls } = fakeApi({ "Prolific": many });
   await fetchCatalogue("Prolific", api);
   const trackCalls = calls.filter((c) => c.includes("album-tracks"));
-  eq(trackCalls.length, 3, "25 albums batch into 3 calls of at most 10");
+
+  eq(trackCalls.length, Math.ceil(25 / SP_BATCH),
+     `25 albums batch into ${Math.ceil(25 / SP_BATCH)} calls at ${SP_BATCH} each`);
   for (const c of trackCalls) {
-    ok(c.split(",").length <= 10, `  batch of ${c.split(",").length} ids is within 10`);
+    const n = c.split(",").length;
+    ok(n <= SP_BATCH,
+       `  batch of ${n} ids is within the Worker's limit of ${SP_BATCH}`);
   }
+  ok(trackCalls.some((c) => c.split(",").length > 10),
+     "and the client actually uses the larger batch, rather than still sending 10");
 }
 
 /* ------------------------------------------------------------------------- */
