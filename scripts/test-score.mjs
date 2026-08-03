@@ -178,7 +178,27 @@ console.log("\nbounds and degenerate input");
   const flood = Array.from({ length: 5000 }, () => issue("D4", "error", 500));
   const h = hygieneScore(2000, flood, 786);
   ok(h.score >= 0, "a flood of findings cannot go negative");
-  eq(h.subscores.album_integrity, 0, "and a bucket bottoms out at 0");
+  /*
+   * 1, not 0, and never 0.
+   *
+   * The curve is hyperbolic now, so it approaches zero without arriving. That is
+   * deliberate twice over. It means the score keeps discriminating at the bad end
+   * instead of clamping — the old linear form bottomed out at about 48 findings,
+   * so fixing 165 of 220 problems moved the overall score not at all. And the
+   * overall score is a geometric mean, which multiplies the buckets, so a single
+   * zero would drag the whole thing to zero however clean everything else was.
+   */
+  eq(h.subscores.album_integrity, 1,
+     "a flood floors the bucket at 1, never 0, so the geometric mean survives");
+  ok(h.score > 0, "and the overall score stays above zero");
+
+  // The property that matters more than any single value: it never stops moving.
+  const at = (n) => hygieneScore(10000,
+    Array.from({ length: n }, () => issue("D4", "split", 6)), 1500).score;
+  const steps = [220, 165, 110, 55, 20, 5, 1, 0].map(at);
+  ok(steps.every((v, i) => i === 0 || v > steps[i - 1]),
+     `every fix raises the score: ${steps.join(" -> ")}`);
+  eq(steps.at(-1), 100, "and a fully cleaned library reaches 100");
 }
 
 {

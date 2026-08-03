@@ -284,3 +284,56 @@ export function estimate(artistGroups, { albumsPerArtist = 12 } = {}) {
     seconds: Math.ceil(calls / 3),
   };
 }
+
+/* ------------------------------------------------- per-track resolution ----- */
+/**
+ * Which releases contain one track, asked of Spotify directly.
+ *
+ * This replaces the catalogue-plus-tracklists approach, which cannot work any
+ * more. `GET /albums?ids=` returns 403 Forbidden to a client-credentials app, and
+ * that endpoint was the only source of tracklists, so `fetchCatalogue` built an
+ * index with no titles in it and `matchTrack` missed every single time. The
+ * visible symptom was "Spotify: 0 of 150 tracks resolved" followed by every
+ * lookup falling through to MusicBrainz at one per second.
+ *
+ * Confirmed by probing what the app is actually entitled to:
+ *
+ *   search type=artist / album / track    OK
+ *   GET /artists/{id}/albums              OK
+ *   GET /albums?ids=                      403 Forbidden
+ *
+ * `search type=track` still works and returns each track with its album, its
+ * album type and its release date, which is everything the detectors need. One
+ * call per track at 3/s rather than about eight per artist, and the Worker caches
+ * the answer in D1 so it is shared across everyone.
+ *
+ * Returns the SAME shape as matchTrack and as /api/mb/recording: `{ groups }`
+ * sorted earliest first. That is what lets d0Resolve, d14eReleasedSince and
+ * d16StrandedSingles stay unaware of which source answered.
+ */
+export async function fetchTrack(artist, track, api) {
+  /*
+   * `api` here is spPaced, which returns the PARSED BODY or null. Not a Response.
+   * The first version of this checked `res.ok` and read `res.data`, which are
+   * both undefined on a plain object, so every call looked like a failure and
+   * routed everything to MusicBrainz. Same contract as fetchCatalogue uses a few
+   * lines up, which is where it should have been read from.
+   */
+  const body = await api(
+    "/api/spotify/track?" + new URLSearchParams({ artist, track }));
+
+  // null is a failed call, not an answer. Flagged so the caller sends the track
+  // to MusicBrainz rather than recording "Spotify has never heard of this",
+  // which would be a permanent false negative.
+  if (body == null) return { groups: [], source: "spotify", error: true };
+
+  const groups = body.groups || [];
+  return {
+    groups,
+    source: "spotify",
+    // Whether the Worker served this from the shared cache: the difference
+    // between a call that cost Spotify something and one database read.
+    shared: Boolean(body.shared),
+    tier: groups.length ? "exact" : "none",
+  };
+}
