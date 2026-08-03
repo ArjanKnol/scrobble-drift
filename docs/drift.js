@@ -2686,16 +2686,63 @@ export function hygieneScore(totalPlays, issues, albumStrings = 0) {
       penalty += w * (1 + Math.log10(1 + (i.plays_affected || 0)));
     }
 
-    // 12 is the tuning knob: the penalty a bucket can absorb per album string
-    // before it bottoms out. It is a judgement about how alarmist to be, not a
-    // fact, and it is the one number to change if the score feels wrong.
-    subscores[bucket] =
-      Math.max(0, Math.round(100 * (1 - Math.min(penalty / (denom * 0.12), 1))));
+    /*
+     * Hyperbolic, not linear. The previous form was
+     *
+     *     100 * (1 - min(penalty / (denom * 0.12), 1))
+     *
+     * a straight line clamped at zero, and the clamp is where it broke. On a
+     * 1,500-string library it bottomed out at about 48 findings, so:
+     *
+     *     220 findings -> 0        110 findings -> 0        55 findings -> 0
+     *
+     * Fixing 165 of 220 problems, three quarters of the work, moved the overall
+     * score from 75 to 75. A tool whose headline number is meant to track library
+     * health gave no feedback at all for the majority of any real cleanup, and
+     * could not tell a messy library from a catastrophic one.
+     *
+     * `100 * k / (penalty + k)` has no clamp and no saturation. It is monotonic
+     * everywhere, so every single fix moves the number, and it approaches zero
+     * without reaching it, which is honest: a library with 500 problems is worse
+     * than one with 200, and the score should say so rather than calling both
+     * hopeless.
+     *
+     * HALF_AT is the penalty that scores 50, expressed per album string so it
+     * still scales with library size. 0.06 puts the midpoint at roughly 1 finding
+     * per 17 album strings, which lands a handful of splits near the top of the
+     * range and a few hundred near the bottom. That is the alarmism dial, and it
+     * is still a judgement rather than a fact.
+     */
+    const HALF_AT = denom * 0.06;
+    subscores[bucket] = penalty === 0
+      ? 100
+      // Floored at 1, not 0. The geometric mean below multiplies these, so a
+      // single zero would zero the whole score no matter how clean everything
+      // else was. The hyperbola never truly reaches zero anyway; this only stops
+      // rounding from putting it there.
+      : Math.max(1, Math.round(100 * HALF_AT / (penalty + HALF_AT)));
   }
 
+  /*
+   * Geometric mean, not arithmetic.
+   *
+   * The arithmetic mean let one catastrophic area be averaged away by three clean
+   * ones: three buckets at 100 and album_integrity at 10 gave 78, which reads as
+   * "pretty good" for a library with 220 fixable splits. It also meant the
+   * headline number could never fall below 75 however bad one area got, so fixing
+   * 55 of 220 problems still moved it by only 5 points.
+   *
+   * A geometric mean punishes imbalance, which is the correct behaviour here.
+   * Being immaculate on artists and duplicates does not compensate for album data
+   * being a mess, because they are different jobs and you have only done three of
+   * them. The same four values now score 56 rather than 78.
+   *
+   * It stays 100 when every bucket is 100, so the "nothing left to fix" invariant
+   * below is unaffected.
+   */
+  const vals = Object.values(subscores);
   let score = Math.round(
-    Object.values(subscores).reduce((a, b) => a + b, 0) /
-    Object.keys(subscores).length);
+    Math.exp(vals.reduce((a, b) => a + Math.log(b), 0) / vals.length));
 
   // The invariant. 100 means nothing left to fix, full stop.
   if (actionable > 0) score = Math.min(score, 99);

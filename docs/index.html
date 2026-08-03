@@ -141,7 +141,15 @@ import {
 
 import { apiBase, isConfigured, activeLinks } from "./config.js";
 import * as store from "./store.js";
-import { fetchCatalogue, matchTrack, byArtist, estimate } from "./spotify.js";
+/*
+ * `matchTrack` stays; `fetchCatalogue`, `byArtist` and `estimate` go.
+ *
+ * The Spotify catalogue path needed tracklists and Spotify returns 403 for those,
+ * so it is replaced by `fetchTrack` (see below). But `matchTrack` is a generic
+ * matcher over a catalogue index, and the MUSICBRAINZ catalogue does carry
+ * tracklists via `inc=recordings`, so the MusicBrainz path still uses it.
+ */
+import { fetchTrack, matchTrack } from "./spotify.js";
 import {
   fetchMbCatalogue, splitByStrategy, estimateMb,
 } from "./mbcatalogue.js";
@@ -1285,31 +1293,48 @@ async function resolvePhase(scrobbles, apiKey) {
   if (stats) stats.spotify_available = spotifyOn;
 
   if (spotifyOn) {
-    const artists = byArtist(plan);
-    const est = estimate(artists);
-    total = artists.length + eraJobs.length + plan.length;
-
+    /*
+     * Per TRACK, not per artist. The catalogue approach cannot work any more.
+     *
+     * `GET /albums?ids=` returns 403 Forbidden to a client-credentials app, and it
+     * was the only source of tracklists, so `fetchCatalogue` built an index with
+     * no titles and `matchTrack` missed every time. The symptom was
+     * "Spotify: 0 of 150 tracks resolved" and every lookup falling through to
+     * MusicBrainz at one per second, which is what made release lookups take
+     * hours. Probed one endpoint at a time: search by artist, album and track all
+     * work, `/artists/{id}/albums` works, only the tracklist call is forbidden.
+     *
+     * `search type=track` returns the album, its type and its release date, which
+     * is all the detectors need. One call per track at 3/s, and the Worker caches
+     * each answer in D1 so it is shared across every visitor.
+     *
+     * Progress accounting: `tick` is called ONLY on a hit. A miss is ticked later
+     * by the MusicBrainz phase, so each job is counted exactly once and `total`
+     * stays `plan.length + eraJobs.length`. The old code ticked once per artist
+     * AND once per hit, and inflated `total` by the artist count to compensate,
+     * which is why the estimate lurched.
+     */
     $("status").textContent =
-      `Checking ${N(est.tracks)} tracks across ${N(est.artists)} artists ` +
-      `against Spotify first (about ${est.seconds > 90
-        ? Math.round(est.seconds / 60) + " min" : est.seconds + "s"})…`;
+      `Checking ${N(plan.length)} tracks against Spotify first (about ${
+        Math.round(plan.length / 3) > 90
+          ? Math.round(plan.length / 180) + " min"
+          : Math.round(plan.length / 3) + "s"})…`;
 
     const misses = [];
     let gaveUp = false;
-    await pool(artists, 4, async (group) => {
-      if (gaveUp) { misses.push(...group.jobs); return; }
+    await pool(plan, 6, async (job) => {
+      if (gaveUp) { misses.push(job); return; }
 
       if (spFails >= SP_GIVE_UP) {
-        // Hand the rest straight to MusicBrainz rather than burning a call per
-        // artist on something that is clearly down. Said out loud, because a
-        // silent switch to the slow path looks like the scan has hung.
-        // A flag rather than a break: with a worker pool there is no single
-        // loop position to break out of, and the other workers must also stop
-        // and hand their remaining artists to MusicBrainz.
+        // Hand the rest straight to MusicBrainz rather than burning a call on
+        // something that is clearly down. Said out loud, because a silent switch
+        // to the slow path looks like the scan has hung. A flag rather than a
+        // break: with a worker pool there is no single loop position to break
+        // out of, and the other workers must stop too.
         gaveUp = true;
         spotifyOn = false;
         if (stats) stats.spotify_gave_up = true;
-        misses.push(...group.jobs);
+        misses.push(job);
         $("waiting").classList.remove("hide");
         $("waiting").innerHTML =
           `<strong style="color:var(--warn)">Spotify is not responding.</strong>
@@ -1318,52 +1343,35 @@ async function resolvePhase(scrobbles, apiKey) {
         return;
       }
 
-      // Catalogues are cached on disk under their own kind, so a rescan or a
-      // resumed scan re-reads them for free. Release history is immutable.
-      //
-      // The "2" is a cache version. The first release could store a catalogue
-      // that had been built from failed tracklist calls, i.e. an artist marked
-      // as resolved with zero titles. Those entries are permanently wrong and
-      // would be trusted forever, so the key was bumped to orphan them rather
-      // than asking everyone to clear their stored data.
-      let cat = await store.getLookup("spcat2", group.artist, "*");
-      if (cat) {
-        // Maps do not survive JSON, so the index is rehydrated on read.
-        cat = { ...cat, titles: new Map(cat.titles || []) };
+      /*
+       * Cached on disk per track. The kind is "sptrk1" rather than reusing
+       * "spcat2": that key holds catalogues in a different shape, and the old
+       * ones are now worthless because they were built from tracklist calls that
+       * 403. Leaving them orphaned is cheaper than asking everyone to clear
+       * their stored data, and they expire on their own.
+       */
+      let hit = await store.getLookup("sptrk1", job.artist, job.track);
+      if (hit) {
         cacheHits++;
       } else {
-        cat = await fetchCatalogue(group.artist, spPaced);
-        // Never persist a failed call. fetchCatalogue flags the difference
-        // between "Spotify has no such artist" (an answer, worth caching) and
-        // "the call failed" (not an answer). Caching the latter would write a
-        // permanent false negative for an artist who is on Spotify.
-        if (!cat.error) {
-          await store.putLookup("spcat2", group.artist, "*",
-                                { ...cat, titles: [...cat.titles] });
+        hit = await fetchTrack(job.artist, job.track, spPaced);
+        // Never persist a failed call. `error` distinguishes "Spotify has no such
+        // track" (an answer, worth keeping) from "the call failed" (not an
+        // answer). Caching the latter writes a permanent false negative.
+        if (!hit.error) {
+          await store.putLookup("sptrk1", job.artist, job.track, hit);
         }
       }
 
-      // Counted here rather than from artists.length, so a give-up or a stop
-      // reports catalogues actually fetched instead of ones merely planned.
-      if (stats) stats.spotify_artists++;
-
-      for (const job of group.jobs) {
-        const hit = matchTrack(cat, job.track);
-        if (hit) {
-          recCache.set(key(job.artist, job.track), hit);
-          spHits++;
-          done++;                       // this track needs no MusicBrainz call
-        } else {
-          misses.push(job);
-        }
+      if (!hit.error && hit.groups.length) {
+        recCache.set(key(job.artist, job.track), hit);
+        spHits++;
+        tick(`Spotify: ${N(spHits)} of ${N(plan.length)} tracks resolved`);
+      } else {
+        misses.push(job);
       }
-      tick(`Spotify: ${N(spHits)} of ${N(plan.length)} tracks resolved`);
     });
 
-    // No re-baseline needed: every job is either a hit or a miss, so
-    // spHits + misses.length === plan.length and the total set above already
-    // holds. Ticking once per resolved track keeps the bar moving smoothly
-    // through the fast phase instead of jumping once per artist.
     mbPlan = misses;
     if (stats) stats.spotify_resolved = spHits;
   }
@@ -1468,7 +1476,9 @@ async function resolvePhase(scrobbles, apiKey) {
     for (const job of group.jobs) {
       const hit = matchTrack(cat, job.track);
       if (hit) { recCache.set(key(job.artist, job.track), hit); mbGot++; }
-      done++;
+      // No bare `done++` here. `tick` already increments it, so this counted every
+      // catalogue-resolved job twice, ran `done` past `total`, and made the
+      // progress bar and the time estimate disagree with reality.
       tick(`MusicBrainz: ${N(mbGot)} of ${N(mbPlan.length)} resolved`);
     }
   }
@@ -1631,16 +1641,35 @@ function render() {
           ${N(h.actionable)} thing${h.actionable === 1 ? "" : "s"} you can
           fix.</p>` : `<p class="note" style="margin:0 0 12px;color:var(--good)">
           Nothing left to fix.</p>`}
-        ${Object.entries(h.subscores).map(([k, v]) => `
+        ${/*
+           * A zero score gets a visible sliver, not an empty track.
+           *
+           * A width of 0% renders nothing, so the WORST possible score looked
+           * identical to "no data" and got the least visual weight of any number
+           * on the page. Reported as "empty bar?", which is exactly how a grey
+           * track with nothing in it reads.
+           *
+           * Math.max(v, 2) only stops zero from disappearing; the number beside
+           * the bar is still exact. The middot below is there for the same
+           * reason: "220 found 0" ran the count and the score together with
+           * nothing between them.
+           *
+           * This note lives OUT of the template on purpose. It was first written
+           * as an HTML comment inside it, containing a backticked `width:0%`,
+           * which terminated the template literal and broke the whole module.
+           */
+          Object.entries(h.subscores).map(([k, v]) => `
           <div style="margin-bottom:9px">
             <div class="row" style="border:0;padding:0">
               <span>${esc(k.replace(/_/g, " "))}${
                 SUBSCORE_TIPS[k] ? tip(SUBSCORE_TIPS[k], "tip-l") : ""}</span>
               <span class="v">${
                 h.issue_counts?.[k] ? `<span style="color:var(--dim);
-                  font-size:11.5px">${N(h.issue_counts[k])} found</span>  ` : ""
+                  font-size:11.5px">${N(h.issue_counts[k])} found</span>
+                  <span style="color:var(--line)">&middot;</span> ` : ""
                 }${v}</span></div>
-            <div class="bar"><i style="width:${v}%;background:${col(v)}"></i></div>
+            <div class="bar"><i style="width:${Math.max(v, 2)}%;
+              background:${col(v)}"></i></div>
           </div>`).join("")}
       </div>
       <div class="grid g4">
