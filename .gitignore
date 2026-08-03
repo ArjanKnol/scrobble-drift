@@ -13,3 +13,8 @@ Thumbs.db
 *.log
 scratch/
 data/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
