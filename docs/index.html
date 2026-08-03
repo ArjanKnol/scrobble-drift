@@ -568,18 +568,29 @@ $("f").onsubmit = async (e) => {
     }
     stats.aborted = abort;
     stats.phase = "done";
+    /*
+     * Cleared HERE, before render(), and again in `finally`. Both are needed.
+     *
+     * `stats.running` gates the entire summary panel, and `render()` reads it. An
+     * earlier fix moved this assignment into `finally` so an error could never
+     * leave it true, which was right, but `finally` runs AFTER the render on the
+     * success path. So every successful scan rendered with `running` still true
+     * and the "Scan complete" panel vanished from the report entirely: the fix for
+     * one failure mode created another.
+     *
+     * Found by running a real scan and noticing the report began with the
+     * username instead of the summary. Nothing in the offline suite could have
+     * caught it, because the bug is in the ORDER of two statements that were both
+     * present and both correct on their own.
+     */
+    stats.running = false;
     $("prog").classList.add("hide");
     render();                         // re-render so the summary panel appears
   } catch (err) {
     fail(err.message || String(err), err.detail || "");
   } finally {
-    /*
-     * In `finally`, not on the success path.
-     *
-     * `stats.running` gates the whole summary panel (`if (stats.running) return ""`),
-     * so leaving it true after an error meant the summary was suppressed forever,
-     * silently, with no way back except a full rescan.
-     */
+    // Belt and braces: the assignment above covers the success path, this covers
+    // every path out of the try, including a throw before it is reached.
     if (stats) stats.running = false;
     $("go").disabled = false;
     $("stop").classList.add("hide");

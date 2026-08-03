@@ -77,6 +77,32 @@ const code = html
      /finally\s*\{[\s\S]{0,600}?stats\.running\s*=\s*false/.test(code),
      "On the success path only, an error suppresses the summary forever.");
 
+  /*
+   * And cleared BEFORE the render, which the finally block does not do.
+   *
+   * `finally` runs after the success-path render, so having the assignment ONLY
+   * there meant every successful scan rendered with `running` still true and the
+   * whole "Scan complete" panel disappeared. Fixing one failure mode created
+   * another, and only a real scan caught it: both statements existed and were
+   * individually correct, the bug was purely their order.
+   */
+  /*
+   * Anchored on `stats.phase = "done"`, not on the first `render()`.
+   *
+   * There is an earlier render mid-scan, the one that shows local findings before
+   * release lookups start, and matching that gave a false failure. The success
+   * path is identifiable by the phase being set to done, so the window checked is
+   * from there to the next render call.
+   */
+  const doneAt = code.indexOf('stats.phase = "done"');
+  const renderAfter = code.indexOf("render();", doneAt);
+  ok("the success path is locatable", doneAt > 0 && renderAfter > doneAt);
+  const window_ = code.slice(doneAt, renderAfter);
+  ok("stats.running is cleared BEFORE the success-path render",
+     /stats\.running\s*=\s*false/.test(window_),
+     "Otherwise the summary panel is suppressed on every successful scan, which " +
+     "is what happened when the assignment lived only in `finally`.");
+
   // And it must gate the summary, which is why clearing it matters at all.
   ok("the summary is gated on stats.running",
      /stats\.running\)\s*return\s*""/.test(code) ||
