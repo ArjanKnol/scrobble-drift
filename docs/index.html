@@ -661,6 +661,11 @@ function scanSummary() {
     warn.push(`<strong>You stopped this scan.</strong> The results below are
                partial. Running it again resumes rather than starting over.`);
   }
+  if (s.pages_retried) {
+    warn.push(`Last.fm failed on ${N(s.pages_retried)} page${
+      s.pages_retried === 1 ? "" : "s"} and the scan carried on from where each
+      one stopped, so nothing was lost. Their scrobbles are included.`);
+  }
   /*
    * Step 2 failing is stated, not swallowed.
    *
@@ -964,8 +969,23 @@ async function fetchAll(user, cap, apiKey) {
 
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      if (++attempt <= 3) {
-        await waitVisibly(4 * attempt, body.error || `Server error ${res.status}.`);
+      /*
+       * More patience for 5xx than for 4xx, because they mean different things.
+       *
+       * A 4xx will not fix itself, so three tries is generous. A Last.fm 500 is
+       * usually a flaky page rather than a broken scan: seen live 500ing on a high
+       * page number at 128,000 of 250,000 scrobbles. Three attempts over 24
+       * seconds was not enough to ride that out, so a deep scan died on a hiccup.
+       *
+       * Six attempts with a 6-second step is roughly two minutes of trying, which
+       * is worth it when the alternative is losing a scan that has already run for
+       * fifteen. The Worker now also returns whatever the failed batch had already
+       * collected, so each retry starts from the exact page that failed rather
+       * than re-fetching the batch.
+       */
+      const maxTries = res.status >= 500 ? 6 : 3;
+      if (++attempt <= maxTries) {
+        await waitVisibly(6 * attempt, body.error || `Server error ${res.status}.`);
         continue;
       }
       /*
@@ -1028,6 +1048,11 @@ async function fetchAll(user, cap, apiKey) {
       await store.saveScrobbles(user, all);
       await store.saveState({ user, cap, nextPage: data.next, total: all.length });
     }
+
+    // The Worker cuts a batch short rather than failing it when a page errors.
+    // Counted so the summary can say the run hit turbulence instead of implying
+    // the fetch was clean.
+    if (data.partial_at && stats) stats.pages_retried = (stats.pages_retried || 0) + 1;
 
     if (cap && all.length >= cap) { all.length = cap; break; }
     if (stats) stats.pages = data.next ? data.next - 1 : (data.total_pages || 0);

@@ -576,5 +576,46 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
      "and it is actually routed");
 }
 
+/* ---------------------------------------------------------------------------
+ * A failed page must not discard the pages that already worked.
+ *
+ * Seen live: a deep scan reached 128,000 of 250,000 scrobbles and Last.fm returned
+ * HTTP 500 on a high page number. Only `Retryable` was handled that way, so a
+ * rate limit resumed gracefully while a plain 500 threw and took the seven
+ * already-fetched pages of the batch with it, ending a fifteen-minute run.
+ *
+ * `fetched` tracks the last page that actually worked and `next` is derived from
+ * it, so keeping the partial batch also hands back the exact resume point.
+ * ------------------------------------------------------------------------- */
+{
+  const src = await readFile(
+    new URL("../worker/src/index.js", import.meta.url), "utf8");
+  const at = src.indexOf("async function scrobbles(");
+  const body = src.slice(at, src.indexOf("\n}", at));
+
+  ok(/if \(out\.length\) \{ stoppedAt = page; break; \}/.test(body),
+     "a non-retryable upstream error keeps the pages already collected");
+  ok(/if \(out\.length\) break;/.test(body),
+     "and a rate limit still does the same");
+
+  // Throwing on an empty batch is what stops a no-progress request from becoming
+  // a silent empty response the client would loop on forever.
+  const errBlock = body.slice(body.indexOf("} catch (err) {"));
+  ok(/throw err;/.test(errBlock),
+     "but a batch that collected nothing still throws, so no-progress is an error");
+
+  ok(/partial_at: stoppedAt/.test(body),
+     "the response says where it was cut short, so the scan can report turbulence");
+  ok(/next: fetched < totalPages \? fetched \+ 1 : null/.test(body),
+     "and `next` still derives from the last page that worked, giving the resume point");
+
+  // The client half: 5xx deserves more patience than 4xx.
+  const html = await readFile(new URL("../docs/index.html", import.meta.url), "utf8");
+  ok(/res\.status >= 500 \? 6 : 3/.test(html),
+     "the client retries a 5xx more times than a 4xx, which will not fix itself");
+  ok(/pages_retried/.test(html),
+     "and a scan that hit turbulence says so rather than reporting a clean run");
+}
+
 console.log(`\n${pass} passed, ${fail} failed (including MusicBrainz cache block)\n`);
 process.exit(fail ? 1 : 0);

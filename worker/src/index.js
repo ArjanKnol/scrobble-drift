@@ -58,7 +58,7 @@
  *
  * Bump this in the same commit as any Worker change. /api/health reports it.
  */
-const BUILD = "2026-07-31-9-spotify-shared-cache-batch-20";
+const BUILD = "2026-07-31-10-partial-batch-on-upstream-error";
 
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";
@@ -647,7 +647,7 @@ async function scrobbles(url, request, env, cors) {
                          Math.max(1, Number(url.searchParams.get("count") || 5)));
 
   const out = [];
-  let totalPages = 1, totalScrobbles = 0, fetched = 0;
+  let totalPages = 1, totalScrobbles = 0, fetched = 0, stoppedAt = null;
 
   for (let i = 0; i < count; i++) {
     const page = from + i;
@@ -673,6 +673,22 @@ async function scrobbles(url, request, env, cors) {
         throw err;
       }
       if (err.lastfm === 6) return json({ error: "no such user" }, 404, cors);
+      /*
+       * ANY upstream failure keeps what this batch already collected.
+       *
+       * Only `Retryable` did this before, so a rate limit resumed gracefully but a
+       * plain `last.fm http 500` threw and discarded the seven pages of the batch
+       * that had already succeeded. On a deep scan that is a scan-ending error
+       * from one flaky page: seen live at 128,000 of 250,000 scrobbles, where
+       * Last.fm 500s on a high page number and the whole run stopped.
+       *
+       * `fetched` holds the last page that actually worked and `next` is derived
+       * from it, so breaking here hands back the good pages and the exact page to
+       * resume from. If nothing at all was collected we still throw, so a request
+       * that can make no progress is a real error rather than a silent empty
+       * response that would loop forever.
+       */
+      if (out.length) { stoppedAt = page; break; }
       throw err;
     }
 
@@ -705,6 +721,10 @@ async function scrobbles(url, request, env, cors) {
     total_pages: totalPages,
     total_scrobbles: totalScrobbles,
     shared_key: shared,
+    // Set when the batch was cut short by an upstream failure. The client keeps
+    // going from `next`; this exists so a scan can report that it hit turbulence
+    // rather than pretending the run was clean.
+    partial_at: stoppedAt,
   }, 200, cors);
 }
 
