@@ -9,7 +9,8 @@
  * Run: node scripts/test-score.mjs
  */
 
-import { hygieneScore, SCORED_DETECTORS, analyse } from "../docs/drift.js";
+import { hygieneScore, SCORED_DETECTORS, UNSCORED_BY_DESIGN, analyse }
+  from "../docs/drift.js";
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => {
@@ -102,9 +103,17 @@ console.log("\nD14e is scored (the omission that caused the bug)");
   add("D", "Rec", "Feat Song (feat. E)", 2);
 
   const report = analyse(scrobbles);
+  /*
+   * `style_choice` and `UNSCORED_BY_DESIGN` are excluded, and the distinction
+   * matters: the bug this guards against was D14e scoring nothing by ACCIDENT.
+   * A deliberate exclusion has to be declared in drift.js, so a detector cannot
+   * quietly slip out of the score by being forgotten.
+   */
   const emitted = new Set(report.issues
-    .filter((i) => i.class !== "unfixable").map((i) => i.detector));
-  const unscored = [...emitted].filter((d) => !SCORED_DETECTORS.has(d));
+    .filter((i) => i.class !== "unfixable" && !i.style_choice)
+    .map((i) => i.detector));
+  const unscored = [...emitted]
+    .filter((d) => !SCORED_DETECTORS.has(d) && !UNSCORED_BY_DESIGN.has(d));
   eq(unscored.length, 0,
      `every actionable detector analyse() emits is scored${
        unscored.length ? " — MISSING: " + unscored.join(", ") : ""}`);
@@ -257,6 +266,21 @@ console.log("\nbounds and degenerate input");
     plays_affected: 111, style_choice: true }], 101);
   ok(style.score === 100 && style.actionable === 0,
      "a style choice costs nothing");
+}
+
+/* ---- a deliberate exclusion must be declared, not inferred -------------- */
+{
+  ok(UNSCORED_BY_DESIGN.has("D16"),
+     "D16 is declared unscored, rather than silently missing from every bucket");
+  ok(![...UNSCORED_BY_DESIGN].some((d) => SCORED_DETECTORS.has(d)),
+     "nothing is both scored and declared unscored");
+
+  // The reason it is allowed out: it can never emit a class that costs anything.
+  const asError = hygieneScore(500, [{
+    detector: "D16", class: "review", style_choice: true,
+    confidence: 0.7, plays_affected: 40 }], 120);
+  ok(asError.score === 100 && asError.actionable === 0,
+     `a D16 finding costs nothing (${asError.score}/${asError.actionable})`);
 }
 
 /* ------------------------------------------------------------------------- */

@@ -2532,6 +2532,7 @@ export const DETECTOR_ORDER = [
   ["D11"],                           // Various Artists
   ["D6", "D12"],                     // duplicate and impossible scrobbles
   ["D14a", "D14c", "D14e", "D14f"],  // unreleased tagging, mostly review
+  ["D16"],                           // stranded singles, always a style choice
 ];
 
 const ORDER_RANK = new Map();
@@ -2710,6 +2711,282 @@ export function hygieneScore(totalPlays, issues, albumStrings = 0) {
   };
 }
 
+
+/* ------------------------------------------- D16: singles never re-scrobbled */
+/**
+ * A track you only ever played as a single, which has since landed on an album.
+ *
+ * The gap this fills. D4 finds a track sitting under two album names and D0 then
+ * picks which one to consolidate into, but both need BOTH halves to exist in the
+ * library. If you played the single on release and never played the album version
+ * afterwards, there is only one album string, nothing to compare it against, and
+ * every detector stays silent. The play is stranded on the single and your album
+ * chart never sees it.
+ *
+ * Answered from Spotify and MusicBrainz, NOT from Last.fm's own `track.getInfo`.
+ *
+ * track.getInfo looked ideal: it returns Last.fm's canonical album for a track,
+ * which is the exact string a re-tag has to match to merge in a Last.fm chart,
+ * and it costs one call per candidate rather than eleven per artist. The flaw is
+ * that Last.fm's track-to-album mapping is user-contributed. It carries plenty of
+ * wrong and invented entries, and it is least reliable precisely where this
+ * library is densest, on unreleased material that people tag however they like.
+ * Using it as the source of truth would mean telling someone to move real plays
+ * onto an album on the word of an anonymous edit.
+ *
+ * So the authority is the same lookup D0 already uses: Spotify first, MusicBrainz
+ * as fallback, both returning release groups in one shape, both curated rather
+ * than crowd-edited. The target rule is D0's, unchanged: earliest release group
+ * of primary type Album with no Compilation secondary type.
+ *
+ * Last.fm is still consulted, but only as CORROBORATION, never as the target.
+ * Agreement raises confidence; disagreement lowers it and is shown; Last.fm alone
+ * still reports, at low confidence and labelled as such, because a weak signal
+ * named as weak beats silence when the whole finding is a `review` anyway.
+ *
+ * Reported as `review` and never scored, deliberately. You did play the single,
+ * so that tag is accurate history, and rewriting it is a preference about how you
+ * want your chart to read rather than a defect. See `hygieneScore`.
+ */
+
+/*
+ * No leading `\s*`, and the string is trimmed before matching.
+ *
+ * With the leading `\s*` this was quadratic: the pattern is unanchored, so the
+ * engine tries every start position, and at each one the `\s*` consumes a whole
+ * whitespace run before failing. Measured 109ms at 16k characters and 16 SECONDS
+ * at 200k, on the main thread, over strings that arrive from other people's
+ * libraries. That is the third time this exact shape has appeared in this file.
+ *
+ * Starting at a literal character class instead makes almost every start position
+ * fail in constant time, so only positions actually holding a bracket or dash do
+ * any work.
+ */
+const SINGLE_SUFFIX = /[-–—(\[]\s*(?:single|ep)\s*[)\]]?$/i;
+
+/**
+ * Does this album string look like a single rather than an album?
+ *
+ * Two shapes, both decidable from the library alone with no lookup, which is what
+ * keeps the candidate list small enough to be worth spending API calls on:
+ *
+ *   "Octane"            album string equals the track title
+ *   "Octane - Single"   explicitly labelled
+ *
+ * Deliberately NOT inferred from "this album string has only one track in your
+ * library". A real album you have played exactly one track from looks identical
+ * by that test, and there are far more of those than there are singles.
+ */
+export function singleShaped(album, track) {
+  if (!album || !track) return false;
+  const trimmed = album.trim();
+  if (SINGLE_SUFFIX.test(trimmed)) return true;
+  // "Octane" as the album of the track "Octane". Compared on the feature-stripped
+  // base title so "Octane (feat. Cash Cobain)" still matches the album "Octane".
+  const a = norm(trimmed.replace(SINGLE_SUFFIX, ""));
+  return Boolean(a) && (a === norm(track) || a === norm(baseTitle(track)));
+}
+
+/**
+ * Tracks worth asking Last.fm about, most-played first.
+ *
+ * Returns one entry per (artist, track, album) that looks single-shaped, carrying
+ * the play count so a capped budget can be spent where it changes the chart most.
+ */
+export function d16Candidates(rest, { minPlays = 1 } = {}) {
+  const seen = new Map();
+  for (const s of rest || []) {
+    if (!s.artist || !s.track || !s.album) continue;
+    if (!singleShaped(s.album, s.track)) continue;
+    const k = `${norm(s.artist)}␟${trackIdentity(s.track)}␟${norm(s.album)}`;
+    const cur = seen.get(k) ||
+      { artist: s.artist, track: s.track, album: s.album, plays: 0 };
+    cur.plays++;
+    seen.set(k, cur);
+  }
+  return [...seen.values()]
+    .filter((c) => c.plays >= minPlays)
+    .sort((a, b) => b.plays - a.plays);
+}
+
+/**
+ * Turn resolved canonical albums into findings, grouped by target album.
+ *
+ * Grouped because ungrouped this floods. Most singles by an album artist end up
+ * on an album eventually, so a library of any size produces hundreds of these,
+ * and a report of hundreds of one-line cards is one nobody reads. One card per
+ * destination album is also the shape of the actual decision: you re-tag a batch
+ * of tracks onto one record, not each track in isolation.
+ *
+ * `lookup(artist, track)` is the SAME function D0 uses, returning
+ * `{ groups: [{ title, primary, secondary, first_release }] }`. Sharing it means
+ * this detector needs no new network path, no new cache and no new pacing: it
+ * rides on the resolution phase that already exists.
+ *
+ * `owned` is the set of normalised album strings the library already has plays
+ * of, which is the difference between a merge and an invention.
+ */
+export function d16StrandedSingles(
+  candidates, lookup, { owned = new Set(), lastfm = null } = {},
+) {
+  const byTarget = new Map();
+
+  for (const c of candidates || []) {
+    const groups = lookup?.(c.artist, c.track)?.groups;
+
+    /*
+     * D0's rule, deliberately identical.
+     *
+     * Earliest release group of primary type Album, excluding compilations. A
+     * greatest-hits record technically contains the track, and telling someone to
+     * move a single onto a compilation would be worse than saying nothing.
+     */
+    const albums = (groups || []).filter((g) =>
+      g.primary === "Album" && !(g.secondary || []).includes("Compilation"));
+    const curated = albums[0]?.title || "";
+
+    // Last.fm's own idea of the canonical album, if we asked and it knew.
+    const lfmRaw = lastfm?.(c.artist, c.track)?.title || "";
+    // Ignored when it just names the single back at us, which is common.
+    const lfm = lfmRaw && norm(lfmRaw) !== norm(c.album) &&
+                !singleShaped(lfmRaw, c.track) ? lfmRaw : "";
+
+    if (!curated && !lfm) continue;        // nothing said anything: silent
+
+    /*
+     * `norm` already folds case, punctuation and diacritics, so "Life Of A Don"
+     * and "Life of a DON" agree here. Only a genuinely different title counts as
+     * the two sources disagreeing, which is the case worth being cautious about.
+     */
+    const agree = Boolean(curated && lfm) && norm(curated) === norm(lfm);
+    const source = agree ? "both" : curated ? "curated" : "lastfm";
+
+    /*
+     * The curated title is the target whenever there is one.
+     *
+     * An earlier version preferred Last.fm's spelling when the two agreed, on the
+     * theory that its string is what a chart is keyed on. That was wrong by
+     * construction: `norm` folds case and punctuation, so the only differences
+     * that branch could ever see were the ones it folds, and capitalisation is
+     * not something a user can act on anyway. It was a choice between two strings
+     * that differ in a way that does not matter, presented as a feature.
+     */
+    const target = curated || lfm;
+
+    // The album string already IS the album. Nothing stranded.
+    if (norm(target) === norm(c.album)) continue;
+    // The target is itself single-shaped, so moving changes nothing.
+    if (singleShaped(target, c.track)) continue;
+
+    const k = `${norm(c.artist)}␟${norm(target)}`;
+    const g = byTarget.get(k) || {
+      artist: c.artist,
+      album: target,
+      released: albums[0]?.first_release || "",
+      source,
+      disagreed: Boolean(curated && lfm && !agree) ? lfm : "",
+      tracks: [],
+      plays: 0,
+    };
+    // A group inherits the WEAKEST evidence of its members, so one Last.fm-only
+    // track cannot ride on the confidence earned by a corroborated one.
+    if (source === "lastfm" || g.source === "lastfm") g.source = "lastfm";
+    else if (source === "curated" || g.source === "curated") g.source = "curated";
+    g.tracks.push({ artist: c.artist, track: c.track, album: c.album, plays: c.plays });
+    g.plays += c.plays;
+    byTarget.set(k, g);
+  }
+
+  const issues = [];
+  for (const g of byTarget.values()) {
+    /*
+     * Whether the album is already in the library is the whole confidence story.
+     *
+     * If it is, your own listening already treats that record as the canonical
+     * home and re-tagging merges into an entry you can see. If it is not, the
+     * suggestion is to create a chart entry you have never had, off the back of
+     * one play of one single, which is a much bigger claim on much less evidence.
+     */
+    const held = owned.has(norm(g.album));
+    const n = g.tracks.length;
+
+    /*
+     * ONE table, keyed on both dimensions at once.
+     *
+     * Confidence here depends on two independent things: which sources agree, and
+     * whether the album is already in the library. Expressed as two separate
+     * ternary ladders they drifted apart and produced a `review` at 90%
+     * confidence, which is how the D4 contradiction happened. A table cannot do
+     * that, and it makes the reasoning readable in one glance.
+     *
+     * `lastfm|held` is not as weak as it looks: Last.fm's mapping is
+     * user-editable, but the library ALREADY holding that album is independent
+     * corroboration that the record is real and associated with this artist.
+     */
+    const EVIDENCE = {
+      "both|true":     { confidence: 0.80, note: "Release data and Last.fm agree" },
+      "both|false":    { confidence: 0.50, note: "Release data and Last.fm agree" },
+      "curated|true":  { confidence: 0.70, note: "From release data" },
+      "curated|false": { confidence: 0.35, note: "From release data" },
+      "lastfm|true":   { confidence: 0.45, note: "From Last.fm only" },
+      "lastfm|false":  { confidence: 0.20, note: "From Last.fm only" },
+    };
+    const ev = EVIDENCE[`${g.source}|${held}`];
+
+    issues.push({
+      detector: "D16",
+      class: "review",
+      style_choice: true,             // accurate history, not a defect
+      confidence: ev.confidence,
+      artist: g.artist,
+      album: g.album,
+      plays_affected: g.plays,
+      /*
+       * Never fed to chartImpact when the album is not already held.
+       *
+       * Adding plays to an album the library has no entry for invents a chart
+       * position out of nothing, which is exactly the phantom merge target that
+       * had Graduation's plays moving to a destination the user could not see.
+       */
+      chart_already_correct: !held,
+      title: `${n} track${n === 1 ? "" : "s"} you only played as a single ` +
+             `${n === 1 ? "is" : "are"} on '${g.album}'`,
+      released: g.released,
+      suggest:
+        `${n === 1 ? "This track appears" : "These tracks appear"} on ` +
+        `'${g.album}'${g.released ? ` (${g.released})` : ""}, but your ` +
+        `${g.plays} play${g.plays === 1 ? "" : "s"} ` +
+        `sit${g.plays === 1 ? "s" : ""} under the single instead, so the album ` +
+        `never gets ${n === 1 ? "it" : "them"}. ` +
+        (held
+          ? `You already have plays on '${g.album}', so re-tagging merges into ` +
+            `the entry you can see.`
+          : `You have no plays on '${g.album}' yet, so this would create a new ` +
+            `chart entry rather than merge into one. Worth doing only if you ` +
+            `consider the album the real home for ${n === 1 ? "it" : "them"}.`) +
+        ` Nothing here is wrong as history: you did play the single. This is ` +
+        `about how you want the chart to read.` +
+        (g.source === "lastfm"
+          ? ` Worth knowing that this one comes from Last.fm's own album data, ` +
+            `which anyone can edit, and no release database confirmed it. Treat ` +
+            `it as a hint rather than a fact.`
+          : "") +
+        (g.disagreed
+          ? ` Last.fm calls this album '${g.disagreed}' instead, so check which ` +
+            `spelling your library already uses before re-tagging.`
+          : ""),
+      // Named so the reader can weigh it rather than having to trust a number.
+      evidence: ev.note,
+      evidence_source: g.source,
+      members: g.tracks
+        .sort((a, b) => b.plays - a.plays)
+        .map((t) => ({ artist: t.artist, track: t.track, plays: t.plays,
+                       looks_like: `tagged '${t.album}'` })),
+    });
+  }
+  return issues.sort((a, b) => b.plays_affected - a.plays_affected);
+}
+
 /**
  * Every detector that can appear in a report must score somewhere.
  *
@@ -2718,6 +2995,21 @@ export function hygieneScore(totalPlays, issues, albumStrings = 0) {
  * exactly the D14e bug that shipped. Cheap enough to run always.
  */
 export const SCORED_DETECTORS = new Set(Object.values(BUCKETS).flat());
+
+/*
+ * D16 is deliberately in no bucket.
+ *
+ * It is always `review` and always `style_choice`, both of which weigh zero, so
+ * bucketing it could not change a score even if it were listed. Naming the
+ * omission here because the last unbucketed detector was an ACCIDENT (D14e scored
+ * nothing at all and nobody noticed), and the test that guards against that
+ * cannot tell a deliberate exclusion from a forgotten one unless it is written
+ * down.
+ *
+ * The rule: a detector belongs in a bucket if it can ever emit `error` or
+ * `split`. D16 cannot, because playing a single is not a defect.
+ */
+export const UNSCORED_BY_DESIGN = new Set(["D16"]);
 
 /* --------------------------------------------------------- orchestration */
 

@@ -484,5 +484,62 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
   ok(/build: BUILD/.test(src), "and /api/health reports it");
 }
 
+/* ---------------------------------------------------------------------------
+ * Spotify goes through the same shared cache, and the batch size is back to 20.
+ *
+ * The catalogue is the expensive thing in a scan: about eight round trips per
+ * artist, byte-identical for every visitor, and the answer to every release
+ * question about that artist. It was cached only in the browser and at the
+ * Cloudflare edge, and the edge cache is per LOCATION, so the same artist could
+ * be fetched once per datacentre and a new visitor paid full price for artists
+ * thousands of people had already looked up.
+ *
+ * SP_BATCH was 10 as a workaround for the `available_markets` CPU blowup, which
+ * was actually fixed by pinning a market on that call. The halved batch then sat
+ * there costing twice the requests for a reason that no longer existed.
+ * ------------------------------------------------------------------------- */
+{
+  const src = await readFile(
+    new URL("../worker/src/index.js", import.meta.url), "utf8");
+
+  // ---- the batch size ---------------------------------------------------- //
+  ok(/const SP_BATCH = 20;/.test(src),
+     "SP_BATCH is back to Spotify's documented maximum of 20");
+  const tracksFn = src.slice(src.indexOf("async function spAlbumTracks"));
+  const tracksBody = tracksFn.slice(0, tracksFn.indexOf("\n}"));
+  ok(/market=\$\{SP_MARKET\}/.test(tracksBody),
+     "and the tracklist call still pins a market, which is what makes 20 safe");
+
+  // ---- every Spotify endpoint is cached ---------------------------------- //
+  for (const fn of ["spTrack", "spArtistAlbums", "spAlbumTracks", "spAlbum"]) {
+    const at = src.indexOf(`async function ${fn}(`);
+    ok(at > 0, `${fn} exists`);
+    const body = src.slice(at, src.indexOf("\n}", at));
+    ok(/spShared\(/.test(body), `${fn} answers from the shared cache`);
+  }
+
+  // ---- the two upstreams share one table but not one namespace ----------- //
+  ok(/sharedCache\(env, `sp:\$\{key\}`/.test(src),
+     "Spotify keys are namespaced with sp:, so they cannot collide with MusicBrainz");
+  ok(/const SP_TTL_DAYS = 7;/.test(src) && /const MB_TTL_DAYS = 30;/.test(src),
+     "Spotify expires sooner than MusicBrainz, because catalogues actually change");
+
+  // ---- the per-track endpoint is a DROP-IN for the MusicBrainz one ------- //
+  const trackAt = src.indexOf("async function spTrack(");
+  const trackBody = src.slice(trackAt, src.indexOf("\n}", trackAt));
+  ok(/return \{ groups \}/.test(trackBody),
+     "spTrack returns { groups }, the same shape as /api/mb/recording");
+  ok(/spNorm\(t\.name\) === wantTrack/.test(trackBody) &&
+     /spNorm\(a\.name\) === wantArtist/.test(trackBody),
+     "and requires an exact normalised match on BOTH track and artist");
+  ok(!/limit=/.test(trackBody),
+     "it sends no explicit limit, which Spotify refuses above 10");
+  ok(/first_release \|\| "9999"/.test(trackBody),
+     "earliest edition wins, so a deluxe reissue cannot shadow the original");
+
+  ok(/url\.pathname === "\/api\/spotify\/track"/.test(src),
+     "and it is actually routed");
+}
+
 console.log(`\n${pass} passed, ${fail} failed (including MusicBrainz cache block)\n`);
 process.exit(fail ? 1 : 0);
