@@ -58,7 +58,7 @@
  *
  * Bump this in the same commit as any Worker change. /api/health reports it.
  */
-const BUILD = "2026-07-31-10-partial-batch-on-upstream-error";
+const BUILD = "2026-07-31-11-burst-limit-15-resume-fix";
 
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";

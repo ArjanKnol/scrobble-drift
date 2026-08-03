@@ -915,6 +915,23 @@ async function fetchAll(user, cap, apiKey) {
   let totalPages = null, totalScrobbles = null, attempt = 0, sinceSave = 0;
 
   /*
+   * Pace requests to match the server's page budget instead of sprinting into it.
+   *
+   * RL_PAGES allows 120 upstream pages per minute per IP, and each request carries
+   * PAGES_PER_REQUEST (8) of them, so the sustainable rate is 15 requests per
+   * minute: one every four seconds. Unpaced, the client fires them back to back at
+   * roughly one per second, burns the whole minute's budget in about fifteen
+   * seconds, and then sits in a 60-second stall. Same 120 pages either way, but
+   * delivered as sprint-and-freeze rather than steady progress, which is what made
+   * a large scan look broken.
+   *
+   * Pacing costs nothing in total time, because the budget is the binding
+   * constraint either way. It only removes the stalls and keeps the ETA honest.
+   */
+  const INGEST_MIN_MS = 4000;
+  let lastRequestAt = 0;
+
+  /*
    * Baseline for the time estimate.
    *
    * Step 2 has always shown "about N min left" and step 1 never did, which is the
@@ -931,6 +948,15 @@ async function fetchAll(user, cap, apiKey) {
   const startedWith = all.length;
 
   while (!abort) {
+    // Wait out the remainder of this request's slot, if any. Not a fixed sleep:
+    // time already spent on the previous round trip counts toward it.
+    const sinceLast = Date.now() - lastRequestAt;
+    if (lastRequestAt && sinceLast < INGEST_MIN_MS) {
+      await sleep(INGEST_MIN_MS - sinceLast);
+    }
+    if (abort) break;
+    lastRequestAt = Date.now();
+
     const qs = new URLSearchParams({
       user, from: String(from), count: String(PAGES_PER_REQUEST),
     });
@@ -1613,7 +1639,29 @@ function fail(msg, detail = "") {
    * the device, so re-running is cheap and safe.
    */
   const btn = $("out").querySelector(".panel.err .retry");
-  if (btn) btn.onclick = () => { btn.disabled = true; $("go").click(); };
+  if (btn) btn.onclick = async () => {
+    btn.disabled = true;
+    /*
+     * Load the saved checkpoint before restarting, so this RESUMES.
+     *
+     * It used to just click Scan, which starts from page 1, while the message
+     * beside it promised "trying again resumes rather than starting over".
+     * Observed live: a scan that failed at page 401 of 700 came back at page 49,
+     * re-fetching 50,000 scrobbles that were already on disk and spending the
+     * shared API budget to do it. The button was worse than useless, because the
+     * text next to it made the wrong behaviour look intentional.
+     *
+     * `resumeFrom` is what fetchAll checks, and only the resume prompt was ever
+     * setting it.
+     */
+    try {
+      const st = await store.loadState();
+      if (st?.user && st.user.toLowerCase() === $("user").value.trim().toLowerCase()) {
+        resumeFrom = st;
+      }
+    } catch { /* no checkpoint, so start over: still the best available action */ }
+    $("go").click();
+  };
 }
 
 /**

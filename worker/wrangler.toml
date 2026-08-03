@@ -53,14 +53,26 @@ ALLOWED_ORIGINS = "https://scrobble-drift.pages.dev,https://arjanknol.github.io,
 # The pacing, circuit breaker, edge cache and own-key path in src/index.js are
 # what actually carry load; these three stop the obvious abuse.
 
-# Concurrency guard. One check per scan request, so a single client cannot
-# open a dozen parallel scans. 6 per 10s is generous for one sequential scan
-# and hostile to a loop.
+# Concurrency guard. One check per scan request, so a single client cannot open a
+# dozen parallel scans.
+#
+# 15, not 6. The old value was described as "generous for one sequential scan"
+# and the arithmetic says otherwise: a request carries 8 pages spaced by
+# PACE_MS (130ms), so it occupies roughly 0.9s of Worker time plus latency, and
+# one sequential scan therefore issues 7 to 9 requests per 10 seconds. It sat
+# just under the limit and tripped it continuously, so every large scan stalled
+# with "Too many scan requests at once" through no fault of the user.
+#
+# This limiter exists to stop someone running scans in parallel. It should never
+# fire for a single well-behaved client, and 15 leaves clear headroom above the
+# ~9 a normal scan produces while still catching a loop. The client also paces
+# itself to one request every 4 seconds now, which is the real defence; this is
+# the backstop.
 [[ratelimits]]
 name = "RL_BURST"
 namespace_id = "1001"
   [ratelimits.simple]
-  limit = 6
+  limit = 15
   period = 10
 
 # Per-client page budget. 120 pages/min is roughly two 10k scans, or one 24k

@@ -166,6 +166,43 @@ const code = html
      "An estimate from the first page includes connection setup.");
 }
 
+/* ---- 7. retry means RESUME, and ingest paces itself --------------------- */
+{
+  /*
+   * The Try Again button used to just click Scan, which starts at page 1, while
+   * the text beside it promised "trying again resumes rather than starting over".
+   * Seen live: a scan that failed at page 401 of 700 came back at page 49 and
+   * re-fetched 50,000 scrobbles that were already on disk, spending the shared API
+   * budget to do it. Worse than useless, because the wrong behaviour looked
+   * deliberate.
+   */
+  const retryAt = code.indexOf("querySelector(\".panel.err .retry\")");
+  ok("the retry button is wired", retryAt > 0);
+  const retryBlock = code.slice(retryAt, retryAt + 900);
+  ok("Try Again loads the checkpoint before restarting",
+     /loadState\(\)/.test(retryBlock) && /resumeFrom = st/.test(retryBlock),
+     "Without this it starts from page 1 while claiming to resume.");
+  ok("and only resumes a checkpoint for the SAME user",
+     /toLowerCase\(\) === /.test(retryBlock),
+     "Resuming someone else's saved scan would silently mix two libraries.");
+
+  /*
+   * Ingest paces itself to the server's page budget. RL_PAGES allows 120 pages a
+   * minute and each request carries 8, so the sustainable rate is one request
+   * every 4 seconds. Unpaced it sprinted, burned the minute in ~15 seconds and
+   * stalled for 60, which is the same throughput delivered as a freeze.
+   */
+  ok("ingest has a minimum interval between requests",
+     /INGEST_MIN_MS\s*=\s*4000/.test(code),
+     "Matching RL_PAGES (120/min) divided by PAGES_PER_REQUEST (8).");
+  ok("and it subtracts time already spent, rather than sleeping blindly",
+     /INGEST_MIN_MS - sinceLast/.test(code),
+     "A flat sleep would add the round trip on top of the interval.");
+  ok("the pacing wait is interruptible",
+     /if \(abort\) break;[\s\S]{0,80}lastRequestAt = Date\.now\(\)/.test(code),
+     "Stop must not have to wait out a 4-second sleep.");
+}
+
 console.log(`\n  ${pass} passed, ${fails.length} failed`);
 if (fails.length) {
   console.log("\n  FAILED");
