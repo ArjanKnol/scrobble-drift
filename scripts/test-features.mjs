@@ -14,7 +14,8 @@
  *
  * Run: node scripts/test-features.mjs
  */
-import { d8FeatureCredits, featCredits, baseTitle } from "../docs/drift.js";
+import { d8FeatureCredits, d8VerifyJointCredits, featCredits, baseTitle }
+  from "../docs/drift.js";
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log(`  ok   ${m}`); }
@@ -417,6 +418,63 @@ console.log("\ntrack identity preserves symbols");
   // A trivial number of solo plays is not evidence of a solo career.
   ok(joint([...P("A & B", "R", "t", 11), ...P("A", "X", "s", 40), ...P("B", "Y", "u", 2)]) === null,
      "two solo plays does not make the second name a real artist");
+}
+
+/* ---------------------------------------------------------------------------
+ * Only a lookup can separate a duo from a collaboration.
+ *
+ * "Tobi & Manny" is a duo with its own artist page, and BOTH members release solo,
+ * so every signal available from play counts reads "collaboration". "Future &
+ * Young Thug" is string-identical in shape and genuinely is one. Nothing in the
+ * library distinguishes them, so the finding carries `verify_artist` and the
+ * resolve phase asks.
+ * ------------------------------------------------------------------------- */
+{
+  const P = (artist, album, track, n) =>
+    Array.from({ length: n }, (_, i) =>
+      ({ artist, album, track: track + i, uts: 1e9 + i }));
+  const bothSolo = [
+    ...P("Tobi & Manny", "Album", "t", 7),
+    ...P("Tobi", "Solo", "s", 30),
+    ...P("Manny", "Solo", "u", 20),
+  ];
+  const raw = d8FeatureCredits(bothSolo);
+  const pending = raw.find((i) => i.verify_artist);
+
+  ok(pending !== null, "a joint credit is emitted for verification");
+  eq(pending?.verify_artist, "Tobi & Manny", "  tagged with the name to ask about");
+
+  // A real artist page settles it. Dropped, not demoted: nothing to act on.
+  eq(d8VerifyJointCredits(raw, () => true).filter((i) => i.verify_artist).length, 0,
+     "a real artist page removes the finding entirely");
+
+  // No artist page corroborates the play-count reading.
+  const denied = d8VerifyJointCredits(raw, () => false).find((i) => i.verify_artist);
+  ok(denied && denied.confidence > pending.confidence,
+     `no artist page raises confidence  (${pending.confidence} -> ${denied?.confidence})`);
+  eq(denied?.class, "review", "  but it stays a review, since a duo can be obscure");
+  ok(denied?.confidence <= 0.75, "  and is capped, never becoming an error");
+  ok(/No release database lists/.test(denied?.suggest || ""),
+     "  with the extra evidence stated in the suggestion");
+
+  /*
+   * The third state. An absent answer is NOT absence of an artist. This exact
+   * conflation has been the root cause four separate times in this codebase.
+   */
+  const unknown = d8VerifyJointCredits(raw, () => null).find((i) => i.verify_artist);
+  eq(unknown?.confidence, pending.confidence,
+     "an unknown answer leaves confidence untouched");
+  ok(!unknown?.evidence, "  and adds no evidence claim");
+  eq(d8VerifyJointCredits(raw, () => undefined).find((i) => i.verify_artist)?.confidence,
+     pending.confidence, "  same for undefined, e.g. a failed lookup");
+  eq(d8VerifyJointCredits(raw, null).length, raw.length,
+     "  and with no lookup function at all, nothing changes");
+
+  // Findings without verify_artist pass through untouched.
+  const feat = d8FeatureCredits([...P("Drake feat. Future", "X", "t", 11),
+                                 ...P("Drake", "Y", "s", 29)]);
+  eq(d8VerifyJointCredits(feat, () => true).length, feat.length,
+     "an unambiguous feature credit is not affected by artist verification");
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

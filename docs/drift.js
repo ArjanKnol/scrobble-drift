@@ -1635,6 +1635,16 @@ export function d8FeatureCredits(rest) {
     const strong = ARTIST_FEAT_STRONG.test(artist);
     const weak = ARTIST_FEAT_WEAK.test(artist);
 
+    /*
+     * The MBID gate first, for EVERY shape of credit.
+     *
+     * It was below the joint-credit branch, so a joint name with its own
+     * MusicBrainz artist ID never got the benefit of it. That is the wrong way
+     * round: an ID is the strongest evidence available that a name is a real act,
+     * and joint names are exactly where that question is hardest.
+     */
+    if (artistIds.get(norm(artist))?.size) continue;
+
     /* ---- joint credits: both halves standing alone is the tell ---------- */
     if (!strong && !weak && ARTIST_JOIN.test(artist)) {
       const parts = artist.split(ARTIST_JOIN).map((x) => x.trim()).filter(Boolean);
@@ -1672,20 +1682,21 @@ export function d8FeatureCredits(rest) {
           { artist: a, plays: aPlays, looks_like: "also solo" },
           { artist: b, plays: bPlays, looks_like: "also solo" },
         ],
+        /*
+         * Settleable by asking whether the joint name is a real artist.
+         *
+         * "Tobi & Manny" has a Spotify artist page and Tobi also releases solo, so
+         * the library signals alone read as a collaboration when it is actually a
+         * duo. No amount of play counting fixes that; only asking does.
+         * d8VerifyJointCredits drops the finding when the name turns out to be a
+         * real act, and the resolve phase supplies the lookup.
+         */
+        verify_artist: artist,
       });
       continue;
     }
 
     if (!strong && !weak) continue;
-
-    /*
-     * A name with its own MusicBrainz artist ID is a real artist. Full stop.
-     *
-     * This is the check that would have kept "Macklemore & Ryan Lewis" quiet, and
-     * it settles every similar case for free, because the ID is already on the
-     * scrobble. No pattern is allowed to overrule it.
-     */
-    if (artistIds.get(norm(artist))?.size) continue;
 
     const head = artist.split(ARTIST_FEAT)[0].trim();
     if (!primaries.has(norm(head)) || norm(head) === norm(artist)) continue;
@@ -1717,6 +1728,50 @@ export function d8FeatureCredits(rest) {
     });
   }
   return issues.sort((a, b) => b.plays_affected - a.plays_affected);
+}
+
+/**
+ * Settle joint-credit findings by asking whether the name is a real artist.
+ *
+ * The library alone cannot decide this. "Tobi & Manny" has a Spotify artist page
+ * and BOTH members release solo, so every signal available from play counts says
+ * "collaboration" while the truth is "duo". "Future & Young Thug" looks identical
+ * and is a collaboration. The only difference is whether the joint name exists as
+ * an act, which is a question, not an inference.
+ *
+ * `exists(artist)` returns true, false, or null when nothing is known. Absence of
+ * an answer is NOT treated as absence of an artist: an unknown leaves the finding
+ * exactly as it was rather than promoting it, which is the mistake this codebase
+ * has made four separate times.
+ */
+export function d8VerifyJointCredits(issues, exists) {
+  const out = [];
+  for (const i of issues || []) {
+    if (!i?.verify_artist) { out.push(i); continue; }
+
+    const answer = exists?.(i.verify_artist);
+
+    // A real artist page settles it. Drop the finding entirely rather than
+    // demoting it: there is nothing here for anyone to act on.
+    if (answer === true) continue;
+
+    if (answer === false) {
+      // Nobody has this name as an artist, which corroborates the play-count
+      // reading. Still a review, because a duo can be too obscure to be listed.
+      out.push({
+        ...i,
+        confidence: Math.min(0.75, (i.confidence || 0.5) + 0.15),
+        evidence: "no artist page under this name",
+        suggest: i.suggest +
+          ` No release database lists '${i.verify_artist}' as an artist either, ` +
+          `which supports reading it as a collaboration rather than a name.`,
+      });
+      continue;
+    }
+
+    out.push(i);                        // unknown: unchanged, and said so
+  }
+  return out;
 }
 
 /* ------------------------------------ D1, D5, D6, D7, D11, D12 */
