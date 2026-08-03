@@ -203,6 +203,51 @@ const code = html
      "Stop must not have to wait out a 4-second sleep.");
 }
 
+/* ---- 8. deep pages Last.fm will not serve ------------------------------- */
+{
+  /*
+   * A 140,000-scrobble history returned HTTP 500 twice at page 640 and page 644.
+   * The same place both times, so a specific unservable page rather than
+   * turbulence. Retrying cannot help, and neither can keeping partial batches:
+   * when the broken page is the FIRST of a batch there is nothing to keep.
+   *
+   * `user.getRecentTracks` takes `to`, an upper timestamp bound, so the remaining
+   * history can be fetched through a shallow window that never reaches the deep
+   * page.
+   */
+  ok("the client can window by timestamp",
+     /qs\.set\("to", String\(toAnchor\)\)/.test(code),
+     "Without `to` there is no way past a page Last.fm refuses to serve.");
+  ok("it tracks the oldest scrobble seen, which is the next anchor",
+     /oldestUts === null \|\| sc\.uts < oldestUts/.test(code));
+  ok("a 5xx re-anchors instead of ending the scan",
+     /res\.status >= 500 && oldestUts !== null/.test(code) &&
+     /toAnchor = oldestUts - 1/.test(code));
+
+  // The two guards that stop this becoming an infinite loop.
+  ok("re-anchoring is capped",
+     /reAnchors < MAX_REANCHORS/.test(code),
+     "A permanently broken window would otherwise retry forever.");
+  ok("and requires the anchor to actually move",
+     /oldestUts !== lastAnchorUts/.test(code),
+     "Re-anchoring to the same timestamp makes no progress, so it must not count.");
+
+  // The target must be captured once. Inside a window Last.fm reports the count
+  // WITHIN that window, so re-reading it mid-scan shrinks the denominator and the
+  // progress bar jumps to 100%.
+  ok("the scrobble total is captured from the first response only",
+     /totalScrobbles \?\?= data\.total_scrobbles/.test(code),
+     "Otherwise a windowed response redefines the target mid-scan.");
+
+  // Resume has to remember the window or it walks straight back into the bad page.
+  ok("the checkpoint stores the date window",
+     /to: toAnchor/.test(code) && /toAnchor = resumeFrom\.to \|\| null/.test(code),
+     "A resumed scan would otherwise restart into the page that broke it.");
+
+  ok("and the summary says pages were refused rather than implying a clean run",
+     /reanchors/.test(code));
+}
+
 console.log(`\n  ${pass} passed, ${fails.length} failed`);
 if (fails.length) {
   console.log("\n  FAILED");

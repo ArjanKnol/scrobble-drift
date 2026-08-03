@@ -617,5 +617,24 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
      "and a scan that hit turbulence says so rather than reporting a clean run");
 }
 
+/* ---- the `to` window on /api/scrobbles ---------------------------------- */
+{
+  const src = await readFile(
+    new URL("../worker/src/index.js", import.meta.url), "utf8");
+  const at = src.indexOf("async function scrobbles(");
+  const body = src.slice(at, src.indexOf("\n}", at));
+
+  ok(/if \(to\) params\.to = to;/.test(body),
+     "the timestamp window is forwarded to Last.fm when supplied");
+  ok(/\^\\d\{1,11\}\$/.test(body),
+     "and validated as digits only, so nothing arbitrary reaches the query string");
+  ok(/: null;/.test(body.slice(body.indexOf("const to ="))),
+     "an invalid value becomes null rather than being passed through");
+
+  // It must stay optional: a normal scan sends no `to` at all.
+  ok(/params\.to = to;/.test(body) && !/params\.to = to \|\|/.test(body),
+     "no `to` means an unwindowed query, which is the normal path");
+}
+
 console.log(`\n${pass} passed, ${fail} failed (including MusicBrainz cache block)\n`);
 process.exit(fail ? 1 : 0);

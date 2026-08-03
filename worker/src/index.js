@@ -58,7 +58,7 @@
  *
  * Bump this in the same commit as any Worker change. /api/health reports it.
  */
-const BUILD = "2026-07-31-11-burst-limit-15-resume-fix";
+const BUILD = "2026-07-31-12-timestamp-reanchor";
 
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";
@@ -643,6 +643,9 @@ async function scrobbles(url, request, env, cors) {
   }
 
   const from = Math.max(1, Number(url.searchParams.get("from") || 1));
+  // Digits only, so nothing arbitrary reaches the upstream query string.
+  const to = /^\d{1,11}$/.test(url.searchParams.get("to") || "")
+    ? url.searchParams.get("to") : null;
   const count = Math.min(MAX_BATCH,
                          Math.max(1, Number(url.searchParams.get("count") || 5)));
 
@@ -662,9 +665,25 @@ async function scrobbles(url, request, env, cors) {
 
     let data;
     try {
-      data = await callLastfm(
-        { method: "user.getRecentTracks", user, limit: "200", page: String(page) },
-        key);
+      /*
+       * `to` windows the query by timestamp, which is the only way past a page
+       * Last.fm refuses to serve.
+       *
+       * Deep pagination is not reliable: a 140,000-scrobble history 500ed twice at
+       * almost exactly the same place, page 640 and page 644, so it is a specific
+       * page rather than bad luck. Retrying cannot help and neither can returning
+       * a partial batch, because when the FIRST page of a batch is the broken one
+       * there is nothing collected to hand back.
+       *
+       * With `to` set to just before the oldest scrobble already fetched, the
+       * client asks for page 1 of a smaller window instead of page 644 of
+       * everything, and never goes deep enough to hit the problem.
+       */
+      const params = {
+        method: "user.getRecentTracks", user, limit: "200", page: String(page),
+      };
+      if (to) params.to = to;
+      data = await callLastfm(params, key);
     } catch (err) {
       if (err instanceof Retryable) {
         // Return what we already have so the client can keep partial results
