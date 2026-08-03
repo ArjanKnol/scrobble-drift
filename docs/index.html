@@ -661,6 +661,11 @@ function scanSummary() {
     warn.push(`<strong>You stopped this scan.</strong> The results below are
                partial. Running it again resumes rather than starting over.`);
   }
+  if (s.reanchors) {
+    warn.push(`Last.fm refused to serve ${N(s.reanchors)} page${
+      s.reanchors === 1 ? "" : "s"} of your history, which happens on very deep
+      pagination. The rest was fetched by date instead, so nothing was skipped.`);
+  }
   if (s.pages_retried) {
     warn.push(`Last.fm failed on ${N(s.pages_retried)} page${
       s.pages_retried === 1 ? "" : "s"} and the scan carried on from where each
@@ -904,6 +909,9 @@ async function fetchAll(user, cap, apiKey) {
     if (saved?.length) {
       all = saved;
       from = resumeFrom.nextPage || 1;
+      // Restore the date window too. Without this a resumed scan goes straight
+      // back to the deep page that broke it.
+      toAnchor = resumeFrom.to || null;
       if (stats) stats.resumed = true;
       $("status").textContent =
         `Resuming: ${N(all.length)} scrobbles already stored, continuing from ` +
@@ -930,6 +938,26 @@ async function fetchAll(user, cap, apiKey) {
    */
   const INGEST_MIN_MS = 4000;
   let lastRequestAt = 0;
+
+  /*
+   * Timestamp re-anchoring, for pages Last.fm simply will not serve.
+   *
+   * A 140,000-scrobble history failed twice at page 640 and page 644 with HTTP
+   * 500. Same place both times, so it is a specific page and not turbulence.
+   * Retrying cannot fix it and neither can keeping partial batches, because when
+   * the broken page is the FIRST of a batch there is nothing to keep.
+   *
+   * `user.getRecentTracks` accepts `to`, an upper timestamp bound. Setting it to
+   * just before the oldest scrobble already fetched and restarting at page 1 asks
+   * for the same remaining history through a shallow window, so the unservable
+   * deep page is never requested at all.
+   *
+   * Capped, and only accepted when the oldest timestamp actually MOVES. Otherwise
+   * a window that keeps failing would re-anchor to the same place forever and the
+   * scan would spin instead of failing honestly.
+   */
+  const MAX_REANCHORS = 25;
+  let toAnchor = null, oldestUts = null, reAnchors = 0, lastAnchorUts = null;
 
   /*
    * Baseline for the time estimate.
@@ -960,6 +988,7 @@ async function fetchAll(user, cap, apiKey) {
     const qs = new URLSearchParams({
       user, from: String(from), count: String(PAGES_PER_REQUEST),
     });
+    if (toAnchor) qs.set("to", String(toAnchor));
     if (apiKey) qs.set("key", apiKey);
 
     let res;
@@ -1023,6 +1052,27 @@ async function fetchAll(user, cap, apiKey) {
        * `error` string, so every possible upstream problem rendered as the two
        * words "upstream failure" with nothing to act on.
        */
+      /*
+       * Before giving up on a 5xx, try the same history through a date window.
+       *
+       * This is the deep-page case: page 640-odd of a large library returns 500
+       * however many times it is asked. Re-anchoring by timestamp gets the rest of
+       * the history without ever requesting that page. Requiring the anchor to
+       * move guarantees forward progress, so this cannot become a spin.
+       */
+      if (res.status >= 500 && oldestUts !== null &&
+          reAnchors < MAX_REANCHORS && oldestUts !== lastAnchorUts) {
+        reAnchors++;
+        lastAnchorUts = oldestUts;
+        toAnchor = oldestUts - 1;
+        from = 1;
+        attempt = 0;
+        if (stats) stats.reanchors = reAnchors;
+        await waitVisibly(3,
+          `Last.fm will not serve page ${N(from)}. Fetching the rest by date instead.`);
+        continue;
+      }
+
       throw failure(
         body.error === "upstream failure"
           ? "Last.fm or the API proxy did not answer."
@@ -1034,9 +1084,16 @@ async function fetchAll(user, cap, apiKey) {
 
     attempt = 0;                       // a clean response resets the budget
     const data = await res.json();
+    // `??=`: both are captured from the FIRST response only. Once `to` is set,
+    // Last.fm reports the count WITHIN the window, so re-reading these would
+    // shrink the target mid-scan and the progress bar would jump to 100%.
     totalPages ??= data.total_pages;
     totalScrobbles ??= data.total_scrobbles;
     all.push(...data.scrobbles);
+
+    for (const sc of data.scrobbles) {
+      if (sc.uts && (oldestUts === null || sc.uts < oldestUts)) oldestUts = sc.uts;
+    }
 
     const target = cap ? Math.min(cap, totalScrobbles) : totalScrobbles;
     const pct = Math.min(100, (all.length / Math.max(target, 1)) * 100);
@@ -1072,7 +1129,8 @@ async function fetchAll(user, cap, apiKey) {
     if (sinceSave >= 20000) {
       sinceSave = 0;
       await store.saveScrobbles(user, all);
-      await store.saveState({ user, cap, nextPage: data.next, total: all.length });
+      await store.saveState({ user, cap, nextPage: data.next, total: all.length,
+                              to: toAnchor });
     }
 
     // The Worker cuts a batch short rather than failing it when a page errors.
@@ -1090,7 +1148,8 @@ async function fetchAll(user, cap, apiKey) {
   // prompt does not offer to continue something that already completed.
   await store.saveScrobbles(user, all);
   if (abort) {
-    await store.saveState({ user, cap, nextPage: from, total: all.length });
+    await store.saveState({ user, cap, nextPage: from, total: all.length,
+                            to: toAnchor });
     $("status").textContent =
       `Stopped. ${N(all.length)} scrobbles kept on this device, analysing them ` +
       `now. You can resume later.`;
