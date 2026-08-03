@@ -248,6 +248,47 @@ const code = html
      /reanchors/.test(code));
 }
 
+/* ---- 9. every imported name actually exists ---------------------------- */
+{
+  /*
+   * `node --check` parses; it does not resolve. So adding a call to
+   * `d8VerifyJointCredits` while failing to add it to the import list produced a
+   * file that checked clean and would have thrown ReferenceError on the first real
+   * scan. The import statement is multi-line, which is exactly why the edit that
+   * was supposed to add it silently matched nothing.
+   *
+   * Cheap to assert, and it covers every module the page pulls from.
+   */
+  const mods = {
+    "./drift.js": await import("../docs/drift.js"),
+    "./spotify.js": await import("../docs/spotify.js"),
+    "./store.js": await import("../docs/store.js"),
+    "./config.js": await import("../docs/config.js"),
+  };
+
+  let checked = 0;
+  for (const [spec, mod] of Object.entries(mods)) {
+    // Non-greedy, and anchored on this specific specifier, so one import block
+    // cannot swallow the next.
+    const re = new RegExp(`import \\{([^}]*?)\\} from "${spec.replace(".", "\\.")}"`);
+    const m = html.match(re);
+    ok(Boolean(m), `the import from ${spec} is found`);
+    if (!m) continue;
+
+    const names = m[1].split(",").map((x) => x.trim()).filter(Boolean)
+      .map((x) => x.split(/\s+as\s+/)[0].trim());
+    for (const n of names) {
+      checked++;
+      ok(n in mod, `${spec} exports ${n}`);
+    }
+  }
+  ok(checked > 20, `checked ${checked} imported names`);
+
+  // And the namespace import, which the regex above cannot see.
+  ok(/import \* as store from "\.\/store\.js"/.test(html),
+     "store is imported as a namespace, so every store.X call resolves");
+}
+
 console.log(`\n  ${pass} passed, ${fails.length} failed`);
 if (fails.length) {
   console.log("\n  FAILED");

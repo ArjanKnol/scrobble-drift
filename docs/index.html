@@ -136,7 +136,7 @@
 import {
   analyse, partitionEra, resolutionPlan, d0Resolve, d14eReleasedSince,
   eraVerificationPlan, verifyEraNames, hygieneScore, chartImpact,
-  weakEraCandidates, officialKey, d5Resolve, byImportance,
+  weakEraCandidates, officialKey, d5Resolve, byImportance, d8VerifyJointCredits,
 } from "./drift.js";
 
 import { apiBase, isConfigured, activeLinks } from "./config.js";
@@ -1638,6 +1638,46 @@ async function resolvePhase(scrobbles, apiKey) {
   // the split resolver, so it costs no extra lookups.
   report.issues = report.issues.map((i) =>
     i.detector === "D5" ? d5Resolve(i, lookup) : i);
+
+  /*
+   * Settle joint artist credits by asking whether the name is a real act.
+   *
+   * "Tobi & Manny" and "Qlas & Blacka" are duos with their own artist pages, and
+   * in Tobi's case BOTH members release solo, so every signal available from play
+   * counts reads as a collaboration. "Future & Young Thug" looks identical as a
+   * string and genuinely is one. Nothing in the library distinguishes them; only
+   * asking does.
+   *
+   * One lookup per joint credit, of which a library has a handful, and the answers
+   * are cached on this device and shared in D1. `found === false` is cached too:
+   * unlike an era name, "no artist page under this name" is a real answer here.
+   */
+  const jointJobs = report.issues.filter((i) => i.verify_artist);
+  if (jointJobs.length && spotifyOn && !abort) {
+    const known = new Map();
+    for (const job of jointJobs) {
+      if (abort) break;
+      const name = job.verify_artist;
+      if (known.has(name)) continue;
+
+      let hit = await store.getLookup("spart", name, "*");
+      if (hit) cacheHits++;
+      else {
+        const r = await spPaced("/api/spotify/artist-albums?" +
+                                new URLSearchParams({ artist: name }));
+        // null is a failed call, not an answer. Left unknown so the finding is
+        // neither dropped nor promoted, which is the whole point of the third
+        // state in d8VerifyJointCredits.
+        if (r) {
+          hit = { found: Boolean(r.found) };
+          await store.putLookup("spart", name, "*", hit);
+        }
+      }
+      known.set(name, hit ? hit.found : null);
+    }
+    report.issues = d8VerifyJointCredits(report.issues,
+                                         (name) => known.get(name) ?? null);
+  }
 
   report.summary_by_detector = {};
   for (const i of report.issues) {
