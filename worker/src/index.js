@@ -58,7 +58,7 @@
  *
  * Bump this in the same commit as any Worker change. /api/health reports it.
  */
-const BUILD = "2026-08-06-14-no-cache-on-errors";
+const BUILD = "2026-08-06-15-honest-delay-wording";
 
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";
@@ -747,13 +747,20 @@ async function scrobbles(url, request, env, cors) {
                `https://www.last.fm/settings/privacy by turning OFF ` +
                `"Hide recent listening information". Nobody else can do it for ` +
                `them, and it is not something this tool can work around.`,
-          // Last.fm serves its own API responses from cache, so the change is not
-          // always visible immediately. Said explicitly, because otherwise the
-          // obvious conclusion after flipping the setting and seeing the same
-          // message is that it did not work.
-          delay: `Give it a few minutes afterwards. Last.fm caches API responses, ` +
-                 `so the change can take a little while to show up here even once ` +
-                 `it is saved.`,
+          /*
+           * Hedged, not explained.
+           *
+           * This used to assert "Last.fm caches API responses", which was never
+           * verified. The delay was almost entirely OURS: successful and failed
+           * responses alike were held at the Cloudflare edge for thirty minutes,
+           * so a fixed privacy setting kept reading as private. Errors are no
+           * longer cached, so the delay should now be brief or absent, but entries
+           * stored before that change still live out their old TTL.
+           *
+           * So the wording says what to DO rather than inventing a mechanism.
+           */
+          delay: `If you have just changed it, give it a few minutes and press ` +
+                 `Try again.`,
         }, 403, cors);
       }
       /*

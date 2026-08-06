@@ -661,9 +661,25 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
      "and names the exact setting and page, so it is actionable without guessing");
   ok(/Nobody else can do it for/.test(src),
      "it is explicit that only the account owner can change it");
-  ok(/caches API responses/.test(src),
-     "and warns that the fix is not visible immediately, so 'it did not work' is " +
-     "not the obvious conclusion after flipping the setting");
+  /*
+   * The wording tells the user what to DO and does not invent a mechanism.
+   *
+   * It used to assert "Last.fm caches API responses", which was never verified.
+   * The delay was almost entirely ours: every response, success or failure, was
+   * held at the edge for thirty minutes. Errors are no longer cached at all, so
+   * claiming an upstream cause would now be doubly wrong.
+   */
+  /*
+   * Checked against the MESSAGE, not the whole file. The first version of this
+   * scanned `src` for the old phrasing and failed on the comment that explains why
+   * the phrasing was dropped, which is the same trap as matching prose about a bug
+   * instead of the bug.
+   */
+  const delayMsg = src.match(/delay: (`[^`]*`(?:\s*\+\s*`[^`]*`)*)/)?.[1] || "";
+  ok(/give it a few minutes and press/i.test(delayMsg),
+     `the retry advice is concrete  (${delayMsg.slice(0, 60)}...)`);
+  ok(!/caches API responses/.test(delayMsg),
+     "and the message makes no unverified claim about Last.fm's own caching");
 
   /*
    * Errors must not be cached. `cacheTtl` applied to every status, so a 403 kept
