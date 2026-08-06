@@ -224,7 +224,16 @@ has since been released" scored nothing at all. That omission was silent, which
 is why `SCORED_DETECTORS` now exists and a test asserts that every detector
 `analyse()` can emit is scored.
 
-What it measures now: the number of distinct findings, weighted by severity
+The four areas are combined with a **weighted geometric mean**. Geometric, so one
+ruined area cannot be averaged away by three clean ones: three at 100 and one at
+10 scores 56, not 78. Weighted by **coverage**, so an area is worth what it
+touches, which is why a library that is 8% unreleased gives era consistency about
+3% of its score rather than a flat quarter, and one with no unreleased material at
+all does not score it and is told so. `weight_share` reports what each area was
+worth, because a weighted score that hides its weights is harder to trust than a
+crude one.
+
+Within each area: the number of distinct findings, weighted by severity
 (`error` 3, `split` 2) and by plays affected on a log scale,
 against the count of **album strings**, which is the unit that actually gets
 curated. Plays still matter, as a modifier rather than the denominator, so a
