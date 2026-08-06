@@ -587,7 +587,7 @@ $("f").onsubmit = async (e) => {
     $("prog").classList.add("hide");
     render();                         // re-render so the summary panel appears
   } catch (err) {
-    fail(err.message || String(err), err.detail || "");
+    fail(err.message || String(err), err.detail || "", err.hint);
   } finally {
     // Belt and braces: the assignment above covers the success path, this covers
     // every path out of the try, including a throw before it is reached.
@@ -716,8 +716,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * string cannot serve both without reading as either cryptic or alarming, so the
  * headline stays plain and the technical part goes underneath in dim text.
  */
-const failure = (msg, detail = "") =>
-  Object.assign(new Error(msg), { detail });
+const failure = (msg, detail = "", opts = {}) =>
+  Object.assign(new Error(msg), { detail, ...opts });
 
 /**
  * Say which step is running, and that there are two of them.
@@ -1011,6 +1011,40 @@ async function fetchAll(user, cap, apiKey) {
 
     if (res.status === 404) throw new Error("No such Last.fm user.");
 
+    /*
+     * A private listening history. Permanent, so never retried.
+     *
+     * Last.fm's "hide recent listening information" setting leaves the profile
+     * readable while refusing the scrobbles. Retrying cannot help, and the
+     * previous behaviour tried three times and then reported "Last.fm or the API
+     * proxy did not answer", which blames us for someone's privacy choice.
+     */
+    if (res.status === 403) {
+      const body = await res.json().catch(() => ({}));
+      throw failure(
+        "This listening history is private.",
+        [
+          body.message ||
+            "The account owner has hidden their recent listening on Last.fm.",
+          body.fix ||
+            'They can change it at last.fm/settings/privacy by turning OFF ' +
+            '"Hide recent listening information".',
+          body.delay ||
+            "Give it a few minutes afterwards: Last.fm caches API responses, so " +
+            "the change can take a little while to show up here.",
+        ].join(" "),
+        /*
+         * No generic hint here, and this is the point of the `hint` channel.
+         *
+         * The default advice is "scan fewer months, or use your own Last.fm API
+         * key". Neither helps a private profile: the setting is enforced on the
+         * TARGET account, not the caller, so every key gets the same 403, and a
+         * shallower scan reads the same forbidden endpoint. Offering a workaround
+         * that cannot work sends people off to generate an API key for nothing.
+         */
+        { hint: null });
+    }
+
     if (res.status === 429) {
       const body = await res.json().catch(() => ({}));
       const wait = Number(res.headers.get("Retry-After") || body.retry_after || 60);
@@ -1038,6 +1072,8 @@ async function fetchAll(user, cap, apiKey) {
        * collected, so each retry starts from the exact page that failed rather
        * than re-fetching the batch.
        */
+      // 403 and 404 are settled answers, not turbulence, and are handled above.
+      // Anything else 4xx gets a few tries in case it is a transient proxy blip.
       const maxTries = res.status >= 500 ? 6 : 3;
       if (++attempt <= maxTries) {
         await waitVisibly(6 * attempt, body.error || `Server error ${res.status}.`);
@@ -1707,7 +1743,7 @@ async function resolvePhase(scrobbles, apiKey) {
  * If there is nothing on screen yet, the error box IS the output. If there is,
  * the error goes above it as a banner and the findings stay put.
  */
-function fail(msg, detail = "") {
+function fail(msg, detail = "", hint = undefined) {
   $("prog").classList.add("hide");
 
   // Never stack error panels. A retry that fails again should replace the
@@ -1722,8 +1758,9 @@ function fail(msg, detail = "") {
       <p style="margin:13px 0 0;display:flex;gap:9px;align-items:center;
                 flex-wrap:wrap">
         <button class="retry ghost" type="button">Try again</button>
-        <span class="note" style="color:var(--dim);margin:0">Or scan fewer
-          months, or use your own Last.fm API key for unlimited scanning.</span>
+        ${hint === null ? "" : `<span class="note"
+          style="color:var(--dim);margin:0">${esc(hint ?? "Or scan fewer months, " +
+          "or use your own Last.fm API key for unlimited scanning.")}</span>`}
       </p>
     </div>`;
   if (report) $("out").insertAdjacentHTML("afterbegin", box);

@@ -636,5 +636,75 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
      "no `to` means an unwindowed query, which is the normal path");
 }
 
+/* ---- a private listening history is not a failure ----------------------- */
+{
+  /*
+   * Last.fm's "hide recent listening information" setting leaves `user.getInfo`
+   * answering normally while `user.getRecentTracks` returns 403. Verified against
+   * a real account: getInfo reported 266,817 plays, getRecentTracks refused.
+   *
+   * That reached the visitor as "Last.fm or the API proxy did not answer", which
+   * blames our proxy for someone else's privacy choice and invites three pointless
+   * retries of something that can never succeed.
+   */
+  const src = await readFile(
+    new URL("../worker/src/index.js", import.meta.url), "utf8");
+
+  ok(/e\.status = res\.status;/.test(src),
+     "the upstream HTTP status is attached, so a refusal is distinguishable");
+  ok(/err\.status === 403/.test(src),
+     "and a 403 is handled specifically rather than as a generic failure");
+  ok(/"private"/.test(src) && /hidden their listening history/.test(src),
+     "the response says the history is private and who can change it");
+  ok(/last\.fm\/settings\/privacy/.test(src) &&
+     /Hide recent listening information/.test(src),
+     "and names the exact setting and page, so it is actionable without guessing");
+  ok(/Nobody else can do it for/.test(src),
+     "it is explicit that only the account owner can change it");
+  ok(/caches API responses/.test(src),
+     "and warns that the fix is not visible immediately, so 'it did not work' is " +
+     "not the obvious conclusion after flipping the setting");
+
+  /*
+   * Errors must not be cached. `cacheTtl` applied to every status, so a 403 kept
+   * reporting "private" for thirty minutes after the owner un-hid their history,
+   * and a 500 turned a transient failure into a permanent one for the same window
+   * by serving the cached error back to every retry. That is the likeliest reason
+   * the deep-page failures looked so precisely reproducible.
+   */
+  ok(/cacheTtlByStatus/.test(src),
+     "caching is per status range, not blanket");
+  const cacheBlock = src.slice(src.indexOf("cacheTtlByStatus"),
+                               src.indexOf("cacheTtlByStatus") + 220);
+  ok(/"200-299": UPSTREAM_TTL/.test(cacheBlock), "  successes are still cached");
+  ok(/"400-499": 0/.test(cacheBlock), "  4xx is never cached");
+  ok(/"500-599": 0/.test(cacheBlock),
+     "  and neither is 5xx, so a retry gets a real attempt rather than the cached failure");
+  ok(!/cacheTtl: UPSTREAM_TTL/.test(src),
+     "  the blanket cacheTtl is gone");
+  ok(/\}, 403, cors\);/.test(src),
+     "and it is returned as 403, not flattened into a 502");
+
+  const html = await readFile(new URL("../docs/index.html", import.meta.url), "utf8");
+  ok(/res\.status === 403/.test(html),
+     "the client recognises it too");
+  ok(/This listening history is private\./.test(html),
+     "and leads with the plain fact rather than an API error");
+  /*
+   * Permanence matters: retrying a privacy setting is guaranteed to fail.
+   *
+   * Checked by ORDER rather than absence. A fixed-size window after the 403 branch
+   * runs into the generic retry path further down and finds its `continue`, which
+   * made the first version of this assertion fail on correct code. What matters is
+   * that the throw comes first.
+   */
+  const at = html.indexOf("res.status === 403");
+  const rest = html.slice(at);
+  const throwAt = rest.indexOf("throw failure(");
+  const contAt = rest.indexOf("continue;");
+  ok(throwAt > 0 && (contAt < 0 || throwAt < contAt),
+     "it throws immediately rather than retrying something that cannot succeed");
+}
+
 console.log(`\n${pass} passed, ${fail} failed (including MusicBrainz cache block)\n`);
 process.exit(fail ? 1 : 0);
