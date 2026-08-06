@@ -1878,7 +1878,15 @@ function render() {
            * as an HTML comment inside it, containing a backticked `width:0%`,
            * which terminated the template literal and broke the whole module.
            */
-          Object.entries(h.subscores).map(([k, v]) => `
+          Object.entries(h.subscores).map(([k, v]) => v === null ? `
+          <div style="margin-bottom:9px;opacity:.45">
+            <div class="row" style="border:0;padding:0">
+              <span>${esc(k.replace(/_/g, " "))}${
+                SUBSCORE_TIPS[k] ? tip(SUBSCORE_TIPS[k], "tip-l") : ""}</span>
+              <span class="v" style="font-size:12px">not applicable</span></div>
+            <div class="note" style="margin:2px 0 0;font-size:11.5px">
+              Nothing in your library falls under this, so it is not scored.</div>
+          </div>` : `
           <div style="margin-bottom:9px">
             <div class="row" style="border:0;padding:0">
               <span>${esc(k.replace(/_/g, " "))}${
