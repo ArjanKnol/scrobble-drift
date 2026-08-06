@@ -289,6 +289,32 @@ const code = html
      "store is imported as a namespace, so every store.X call resolves");
 }
 
+/* ---- 10. a private profile is offered no false workaround --------------- */
+{
+  /*
+   * The default hint under every error is "scan fewer months, or use your own
+   * Last.fm API key". For a private listening history neither works: the privacy
+   * setting is enforced on the TARGET account rather than the caller, so every key
+   * receives the same 403, and a shallower scan reads the same refused endpoint.
+   * Suggesting it sends people off to generate an API key for nothing.
+   */
+  ok("fail() takes a hint channel",
+     /function fail\(msg, detail = "", hint = undefined\)/.test(code));
+  ok("and null suppresses the generic advice entirely",
+     /hint === null \? "" :/.test(code),
+     "Not an empty string: the default must still apply when nothing is passed.");
+  ok("the default is still used when no hint is given",
+     /hint \?\? "Or scan fewer months/.test(code));
+
+  const at = code.indexOf("res.status === 403");
+  const block = code.slice(at, code.indexOf("}", code.indexOf("join(\" \")", at)) + 40);
+  ok("the private-profile error passes hint: null",
+     /hint: null/.test(block),
+     "Otherwise it advertises a workaround that cannot work.");
+  ok("and the error carries the hint through to fail()",
+     /fail\(err\.message \|\| String\(err\), err\.detail \|\| "", err\.hint\)/.test(code));
+}
+
 console.log(`\n  ${pass} passed, ${fails.length} failed`);
 if (fails.length) {
   console.log("\n  FAILED");

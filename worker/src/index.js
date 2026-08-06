@@ -58,7 +58,7 @@
  *
  * Bump this in the same commit as any Worker change. /api/health reports it.
  */
-const BUILD = "2026-07-31-12-timestamp-reanchor";
+const BUILD = "2026-08-06-14-no-cache-on-errors";
 
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";
@@ -557,9 +557,32 @@ async function callLastfm(params, apiKey) {
   });
   const res = await fetch(`${LASTFM}?${qs}`, {
     headers: { "User-Agent": "ScrobbleDrift/0.1 (+https://github.com/ArjanKnol/scrobble-drift)" },
-    // Long TTL is a rate-limiting measure as much as a speed one: in the viral
-    // case many people scan the same few usernames, and those cost nothing.
-    cf: { cacheTtl: UPSTREAM_TTL, cacheEverything: true },
+    /*
+     * Cache SUCCESSES only. `cacheTtl` applies to every status, which was wrong in
+     * two ways that both bite hard.
+     *
+     * A 403 means the account owner has hidden their listening history. Cached for
+     * thirty minutes, it kept being reported as private for half an hour after
+     * they un-hid it, and no amount of retrying would clear it.
+     *
+     * A 500 is worse. Last.fm returned one on a deep page under load, that failure
+     * was cached, and every subsequent retry got the cached 500 back instead of a
+     * fresh attempt. A transient error was thereby converted into a permanent one
+     * for thirty minutes, which is almost certainly why the deep-page failures
+     * looked so precisely reproducible at page 640.
+     *
+     * The long TTL is still a rate-limiting measure as much as a speed one: in the
+     * viral case many people scan the same few usernames and those cost nothing.
+     * That argument only ever applied to answers.
+     */
+    cf: {
+      cacheTtlByStatus: {
+        "200-299": UPSTREAM_TTL,
+        "400-499": 0,
+        "500-599": 0,
+      },
+      cacheEverything: true,
+    },
   });
 
   // Last.fm pushing back is the strongest possible signal. Trip the breaker
@@ -569,7 +592,14 @@ async function callLastfm(params, apiKey) {
     throw new Retryable("Last.fm is rate limiting us. Pausing briefly.",
                         BREAKER_SECONDS);
   }
-  if (!res.ok) throw new Error(`last.fm http ${res.status}`);
+  if (!res.ok) {
+    // The status is attached so callers can distinguish a permanent refusal from
+    // a transient failure. Without it every non-200 arrived as an identical
+    // string and had to be reported as "something went wrong".
+    const e = new Error(`last.fm http ${res.status}`);
+    e.status = res.status;
+    throw e;
+  }
 
   const data = await res.json();
   if (data.error) {
@@ -692,6 +722,40 @@ async function scrobbles(url, request, env, cors) {
         throw err;
       }
       if (err.lastfm === 6) return json({ error: "no such user" }, 404, cors);
+
+      /*
+       * 403 on getRecentTracks means the listening history is PRIVATE.
+       *
+       * Last.fm has a "hide recent listening information" privacy setting. With it
+       * on, `user.getInfo` still returns the profile happily while
+       * `user.getRecentTracks` returns 403. Verified against a real account:
+       * getInfo reported 266,817 plays, getRecentTracks refused.
+       *
+       * That is a deliberate choice by the account owner, not a fault, and it
+       * reached the visitor as "Last.fm or the API proxy did not answer", which
+       * blames our proxy for someone's privacy setting and invites a pointless
+       * retry. It cannot be fixed by trying again, so it is reported as what it is
+       * and given its own status.
+       */
+      if (err.status === 403) {
+        return json({
+          error: "private",
+          user,
+          message: `${user} has hidden their listening history on Last.fm, so ` +
+                   `their scrobbles cannot be read.`,
+          fix: `The account owner can change this at ` +
+               `https://www.last.fm/settings/privacy by turning OFF ` +
+               `"Hide recent listening information". Nobody else can do it for ` +
+               `them, and it is not something this tool can work around.`,
+          // Last.fm serves its own API responses from cache, so the change is not
+          // always visible immediately. Said explicitly, because otherwise the
+          // obvious conclusion after flipping the setting and seeing the same
+          // message is that it did not work.
+          delay: `Give it a few minutes afterwards. Last.fm caches API responses, ` +
+                 `so the change can take a little while to show up here even once ` +
+                 `it is saved.`,
+        }, 403, cors);
+      }
       /*
        * ANY upstream failure keeps what this batch already collected.
        *
