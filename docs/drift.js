@@ -2846,7 +2846,26 @@ const CLASS_WEIGHT = { error: 3, split: 2, review: 0, unfixable: 0 };
  * actionable finding caps the score at 99, so the headline can never contradict
  * the list underneath it.
  */
-export function hygieneScore(totalPlays, issues, albumStrings = 0) {
+/*
+ * A bucket that measures nothing must not be scored.
+ *
+ * The score is a geometric mean over four areas, and a library with no unreleased
+ * material scores a guaranteed 100 for era consistency because there is nothing
+ * there to be inconsistent about. That free 100 pulls the overall score UP, so two
+ * libraries in identical shape score differently purely on whether one of them
+ * happens to collect leaks. It also puts a bar on screen measuring a category the
+ * owner does not participate in.
+ *
+ * Reported by someone whose scan showed era consistency at 100 with no unreleased
+ * scrobbles at all: "the unreleased rating is not relevant for him".
+ *
+ * `applies` names the buckets that have something to measure. An inapplicable one
+ * scores `null`, is left out of the mean, and the UI renders it as not applicable
+ * rather than as a perfect result. Nothing is lost: every detector still runs and
+ * every finding is still reported, this only stops the SCORE claiming credit for
+ * an empty category.
+ */
+export function hygieneScore(totalPlays, issues, albumStrings = 0, applies = null) {
   const subscores = {};
   const counts = {};
   const plays = {};
@@ -2867,6 +2886,14 @@ export function hygieneScore(totalPlays, issues, albumStrings = 0) {
   let actionable = 0;
 
   for (const [bucket, dets] of Object.entries(BUCKETS)) {
+    // Absent `applies`, every bucket is scored, which keeps older callers and the
+    // tests that omit the argument behaving exactly as before.
+    if (applies && applies[bucket] === false) {
+      subscores[bucket] = null;
+      counts[bucket] = 0;
+      plays[bucket] = 0;
+      continue;
+    }
     const mine = issues.filter((i) => dets.includes(i.detector) &&
                                       i.class !== "unfixable");
     counts[bucket] = mine.length;
@@ -2947,9 +2974,13 @@ export function hygieneScore(totalPlays, issues, albumStrings = 0) {
    * It stays 100 when every bucket is 100, so the "nothing left to fix" invariant
    * below is unaffected.
    */
-  const vals = Object.values(subscores);
-  let score = Math.round(
-    Math.exp(vals.reduce((a, b) => a + Math.log(b), 0) / vals.length));
+  // Only applicable buckets count toward the mean. A library where nothing
+  // applies at all scores 100, which is the same answer as a clean one and the
+  // only sensible reading of "there was nothing to check".
+  const vals = Object.values(subscores).filter((v) => v !== null);
+  let score = vals.length
+    ? Math.round(Math.exp(vals.reduce((a, b) => a + Math.log(b), 0) / vals.length))
+    : 100;
 
   // The invariant. 100 means nothing left to fix, full stop.
   if (actionable > 0) score = Math.min(score, 99);
@@ -3322,8 +3353,21 @@ export function analyse(scrobbles, { official, topAlbums } = {}) {
     },
     // Album strings, not plays, are the scoring denominator: they are the unit
     // that actually gets curated. See hygieneScore for why.
-    hygiene: hygieneScore(total, issues, new Set(
-      scrobbles.filter((s) => s.album).map((s) => `${s.artist}␟${s.album}`)).size),
+    /*
+     * Album strings, not plays, are the scoring denominator: they are the unit
+     * that actually gets curated. See hygieneScore for why.
+     *
+     * `era_consistency` applies only to libraries that actually hold unreleased
+     * material. The other three always apply: any library can have split albums,
+     * artist variants or duplicates, so there is always something to measure.
+     */
+    hygiene: hygieneScore(
+      total,
+      issues,
+      new Set(scrobbles.filter((s) => s.album)
+        .map((s) => `${s.artist}␟${s.album}`)).size,
+      { era_consistency: era.length > 0 },
+    ),
     era: d14Overview(era, total),
     impact: chartImpact(rest, splits),
     summary_by_detector: byDetector,

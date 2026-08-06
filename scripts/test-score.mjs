@@ -303,6 +303,72 @@ console.log("\nbounds and degenerate input");
      `a D16 finding costs nothing (${asError.score}/${asError.actionable})`);
 }
 
+/* ---------------------------------------------------------------------------
+ * A bucket with nothing to measure is not scored.
+ *
+ * The overall score is a geometric mean over four areas. A library with no
+ * unreleased material scores a guaranteed 100 for era consistency, because there
+ * is nothing there to be inconsistent about, and that free 100 pulls the overall
+ * score UP. Two libraries in identical shape then score differently purely on
+ * whether one of them collects leaks.
+ *
+ * Reported by someone whose scan showed era consistency at 100 with no unreleased
+ * scrobbles at all. Nothing is lost by excluding it: every detector still runs and
+ * every finding is still reported. Only the SCORE stops taking credit for an empty
+ * category.
+ * ------------------------------------------------------------------------- */
+{
+  const many = (d, n) => Array.from({ length: n },
+    () => issue(d, "split", 8));
+  const mixed = [...many("D4", 25), ...many("D1", 8)];
+
+  const scored = hygieneScore(20000, mixed, 2000);
+  const na = hygieneScore(20000, mixed, 2000, { era_consistency: false });
+
+  eq(scored.subscores.era_consistency, 100,
+     "with era scored, an empty category is a free 100");
+  eq(na.subscores.era_consistency, null,
+     "marked inapplicable it is null, which the UI renders as 'not applicable'");
+  ok(na.score < scored.score,
+     `and the free 100 no longer inflates the total (${scored.score} -> ${na.score})`);
+
+  // The distortion grows with how messy the library is, which is exactly when the
+  // score most needs to be honest.
+  const messy = [...many("D4", 150), ...many("D1", 60)];
+  const gap = hygieneScore(20000, messy, 2000).score -
+              hygieneScore(20000, messy, 2000, { era_consistency: false }).score;
+  ok(gap >= 5, `a messy library was gaining ${gap} points from the empty bucket`);
+
+  // Every other bucket is untouched by the exclusion.
+  for (const k of ["album_integrity", "artist_integrity", "duplicate_rate"]) {
+    eq(na.subscores[k], scored.subscores[k], `${k} is unaffected`);
+  }
+
+  // Omitting the argument keeps the old behaviour, so existing callers and the
+  // tests above are unchanged.
+  eq(hygieneScore(20000, mixed, 2000).subscores.era_consistency, 100,
+     "with no applicability map, every bucket is scored as before");
+
+  // A library where nothing applies at all is 100, not NaN: "nothing to check"
+  // and "nothing wrong" are the same answer.
+  const none = hygieneScore(0, [], 0, {
+    era_consistency: false, album_integrity: false,
+    artist_integrity: false, duplicate_rate: false,
+  });
+  eq(none.score, 100, "a library with no applicable buckets scores 100");
+  ok(Number.isFinite(none.score), "  and is a real number, not NaN");
+
+  // End to end: analyse() must mark it N/A when the library holds no era material.
+  const plain = [];
+  let uts = 16e8;
+  for (let i = 0; i < 40; i++) {
+    plain.push({ uts: uts += 300, artist: "A", album: "Record", track: `T${i}` });
+  }
+  const rep = analyse(plain);
+  eq(rep.hygiene.subscores.era_consistency, null,
+     "analyse marks era consistency N/A for a library with no unreleased material");
+}
+
 /* ------------------------------------------------------------------------- */
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
