@@ -2859,13 +2859,26 @@ const CLASS_WEIGHT = { error: 3, split: 2, review: 0, unfixable: 0 };
  * Reported by someone whose scan showed era consistency at 100 with no unreleased
  * scrobbles at all: "the unreleased rating is not relevant for him".
  *
- * `applies` names the buckets that have something to measure. An inapplicable one
- * scores `null`, is left out of the mean, and the UI renders it as not applicable
- * rather than as a perfect result. Nothing is lost: every detector still runs and
- * every finding is still reported, this only stops the SCORE claiming credit for
- * an empty category.
+ * `weights` says how much of the library each area actually covers, so an area
+ * counts in proportion to how much of your listening it touches. Era consistency
+ * over 8% of a library should not carry the same weight as album integrity over
+ * all of it, and under an unweighted mean it carried an equal quarter.
+ *
+ * A weight of zero means the area is inapplicable: it scores `null`, drops out of
+ * the mean entirely, and the UI shows it as not applicable rather than as a
+ * perfect result. Booleans are accepted as shorthand for 1 and 0.
+ *
+ * Nothing is lost by any of this. Every detector still runs and every finding is
+ * still reported at full prominence; only the SCORE stops treating a sliver of a
+ * library as a quarter of its health.
  */
-export function hygieneScore(totalPlays, issues, albumStrings = 0, applies = null) {
+const bucketWeight = (v) => {
+  if (v === true || v === undefined || v === null) return 1;
+  if (v === false) return 0;
+  return Number.isFinite(v) && v > 0 ? v : 0;
+};
+
+export function hygieneScore(totalPlays, issues, albumStrings = 0, weights = null) {
   const subscores = {};
   const counts = {};
   const plays = {};
@@ -2886,9 +2899,10 @@ export function hygieneScore(totalPlays, issues, albumStrings = 0, applies = nul
   let actionable = 0;
 
   for (const [bucket, dets] of Object.entries(BUCKETS)) {
-    // Absent `applies`, every bucket is scored, which keeps older callers and the
-    // tests that omit the argument behaving exactly as before.
-    if (applies && applies[bucket] === false) {
+    // Absent `weights`, every bucket carries weight 1, which keeps older callers
+    // and the tests that omit the argument behaving exactly as before.
+    const w = weights ? bucketWeight(weights[bucket]) : 1;
+    if (w === 0) {
       subscores[bucket] = null;
       counts[bucket] = 0;
       plays[bucket] = 0;
@@ -2974,12 +2988,24 @@ export function hygieneScore(totalPlays, issues, albumStrings = 0, applies = nul
    * It stays 100 when every bucket is 100, so the "nothing left to fix" invariant
    * below is unaffected.
    */
-  // Only applicable buckets count toward the mean. A library where nothing
-  // applies at all scores 100, which is the same answer as a clean one and the
-  // only sensible reading of "there was nothing to check".
-  const vals = Object.values(subscores).filter((v) => v !== null);
-  let score = vals.length
-    ? Math.round(Math.exp(vals.reduce((a, b) => a + Math.log(b), 0) / vals.length))
+  /*
+   * Weighted geometric mean: exp( sum(w * ln s) / sum(w) ).
+   *
+   * Still geometric, so one catastrophic area cannot be averaged away by three
+   * clean ones. Now weighted, so an area is worth what it covers: a library that
+   * is 8% unreleased gives era consistency roughly 3% of the score rather than
+   * 25%, while one that is 60% unreleased gives it about a fifth.
+   *
+   * A library where nothing applies scores 100, which is the same answer as a
+   * clean one and the only sensible reading of "there was nothing to check".
+   */
+  const scored = Object.entries(subscores)
+    .filter(([, v]) => v !== null)
+    .map(([k, v]) => [v, weights ? bucketWeight(weights[k]) : 1]);
+  const wsum = scored.reduce((a, [, w]) => a + w, 0);
+  let score = wsum > 0
+    ? Math.round(Math.exp(
+        scored.reduce((a, [v, w]) => a + w * Math.log(v), 0) / wsum))
     : 100;
 
   // The invariant. 100 means nothing left to fix, full stop.
@@ -2993,6 +3019,20 @@ export function hygieneScore(totalPlays, issues, albumStrings = 0, applies = nul
     actionable,
     total_plays: totalPlays,
     album_strings: albumStrings || null,
+    /*
+     * What each area was actually worth, as a percentage of the score.
+     *
+     * Reported so the UI can say "counts for 3% of your score" instead of leaving
+     * the reader to assume every bar is worth a quarter. A weighted score that
+     * hides its weights is harder to trust than an unweighted one.
+     */
+    weight_share: Object.fromEntries(
+      Object.keys(subscores).map((k) => {
+        const w = subscores[k] === null
+          ? 0 : (weights ? bucketWeight(weights[k]) : 1);
+        return [k, wsum > 0 ? Math.round((100 * w) / wsum) : 0];
+      }),
+    ),
   };
 }
 
@@ -3361,12 +3401,31 @@ export function analyse(scrobbles, { official, topAlbums } = {}) {
      * material. The other three always apply: any library can have split albums,
      * artist variants or duplicates, so there is always something to measure.
      */
+    /*
+     * Weights are COVERAGE: the share of listening each area actually touches.
+     *
+     *   era_consistency   plays of unreleased material / all plays
+     *   album_integrity   plays that carry an album / all plays
+     *   artist_integrity  1, since every scrobble has an artist
+     *   duplicate_rate    1, since any scrobble can be a duplicate
+     *
+     * So a library that is 8% unreleased gives era consistency about 3% of the
+     * score rather than a flat quarter, and one that is 60% unreleased gives it
+     * roughly a fifth. Zero unreleased plays means zero weight, which is the
+     * inapplicable case and drops the area from the score entirely.
+     */
     hygiene: hygieneScore(
       total,
       issues,
       new Set(scrobbles.filter((s) => s.album)
         .map((s) => `${s.artist}␟${s.album}`)).size,
-      { era_consistency: era.length > 0 },
+      {
+        era_consistency: total ? era.length / total : 0,
+        album_integrity: total
+          ? scrobbles.filter((s) => s.album).length / total : 1,
+        artist_integrity: 1,
+        duplicate_rate: 1,
+      },
     ),
     era: d14Overview(era, total),
     impact: chartImpact(rest, splits),

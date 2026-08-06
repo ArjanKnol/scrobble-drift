@@ -1850,7 +1850,10 @@ function render() {
           style="font-size:18px;color:var(--dim)">/100</span></div>
         <div class="l" style="color:var(--dim);font-size:12px;margin-bottom:4px">
           hygiene score${tip(
-            "Four areas averaged, each scored on how many findings it has and " +
+            "Four areas combined, each weighted by how much of your library it " +
+            "covers, so an area you barely have counts for little and one that " +
+            "covers everything counts for a lot. Each is scored on how many " +
+            "findings it has and " +
             "how severe they are, measured against your number of album " +
             "strings rather than your play count. 100 is reserved for a library " +
             "with nothing left to fix, so any actionable finding caps it at 99." +
@@ -1898,6 +1901,20 @@ function render() {
                 }${v}</span></div>
             <div class="bar"><i style="width:${Math.max(v, 2)}%;
               background:${col(v)}"></i></div>
+            ${/*
+               * Say what this area was worth. Areas are weighted by how much of
+               * the library they cover, so the bars are NOT worth a quarter each,
+               * and leaving the reader to assume they are would make a more
+               * accurate score feel less trustworthy than a crude one.
+               *
+               * Only shown when it is not roughly an equal share, so a balanced
+               * library is not cluttered with four identical notes.
+               */
+              h.weight_share?.[k] !== undefined && h.weight_share[k] < 20
+                ? `<div class="note" style="margin:2px 0 0;font-size:11px;
+                     opacity:.7">counts for ${h.weight_share[k]}% of your score,
+                     because that is how much of your library it covers</div>`
+                : ""}
           </div>`).join("")}
       </div>
       <div class="grid g4">

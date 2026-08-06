@@ -369,6 +369,78 @@ console.log("\nbounds and degenerate input");
      "analyse marks era consistency N/A for a library with no unreleased material");
 }
 
+/* ---------------------------------------------------------------------------
+ * Areas are weighted by how much of the library they cover.
+ *
+ * Excluding an empty bucket fixed the extreme case, but left the middle one: a
+ * library that is 8% unreleased still had era consistency carrying a flat quarter
+ * of its score. An area should be worth what it touches.
+ * ------------------------------------------------------------------------- */
+{
+  const many = (d, n) => Array.from({ length: n }, () => issue(d, "split", 8));
+  const mixed = [...many("D4", 40), ...many("D1", 12), ...many("D14a", 30)];
+  const w = (eraShare) => ({
+    era_consistency: eraShare, album_integrity: 0.92,
+    artist_integrity: 1, duplicate_rate: 1,
+  });
+
+  const tiny = hygieneScore(20000, mixed, 2000, w(0.08));
+  const half = hygieneScore(20000, mixed, 2000, w(0.64));
+  const flat = hygieneScore(20000, mixed, 2000);
+
+  ok(tiny.weight_share.era_consistency < half.weight_share.era_consistency,
+     `era's share grows with coverage ` +
+     `(${tiny.weight_share.era_consistency}% at 8% vs ` +
+     `${half.weight_share.era_consistency}% at 64%)`);
+  eq(flat.weight_share.era_consistency, 25,
+     "unweighted, every area is a flat quarter");
+  ok(tiny.weight_share.era_consistency < 10,
+     "a small unreleased catalogue no longer carries a quarter of the score");
+
+  // A bad era score should hurt a leak-heavy library more than a leak-light one.
+  ok(half.score < tiny.score,
+     `the same era problems cost more when era is most of the library ` +
+     `(${tiny.score} vs ${half.score})`);
+
+  // Shares are a percentage of what actually counted, so they sum to ~100.
+  const total = Object.values(tiny.weight_share).reduce((a, b) => a + b, 0);
+  ok(Math.abs(total - 100) <= 2, `shares sum to about 100  (${total})`);
+
+  // Zero coverage is still the inapplicable case, and drops out entirely.
+  const none = hygieneScore(20000, mixed, 2000, w(0));
+  eq(none.subscores.era_consistency, null, "zero coverage is inapplicable");
+  eq(none.weight_share.era_consistency, 0, "  and is worth nothing");
+
+  // Booleans still work as shorthand, so the earlier call style is unchanged.
+  eq(hygieneScore(20000, mixed, 2000, { era_consistency: false })
+       .subscores.era_consistency, null, "false is shorthand for zero weight");
+  eq(hygieneScore(20000, mixed, 2000, { era_consistency: true })
+       .subscores.era_consistency, flat.subscores.era_consistency,
+     "and true is shorthand for full weight");
+
+  // Still a GEOMETRIC mean: one catastrophic area cannot be averaged away.
+  const disaster = hygieneScore(20000, [...many("D4", 400)], 2000,
+    { album_integrity: 1, artist_integrity: 1, duplicate_rate: 1, era_consistency: 0 });
+  ok(disaster.score < 60,
+     `a ruined album bucket still drags the total down hard  (${disaster.score})`);
+
+  // End to end: analyse supplies coverage weights from the library itself.
+  const rows = [];
+  let uts = 16e8;
+  for (let i = 0; i < 90; i++) {
+    rows.push({ uts: uts += 300, artist: "A", album: "Record", track: `T${i}` });
+  }
+  for (let i = 0; i < 10; i++) {
+    rows.push({ uts: uts += 300, artist: "A", album: "Unreleased", track: `L${i}` });
+  }
+  const rep = analyse(rows);
+  ok(rep.hygiene.weight_share.era_consistency <= 12,
+     `a 10% unreleased library gives era about a tenth of the score ` +
+     `(${rep.hygiene.weight_share.era_consistency}%)`);
+  ok(rep.hygiene.weight_share.artist_integrity > rep.hygiene.weight_share.era_consistency,
+     "and artist integrity, which covers everything, counts for more");
+}
+
 /* ------------------------------------------------------------------------- */
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
