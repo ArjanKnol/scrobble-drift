@@ -1245,6 +1245,21 @@ async function resolvePhase(scrobbles, apiKey) {
   let total = plan.length + eraJobs.length;
   const started = Date.now();
 
+  /*
+   * Update the status line WITHOUT advancing the global counter.
+   *
+   * `tick` does both, and that conflation broke the Spotify phase. A job that
+   * misses Spotify is deliberately not ticked there, because it will be ticked by
+   * MusicBrainz later and must count once. Correct accounting, but it meant the
+   * status only moved on a HIT: on a library of unreleased material, where nearly
+   * everything misses, the line sat unchanged for minutes and the ETA divided
+   * elapsed time by a handful of hits and announced 308 minutes.
+   *
+   * So progress within a phase is said out loud, and only completed work is
+   * counted.
+   */
+  const say = (text) => { $("status").textContent = text; };
+
   const tick = (label) => {
     done++;
     $("fill").style.width = ((done / total) * 100) + "%";
@@ -1356,7 +1371,21 @@ async function resolvePhase(scrobbles, apiKey) {
    * SENDS, so in-flight requests do not add to the rate; they only stop a slow
    * response from idling the budget.
    */
-  const spPace = new Pacer({ perSecond: 3, concurrency: 6 });
+  /*
+   * 5/s, up from 3. The 3 was set for a different endpoint.
+   *
+   * It dates from the catalogue era, when one "lookup" meant an artist search plus
+   * ten album pages plus ten tracklist batches, and 6/s produced 429s. A per-track
+   * search is a single lightweight call, and the measured round trip is 98ms cold
+   * and 64ms warm, with the endpoint sustaining 63/s.
+   *
+   * Raised in a measured step rather than to the ceiling, because Spotify's real
+   * limit is a rolling thirty-second window that is not documented and the cost of
+   * guessing high is 429s for everyone. The backoff and give-up paths are still
+   * the safety net, and shared-cache hits are refunded, so this ceiling only ever
+   * applies to calls that genuinely reach Spotify.
+   */
+  const spPace = new Pacer({ perSecond: 5, concurrency: 8 });
 
   async function spPaced(path, attempts = 3) {
     for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -1506,7 +1535,8 @@ async function resolvePhase(scrobbles, apiKey) {
           : Math.round(plan.length / 3) + "s"})…`;
 
     const misses = [];
-    let gaveUp = false;
+    let gaveUp = false, checked = 0;
+    const phaseStart = Date.now();
     await pool(plan, 6, async (job) => {
       if (gaveUp) { misses.push(job); return; }
 
@@ -1555,6 +1585,23 @@ async function resolvePhase(scrobbles, apiKey) {
       } else {
         misses.push(job);
       }
+
+      /*
+       * Said on EVERY job, hit or miss, so the phase visibly moves.
+       *
+       * A miss is real work and takes a real round trip; it just does not count
+       * as finished, because MusicBrainz still has to answer for it. Reporting
+       * checked-versus-total here, with its own estimate based on attempts rather
+       * than on completions, is the difference between "working" and "hung".
+       */
+      checked++;
+      const per = checked / Math.max((Date.now() - phaseStart) / 1000, 0.001);
+      const left = Math.round((plan.length - checked) / Math.max(per, 0.01));
+      say(`Spotify: ${N(checked)} of ${N(plan.length)} checked` +
+          `, ${N(spHits)} resolved` +
+          (cacheHits ? ` · ${N(cacheHits)} from local cache` : "") +
+          (checked > 5 ? ` · about ${left > 90
+            ? Math.round(left / 60) + " min" : left + "s"} left in this step` : ""));
     });
 
     mbPlan = misses;

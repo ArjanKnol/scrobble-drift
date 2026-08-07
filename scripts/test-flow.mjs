@@ -357,6 +357,40 @@ const code = html
      "no loop-only statements survive inside the pooled callback");
 }
 
+/* ---- 12. a phase must look alive even when nothing is resolving --------- */
+{
+  /*
+   * `tick` both advances the global counter and writes the status line, and that
+   * conflation broke the Spotify phase. A job that MISSES Spotify is deliberately
+   * not ticked there, since MusicBrainz will tick it later and each job must count
+   * once. The accounting was right, but the status only moved on a hit, so on a
+   * library of unreleased material the line sat unchanged for minutes and the ETA
+   * divided elapsed time by two hits and announced 308 minutes.
+   */
+  ok("there is a way to update the status without counting work",
+     /const say = \(text\) => \{ \$\("status"\)\.textContent = text; \};/.test(code));
+
+  const at = code.indexOf("await pool(plan,");
+  const body = code.slice(at, code.indexOf("mbPlan = misses;", at));
+  ok(/checked\+\+/.test(body),
+     "the Spotify phase counts attempts, not only successes");
+  ok(/say\(`Spotify: /.test(body),
+     "and reports them, so a run of misses does not look like a hang");
+  ok(/of \$\{N\(plan\.length\)\} checked/.test(body),
+     "phrased as checked-of-total rather than resolved-of-total");
+  ok(/left in this step/.test(body),
+     "with an estimate scoped to the phase, derived from attempts");
+
+  // The global counter must still only advance on completed work, or a missed job
+  // would be counted twice: once here and once by MusicBrainz.
+  const tickCount = (body.match(/tick\(/g) || []).length;
+  ok(tickCount === 1,
+     `exactly one tick in the Spotify phase, on the hit path  (${tickCount})`);
+  const hitBlock = body.slice(body.indexOf("if (!hit.error && hit.groups.length)"));
+  ok(hitBlock.indexOf("tick(") < hitBlock.indexOf("misses.push"),
+     "and it sits on the hit branch, not the miss branch");
+}
+
 console.log(`\n  ${pass} passed, ${fails.length} failed`);
 if (fails.length) {
   console.log("\n  FAILED");
