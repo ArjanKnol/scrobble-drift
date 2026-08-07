@@ -14,7 +14,8 @@
  *
  *     node scripts/test-resolveone.mjs
  */
-import { resolveOne, isResolvable, RESOLVABLE } from "../docs/drift.js";
+import { resolveOne, isResolvable, RESOLVABLE, sameRecording,
+         applyRecordingVerdict } from "../docs/drift.js";
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log(`  ok   ${m}`); }
@@ -120,6 +121,64 @@ console.log("\nnothing is mutated");
   const other = { detector: "D6", class: "error" };
   ok(resolveOne(other, () => ({ groups: [] })) === other,
      "an unresolvable finding is returned as-is, not copied or altered");
+}
+
+/* ---------------------------------------------------------------------------
+ * Same recording, or genuinely two versions?
+ *
+ * The question the report currently guesses at. "Sicko Mode" and "Sicko Mode
+ * (feat. Drake)" might be one recording with the credit in the title, or two
+ * different recordings where the featured version is a remix. String similarity
+ * cannot tell them apart, and the consequences are asymmetric: merging two
+ * distinct recordings destroys information and cannot be undone, while leaving a
+ * real split alone merely leaves a report item.
+ *
+ * MusicBrainz gives every recording an ID, so this is answerable.
+ * ------------------------------------------------------------------------- */
+{
+  const g = (...ids) => ({ groups: ids.map((id) => ({ recording_id: id })) });
+
+  eq(sameRecording(g("r1", "r2"), g("r2")), "same",
+     "a shared recording id proves one track under two names");
+  eq(sameRecording(g("r1"), g("r9")), "different",
+     "no shared id means two distinct recordings");
+
+  /*
+   * The third state, and the one this codebase has broken more than any other.
+   * An absent id means nobody told us. Collapsing that into "different" would
+   * silently stop recommending correct merges.
+   */
+  eq(sameRecording(g("r1"), { groups: [{ title: "no id here" }] }), "unknown",
+     "an unlabelled release is unknown, not different");
+  eq(sameRecording(null, null), "unknown", "no data at all is unknown");
+  eq(sameRecording(g(), g("r1")), "unknown", "an empty side is unknown");
+
+  /* ---- what the verdict does to a finding ------------------------------ */
+  const issue = { class: "error", confidence: 0.9, suggest: "Merge them." };
+
+  const same = applyRecordingVerdict(issue, "same");
+  eq(same.confidence, 0.97, "proof of one recording justifies real confidence");
+  eq(same.evidence, "same MusicBrainz recording", "and names the evidence");
+  ok(/provably correct/.test(same.suggest), "and says the merge is proven");
+
+  /*
+   * Asymmetric on purpose. Two recordings does not merely lower confidence: it
+   * makes the suggestion WRONG, so the finding must stop recommending a merge.
+   */
+  const diff = applyRecordingVerdict(issue, "different");
+  eq(diff.class, "review", "proof of two recordings stops it being an error");
+  ok(diff.confidence < 0.2, `and drops confidence hard  (${diff.confidence})`);
+  ok(/likely a remix or a rework/.test(diff.suggest),
+     "the suggestion explains what it actually found");
+  ok(/Nothing to fix here/.test(diff.suggest),
+     "and withdraws the recommendation rather than softening it");
+  ok(!/Merge them/.test(diff.suggest),
+     "the original merge advice is REPLACED, not appended to");
+  ok(diff.resolved === true, "and it is marked checked, so no button reappears");
+
+  ok(applyRecordingVerdict(issue, "unknown") === issue,
+     "an unknown verdict returns the very same object, unchanged");
+  ok(applyRecordingVerdict(null, "same") === null, "and nothing stays nothing");
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

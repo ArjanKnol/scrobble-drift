@@ -3037,6 +3037,73 @@ export function hygieneScore(totalPlays, issues, albumStrings = 0, weights = nul
 }
 
 
+/**
+ * Are two titles the SAME recording, or genuinely different versions?
+ *
+ * The question the report currently guesses at. "Sicko Mode" and "Sicko Mode
+ * (feat. Drake)" might be one recording with the credit written into the title,
+ * or two different recordings where the featured version is a remix. String
+ * similarity cannot tell those apart, and the consequences are asymmetric: merging
+ * two distinct recordings destroys information that cannot be recovered, while
+ * leaving a real split alone merely leaves a report item.
+ *
+ * MusicBrainz gives every recording its own ID, so this is answerable rather than
+ * guessable. Both /api/mb/recording and /api/spotify/track return groups carrying
+ * `recording_id` where it is known.
+ *
+ * Returns "same", "different", or "unknown". The third is not a failure and must
+ * never be collapsed into "different": an absent ID means nobody told us, and
+ * treating silence as a negative answer is the single most repeated bug in this
+ * codebase.
+ */
+export function sameRecording(a, b) {
+  const ids = (r) => new Set(
+    (r?.groups || [])
+      .map((g) => g?.recording_id)
+      .filter(Boolean));
+
+  const A = ids(a), B = ids(b);
+  if (!A.size || !B.size) return "unknown";
+  for (const id of A) if (B.has(id)) return "same";
+  return "different";
+}
+
+/**
+ * What that verdict means for a finding that proposes merging two titles.
+ *
+ * Deliberately asymmetric. Proof of one recording justifies real confidence,
+ * because the merge is then provably correct. Proof of two recordings does not
+ * merely lower confidence: it makes the suggestion WRONG, so the finding must
+ * stop recommending a merge and say what it actually found instead.
+ */
+export function applyRecordingVerdict(issue, verdict) {
+  if (!issue || verdict === "unknown") return issue;
+
+  if (verdict === "same") {
+    return {
+      ...issue,
+      confidence: 0.97,
+      evidence: "same MusicBrainz recording",
+      suggest: (issue.suggest || "") +
+        " Confirmed: both spellings are the same recording in MusicBrainz, so " +
+        "merging them is provably correct rather than a guess.",
+    };
+  }
+
+  return {
+    ...issue,
+    class: "review",
+    confidence: 0.1,
+    evidence: "different recordings",
+    resolved: true,
+    suggest:
+      "These are two DIFFERENT recordings in MusicBrainz, not one track under two " +
+      "names, so the version with the feature credit is likely a remix or a " +
+      "rework rather than the same song relabelled. Merging them would lose the " +
+      "distinction, and it cannot be undone. Nothing to fix here.",
+  };
+}
+
 /* ----------------------------------------------- per-finding resolution ---- */
 /**
  * Resolve ONE finding, on demand.
