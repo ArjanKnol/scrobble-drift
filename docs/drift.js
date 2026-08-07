@@ -3128,12 +3128,38 @@ export function applyRecordingVerdict(issue, verdict) {
  * lookup knows nothing. Never mutates: the caller swaps it into the report, and a
  * half-updated finding rendered mid-flight is a bug waiting to happen.
  */
-export const RESOLVABLE = new Set(["D0", "D4", "D5", "D8"]);
+/*
+ * Almost everything has a question a database can answer.
+ *
+ * This was a list of three detectors, which was the wrong question. The right one
+ * is "could a lookup settle this?", and for nearly every finding it could:
+ *
+ *   D0, D4  which album should these merge into
+ *   D5      which album does this track belong to
+ *   D8      is this a real artist, and are these one recording or two versions
+ *   D1      which spelling of the artist do the databases actually use
+ *   D11     is this genuinely a compilation
+ *   D15     what artist is the release really credited to
+ *   D14a/c  is this era name a real release
+ *
+ * Only two are decided entirely from your own data, with nothing external to ask:
+ *
+ *   D6      duplicate scrobbles, which is timestamp arithmetic
+ *   D12     impossible timestamps, likewise
+ *
+ * D14e and D16 are DISCOVERY: the finding exists only because a lookup already
+ * ran, so there is nothing left to ask and a button would be a lie.
+ */
+export const LOCAL_ONLY = new Set(["D6", "D12"]);
+export const DISCOVERY = new Set(["D14e", "D16"]);
+export const RESOLVABLE = new Set(
+  ["D0", "D4", "D5", "D8", "D1", "D11", "D15", "D14a", "D14c"]);
 
-/** Can this finding be enriched by a lookup? Used to decide whether to show a button. */
+/** Can this finding be enriched by a lookup? Decides whether to show a button. */
 export function isResolvable(issue) {
-  if (!issue) return false;
-  if (issue.detector === "D8") return Boolean(issue.verify_artist);
+  if (!issue?.detector) return false;
+  if (issue.resolved || issue.dropped) return false;
+  if (LOCAL_ONLY.has(issue.detector) || DISCOVERY.has(issue.detector)) return false;
   return RESOLVABLE.has(issue.detector);
 }
 
@@ -3158,9 +3184,40 @@ export function resolveOne(issue, lookup, { artistExists = null } = {}) {
 
   if (issue.detector === "D5") return { ...d5Resolve(issue, lookup), resolved: true };
 
-  // D0 and D4 share a resolver: D0 IS a resolved D4.
-  const [out] = d0Resolve([issue], lookup);
-  return out ? { ...out, resolved: true } : { ...issue, resolved: true, unresolved: true };
+  if (issue.detector === "D0" || issue.detector === "D4") {
+    // D0 and D4 share a resolver: D0 IS a resolved D4.
+    const [out] = d0Resolve([issue], lookup);
+    return out ? { ...out, resolved: true }
+               : { ...issue, resolved: true, unresolved: true };
+  }
+
+  /*
+   * Everything else gets the generic answer: what the release databases actually
+   * hold for this artist and track.
+   *
+   * There is no bespoke resolver for D1, D11, D15 or the era variants yet, and
+   * waiting for four of those before showing any button was the wrong trade. The
+   * raw answer is genuinely useful on its own: for D1 it shows which spelling the
+   * databases use, for D11 whether the release is really a compilation, for D15
+   * what artist it is credited to. Attaching it beats refusing to look.
+   */
+  const groups = lookup?.(issue.artist, issue.track)?.groups || [];
+  if (!groups.length) return { ...issue, resolved: true, unresolved: true };
+
+  const best = groups[0];
+  return {
+    ...issue,
+    resolved: true,
+    external: best,
+    candidates: groups.slice(0, 5),
+    evidence: issue.evidence || "release data",
+    suggest: (issue.suggest || "") +
+      ` Release data: '${best.title}'` +
+      (best.primary ? ` (${best.primary}` +
+        (best.first_release ? `, ${best.first_release})` : ")") : "") +
+      (groups.length > 1 ? ` and ${groups.length - 1} other release` +
+        `${groups.length > 2 ? "s" : ""}.` : "."),
+  };
 }
 
 /* ------------------------------------------- D16: singles never re-scrobbled */
