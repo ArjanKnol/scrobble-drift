@@ -3172,7 +3172,20 @@ export function isResolvable(issue) {
 export function resolveOne(issue, lookup, { artistExists = null } = {}) {
   if (!isResolvable(issue)) return issue;
 
-  if (issue.detector === "D8") {
+  /*
+   * ONLY joint credits take this branch.
+   *
+   * It used to catch every D8, and D8 covers two different findings: a joint
+   * artist credit, which carries `verify_artist`, and a track scrobbled under two
+   * title variants, which does not. A title variant fell in here,
+   * d8VerifyJointCredits passed it straight back untouched because it had nothing
+   * to verify, and the finding returned with no `resolved` flag at all. The button
+   * stayed, no note appeared, and pressing it did visibly nothing.
+   *
+   * Title variants fall through to the generic resolver below, which is what
+   * answers their actual question: what the databases hold for this track.
+   */
+  if (issue.detector === "D8" && issue.verify_artist) {
     // Reuses the collection path so the two can never disagree about what a
     // verified joint credit means.
     const [out] = d8VerifyJointCredits([issue], artistExists || (() => null));
@@ -3201,7 +3214,17 @@ export function resolveOne(issue, lookup, { artistExists = null } = {}) {
    * databases use, for D11 whether the release is really a compilation, for D15
    * what artist it is credited to. Attaching it beats refusing to look.
    */
-  const groups = lookup?.(issue.artist, issue.track)?.groups || [];
+  /*
+   * A title-variant finding has no single `track`: the whole point is that it has
+   * two. The first member is the spelling being standardised on, so that is what
+   * gets looked up.
+   */
+  const track = issue.track ||
+    issue.members?.find((m) => m.track)?.track ||
+    issue.members?.[0]?.track;
+  if (!track) return { ...issue, resolved: true, unresolved: true };
+
+  const groups = lookup?.(issue.artist, track)?.groups || [];
   if (!groups.length) return { ...issue, resolved: true, unresolved: true };
 
   const best = groups[0];

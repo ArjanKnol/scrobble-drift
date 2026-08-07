@@ -239,5 +239,57 @@ console.log("\nnothing is mutated");
   eq(split.detector, "D0", "D4 still uses its own resolver, not the generic one");
 }
 
+/* ---------------------------------------------------------------------------
+ * D8 covers TWO different findings, and conflating them broke the button.
+ *
+ * A joint artist credit carries `verify_artist`; a track scrobbled under two
+ * title variants does not. Every D8 took the joint-credit branch, where
+ * d8VerifyJointCredits passed a title variant straight back untouched because it
+ * had nothing to verify. The finding returned with no `resolved` flag, so the
+ * button stayed, no note appeared, and pressing it did visibly nothing.
+ *
+ * Reported as "nothing happens when I press the button".
+ * ------------------------------------------------------------------------- */
+{
+  const variant = {
+    detector: "D8", class: "split", artist: "Fetty Wap",
+    suggest: "standardise on the fuller spelling.",
+    members: [{ track: "Trap Queen (feat. Azealia Banks)", plays: 1 },
+              { track: "Trap Queen", plays: 1 }],
+  };
+  const found = { groups: [{ title: "Trap Queen", primary: "Single",
+                             first_release: "2014-04-21" }] };
+
+  const out = resolveOne(variant, () => found);
+  ok(out.resolved === true,
+     "a title variant comes back marked resolved, so the button clears");
+  ok(!out.unresolved, "and not as unresolved, since data was found");
+  ok(/Release data: 'Trap Queen' \(Single, 2014-04-21\)/.test(out.suggest),
+     "with what the databases actually hold");
+
+  /*
+   * The track to look up. A title-variant finding has no single `track` field:
+   * having two is the entire point. Without this fallback the lookup was called
+   * with undefined and could never return anything.
+   */
+  let asked = null;
+  resolveOne(variant, (artist, track) => { asked = [artist, track]; return found; });
+  eq(asked?.[0], "Fetty Wap", "the artist is passed through");
+  ok(asked?.[1]?.startsWith("Trap Queen"),
+     `a member track is looked up, not undefined  (${asked?.[1]})`);
+
+  // A joint credit must still take its own branch.
+  const joint = { detector: "D8", class: "review", confidence: 0.6,
+                  verify_artist: "Future & Young Thug", suggest: "Both solo." };
+  ok(resolveOne(joint, null, { artistExists: () => true }).dropped === true,
+     "a joint credit still resolves via artist verification");
+
+  // And a finding with nothing lookupable is still marked, never left blank.
+  const bare = { detector: "D8", class: "split", artist: "X", members: [] };
+  const b = resolveOne(bare, () => ({ groups: [] }));
+  ok(b.resolved === true && b.unresolved === true,
+     "no track to look up still counts as checked, so the button does not linger");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
