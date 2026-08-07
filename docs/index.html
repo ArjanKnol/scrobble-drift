@@ -784,6 +784,27 @@ class Pacer {
 
   release() { this.inFlight = Math.max(0, this.inFlight - 1); }
 
+  /**
+   * Hand back the slot a request turned out not to need.
+   *
+   * The whole point of pacing is to be polite to an UPSTREAM service. A request
+   * answered from the shared cache never reached that service, so charging it
+   * against the budget throttles us against an API we did not call.
+   *
+   * That was costing more than it sounds. The endpoint answers a cache hit in
+   * 64ms and can sustain 63 requests a second, while the pacer allowed 3. As the
+   * shared cache fills, more and more of a scan is free, and every one of those
+   * free answers was being made to queue behind an imaginary rate limit.
+   *
+   * Refunding pulls the timeline back by one interval, so a run of cache hits
+   * proceeds at whatever the concurrency limit allows rather than at the upstream
+   * rate. Never rewinds past now: the point is to stop charging for what was not
+   * spent, not to build up credit for a future burst.
+   */
+  refund() {
+    this.nextSlot = Math.max(Date.now(), this.nextSlot - this.interval);
+  }
+
   /** Push the timeline out, e.g. after a 429. */
   backoff(seconds) {
     this.nextSlot = Math.max(this.nextSlot, Date.now() + seconds * 1000);
@@ -1351,6 +1372,9 @@ async function resolvePhase(scrobbles, apiKey) {
         } else if (res.ok) {
           const out = await res.json();
           spFails = 0;
+          // Served from the shared cache, so Spotify was never called and the
+          // slot this consumed was not really spent.
+          if (out?.shared) spPace.refund();
           return out;
         } else if (res.status >= 500) {
           retryIn = 2 * attempt;
@@ -1394,7 +1418,11 @@ async function resolvePhase(scrobbles, apiKey) {
           retryIn = Number(res.headers.get("Retry-After") || b.retry_after || 5);
           mbPace.backoff(retryIn);
         } else if (res.ok) {
-          return await res.json();
+          const out = await res.json();
+          // Same reasoning as Spotify: a shared-cache answer never reached
+          // MusicBrainz, and their one-per-second limit is about calls that do.
+          if (out?.shared) mbPace.refund();
+          return out;
         } else if (res.status >= 500) {
           retryIn = 3 * attempt;
         } else {
@@ -1534,8 +1562,20 @@ async function resolvePhase(scrobbles, apiKey) {
   }
 
   /* ----------------------------------- Phase B: era names, Spotify then MB */
-  for (const job of eraJobs) {
-    if (abort) break;
+  /*
+   * Pooled, not serial.
+   *
+   * This was a plain `for` loop, so era jobs went one at a time regardless of how
+   * much rate budget was available. On a library with thousands of unreleased
+   * plays that is hundreds of sequential round trips, each waiting out the full
+   * pacer interval, and it was a large part of why step 2 dragged.
+   *
+   * Four workers, which is the same shape the split phase uses. The pacers still
+   * govern the actual send rate, so this changes how many requests can be in
+   * flight, not how fast we hit either upstream.
+   */
+  await pool(eraJobs, 4, async (job) => {
+    if (abort) return;
     let r = null;
 
     // Era names are album titles, so Spotify's album search answers the same
@@ -1562,7 +1602,7 @@ async function resolvePhase(scrobbles, apiKey) {
     }
     if (r) rgCache.set(key(job.artist, job.title), r);
     tick("Checking era names");
-  }
+  });
 
   // Apply the era ruling straight away: it can only remove or sharpen findings,
   // so the list gets more honest before the slower phase even finishes.
