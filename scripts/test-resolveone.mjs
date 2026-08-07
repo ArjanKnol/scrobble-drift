@@ -45,9 +45,26 @@ ok(isResolvable({ detector: "D8", verify_artist: "A & B" }),
  */
 ok(!isResolvable({ detector: "D14e" }), "D14e is discovery, not enrichment");
 ok(!isResolvable({ detector: "D16" }), "D16 is discovery too");
-ok(!isResolvable({ detector: "D8" }),
-   "a D8 feature credit with no joint name has nothing to look up");
+ok(isResolvable({ detector: "D8" }),
+   "a D8 feature credit can still be asked about: one recording, or two versions");
 ok(!isResolvable({ detector: "D6" }), "duplicates are decided locally");
+ok(!isResolvable({ detector: "D12" }), "and so are impossible timestamps");
+
+/*
+ * The set was three detectors, which answered the wrong question. The right one
+ * is "could a lookup settle this?", and for nearly every finding it could: which
+ * spelling the databases use (D1), whether a release is really a compilation
+ * (D11), what artist it is credited to (D15). Only timestamp arithmetic is purely
+ * local.
+ */
+for (const d of ["D1", "D11", "D15", "D14a", "D14c"])
+  ok(isResolvable({ detector: d }), `${d} has a question a database can answer`);
+
+// A finding already checked must not offer the button again.
+ok(!isResolvable({ detector: "D4", resolved: true }),
+   "an already-resolved finding offers no button");
+ok(!isResolvable({ detector: "D4", dropped: true }),
+   "nor does a dropped one");
 ok(!isResolvable(null) && !isResolvable(undefined), "and nothing is not resolvable");
 
 for (const d of RESOLVABLE) ok(typeof d === "string", `RESOLVABLE lists ${d}`);
@@ -179,6 +196,47 @@ console.log("\nnothing is mutated");
   ok(applyRecordingVerdict(issue, "unknown") === issue,
      "an unknown verdict returns the very same object, unchanged");
   ok(applyRecordingVerdict(null, "same") === null, "and nothing stays nothing");
+}
+
+/* ---------------------------------------------------------------------------
+ * The generic resolver: what the databases actually hold.
+ *
+ * D1, D11, D15 and the era variants have no bespoke resolver yet, and waiting for
+ * four of those before showing any button was the wrong trade. The raw answer is
+ * useful on its own, and attaching it beats refusing to look.
+ * ------------------------------------------------------------------------- */
+{
+  const groups = {
+    groups: [
+      { title: "Rodeo", primary: "Album", first_release: "2015-09-04" },
+      { title: "Rodeo (Deluxe)", primary: "Album", first_release: "2016" },
+    ],
+  };
+  const out = resolveOne(
+    { detector: "D1", artist: "Kanye West", track: "Runaway", suggest: "Two spellings." },
+    () => groups);
+
+  ok(out.resolved === true, "a generic finding is marked resolved");
+  eq(out.external?.title, "Rodeo", "the best match is attached for the UI");
+  eq(out.candidates?.length, 2, "with the alternatives kept");
+  ok(/Release data: 'Rodeo' \(Album, 2015-09-04\)/.test(out.suggest),
+     "and the suggestion states what was found, with type and date");
+  ok(/Two spellings\./.test(out.suggest),
+     "appended to the original wording rather than replacing it");
+  ok(/1 other release\./.test(out.suggest), "and counts the alternatives");
+
+  // The distinction that must survive: asked and got nothing.
+  const nothing = resolveOne({ detector: "D11", artist: "A", track: "B" },
+                             () => ({ groups: [] }));
+  ok(nothing.resolved === true && nothing.unresolved === true,
+     "no data means checked AND unresolved, never silently blank");
+
+  // Detectors with real resolvers must not fall through to the generic path.
+  const split = resolveOne(
+    { detector: "D4", artist: "Travis Scott", track: "Antidote",
+      class: "split", members: [{ album: "Rodeo", plays: 9 }] },
+    () => groups);
+  eq(split.detector, "D0", "D4 still uses its own resolver, not the generic one");
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
