@@ -59,7 +59,39 @@ function open() {
 }
 
 /** Wrap one transaction. Resolves to `fallback` on any failure. */
+/*
+ * Every storage call resolves, even if IndexedDB never answers.
+ *
+ * This file says storage is best-effort and that a failure never stops a working
+ * scan. That was true for errors and false for silence: an `await` on a request
+ * that never settles hangs the scan forever, with no error and nothing on screen
+ * to explain it.
+ *
+ * Seen live. A `deleteDatabase` issued while the app still held an open connection
+ * left IndexedDB wedged: `indexedDB.open` stopped answering at all, the ingest
+ * loop blocked on its final `saveScrobbles`, and the scan sat at "Fetching 3,200
+ * of 2,000 scrobbles" indefinitely. The trigger was a test harness, but quota
+ * exhaustion, private browsing and a corrupted profile all produce the same
+ * silence, and the app would hang identically for a real user.
+ *
+ * Eight seconds is far longer than any real transaction here and short enough that
+ * a wedged database degrades to "no cache" rather than "no scan".
+ */
+const TX_TIMEOUT_MS = 8000;
+
+const withTimeout = (promise, fallback) => new Promise((resolve) => {
+  let settled = false;
+  const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+  const timer = setTimeout(() => done(fallback), TX_TIMEOUT_MS);
+  promise.then((v) => { clearTimeout(timer); done(v); },
+               () => { clearTimeout(timer); done(fallback); });
+});
+
 async function tx(storeName, mode, fn, fallback = null) {
+  return withTimeout(txInner(storeName, mode, fn, fallback), fallback);
+}
+
+async function txInner(storeName, mode, fn, fallback = null) {
   const db = await open();
   if (!db) return fallback;
   return new Promise((resolve) => {
