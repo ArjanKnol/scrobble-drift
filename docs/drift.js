@@ -3037,6 +3037,65 @@ export function hygieneScore(totalPlays, issues, albumStrings = 0, weights = nul
 }
 
 
+/* ----------------------------------------------- per-finding resolution ---- */
+/**
+ * Resolve ONE finding, on demand.
+ *
+ * The scan resolves everything up front, and measurement killed that idea: a
+ * 2,000-scrobble library produced 312 lookups and took twenty minutes, to deliver
+ * detail on findings nobody had read yet. Attention is demand-driven, so
+ * resolution should be too. A reader opens a handful of findings and acts on two.
+ *
+ * The split that makes this safe is ENRICHMENT versus DISCOVERY.
+ *
+ *   Enrichment  the finding already exists and is already correct; the lookup
+ *               only adds detail. D0's consolidation target, D5's album name,
+ *               D8's joint-credit check. Nothing disappears if it never runs.
+ *   Discovery   the finding exists ONLY because of the lookup. D14e and D16.
+ *               Those can never be on demand, because you cannot click a finding
+ *               that is not on screen.
+ *
+ * Only enrichment goes through here. Discovery stays in the scan, capped.
+ *
+ * Returns a NEW issue, or the original unchanged when nothing applies or the
+ * lookup knows nothing. Never mutates: the caller swaps it into the report, and a
+ * half-updated finding rendered mid-flight is a bug waiting to happen.
+ */
+export const RESOLVABLE = new Set(["D0", "D4", "D5", "D8"]);
+
+/** Can this finding be enriched by a lookup? Used to decide whether to show a button. */
+export function isResolvable(issue) {
+  if (!issue) return false;
+  if (issue.detector === "D8") return Boolean(issue.verify_artist);
+  return RESOLVABLE.has(issue.detector);
+}
+
+/**
+ * `lookup(artist, track)` returns `{ groups }`, the shape both /api/mb/recording
+ * and /api/spotify/track already return. `artistExists(name)` answers D8's
+ * question and may return null for "do not know", which must leave the finding
+ * alone rather than promote or drop it.
+ */
+export function resolveOne(issue, lookup, { artistExists = null } = {}) {
+  if (!isResolvable(issue)) return issue;
+
+  if (issue.detector === "D8") {
+    // Reuses the collection path so the two can never disagree about what a
+    // verified joint credit means.
+    const [out] = d8VerifyJointCredits([issue], artistExists || (() => null));
+    // An empty result means the name turned out to be a real artist, so the
+    // finding is gone. Signalled rather than returned as undefined, so the caller
+    // can remove it from the report deliberately.
+    return out || { ...issue, resolved: true, dropped: true };
+  }
+
+  if (issue.detector === "D5") return { ...d5Resolve(issue, lookup), resolved: true };
+
+  // D0 and D4 share a resolver: D0 IS a resolved D4.
+  const [out] = d0Resolve([issue], lookup);
+  return out ? { ...out, resolved: true } : { ...issue, resolved: true, unresolved: true };
+}
+
 /* ------------------------------------------- D16: singles never re-scrobbled */
 /**
  * A track you only ever played as a single, which has since landed on an album.
