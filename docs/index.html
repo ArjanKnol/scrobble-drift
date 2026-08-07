@@ -1178,8 +1178,18 @@ async function fetchAll(user, cap, apiKey) {
       eta = ` · about ${left > 90 ? Math.round(left / 60) + " min" : left + "s"} left`;
     }
 
+    /*
+     * Clamped, because a batch can overshoot the cap.
+     *
+     * Each request brings PAGES_PER_REQUEST (8) pages, or 1,600 scrobbles, and the
+     * cap is applied AFTER the batch is pushed. On a 2,000 cap the second batch
+     * takes the count to 3,200, which is then truncated back to 2,000 and the loop
+     * ends. This line runs before that truncation, so it read "Fetching 3,200 of
+     * 2,000 scrobbles", which looks like a counting bug and undermines confidence
+     * in every other number on the page.
+     */
     $("status").textContent =
-      `Fetching ${N(all.length)} of ${N(target)} scrobbles` +
+      `Fetching ${N(Math.min(all.length, target))} of ${N(target)} scrobbles` +
       (data.shared_key === false ? " (your own key)" : "") +
       ` · page ${N(from)} of ${N(totalPages)}` + eta;
 

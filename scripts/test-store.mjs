@@ -163,5 +163,34 @@ const settle = () => new Promise((r) => setTimeout(r, 5));
      "a legacy negative is kept once, and re-checked thirty days from now");
 }
 
+/* ---------------------------------------------------------------------------
+ * Storage can fail, but it must never HANG.
+ *
+ * This module says a storage failure never stops a working scan. That held for
+ * errors and not for silence: an await on a request that never settles blocks
+ * forever, with nothing on screen to explain it.
+ *
+ * Seen live. IndexedDB was left wedged by a deleteDatabase issued while the app
+ * still held a connection; `indexedDB.open` then stopped answering entirely, the
+ * ingest loop blocked on its final save, and the scan sat unchanged for four
+ * minutes. Quota exhaustion and private browsing produce the same silence.
+ * ------------------------------------------------------------------------- */
+{
+  const real = globalThis.indexedDB;
+  // A database that accepts the open request and then never replies.
+  globalThis.indexedDB = { open() { return {}; } };
+
+  const mod = await import("../docs/store.js?wedged=" + Date.now());
+  const t = Date.now();
+  const got = await mod.getLookup("k", "a", "b");
+  const ms = Date.now() - t;
+
+  eq(got, null, "a wedged database returns the fallback rather than hanging");
+  ok(ms < 12000, `and gives up in ${(ms / 1000).toFixed(1)}s instead of never`);
+  ok(ms > 1000, "  after a real wait, so it is a timeout and not a silent skip");
+
+  globalThis.indexedDB = real;
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
