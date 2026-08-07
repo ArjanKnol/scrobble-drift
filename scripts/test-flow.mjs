@@ -315,6 +315,48 @@ const code = html
      /fail\(err\.message \|\| String\(err\), err\.detail \|\| "", err\.hint\)/.test(code));
 }
 
+/* ---- 11. step 2 must not throttle itself against calls it never makes --- */
+{
+  /*
+   * Measured against the live Worker: a cache hit answers in 64ms and the endpoint
+   * sustains 63 requests a second. The client paced itself to 3. Worse, that pacer
+   * charged EVERY request, including ones served from the shared cache, which
+   * never reach Spotify or MusicBrainz at all. Step 2 was rate-limiting itself
+   * against services it was not calling, and the effect grows as the shared cache
+   * fills, which is exactly backwards.
+   */
+  ok("the pacer can refund an unspent slot",
+     /refund\(\) \{/.test(code),
+     "Without it, a cache hit costs the same as a real upstream call.");
+  ok("a refund never rewinds past now",
+     /Math\.max\(Date\.now\(\), this\.nextSlot - this\.interval\)/.test(code),
+     "Otherwise credit accumulates and is spent as a burst later.");
+
+  ok("Spotify refunds a shared-cache answer",
+     /if \(out\?\.shared\) spPace\.refund\(\)/.test(code));
+  ok("MusicBrainz refunds one too",
+     /if \(out\?\.shared\) mbPace\.refund\(\)/.test(code));
+
+  /*
+   * The era phase ran one job at a time. On a library with thousands of
+   * unreleased plays that is hundreds of sequential round trips, each waiting out
+   * a full pacer interval, which was a large part of why step 2 dragged.
+   */
+  ok("the era phase is pooled rather than serial",
+     /await pool\(eraJobs, \d+, async \(job\) => \{/.test(code),
+     "A plain for-loop here serialises every era lookup.");
+  ok("and it is closed as a callback",
+     /tick\("Checking era names"\);\s*\}\);/.test(code),
+     "A pooled body ends with `});`, not `}`.");
+
+  // `continue` and `break` are loop statements and are illegal in a callback.
+  // Converting a loop to a pool without converting these is a silent syntax trap.
+  const at = code.indexOf("await pool(eraJobs");
+  const body = code.slice(at, code.indexOf('tick("Checking era names")', at));
+  ok(!/\bcontinue;/.test(body) && !/\bbreak;/.test(body),
+     "no loop-only statements survive inside the pooled callback");
+}
+
 console.log(`\n  ${pass} passed, ${fails.length} failed`);
 if (fails.length) {
   console.log("\n  FAILED");
