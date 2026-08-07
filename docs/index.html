@@ -2025,13 +2025,19 @@ async function resolveIssue(idx) {
   };
 
   let resolved;
-  if (issue.detector === "D8") {
+  // Only a joint credit has an artist name to verify. A title variant is a
+  // different D8 finding entirely and goes down the track-lookup path.
+  if (issue.detector === "D8" && issue.verify_artist) {
     const r = await call("/api/spotify/artist-albums", { artist: issue.verify_artist });
     // null is a failed call, not an answer: leave the finding untouched.
     resolved = resolveOne(issue, null,
       { artistExists: () => (r ? Boolean(r.found) : null) });
   } else {
-    const answer = await lookup(issue.artist, issue.track);
+    // Same fallback as resolveOne: a title-variant finding has two tracks, not one.
+    const track = issue.track ||
+      issue.members?.find((m) => m.track)?.track ||
+      issue.members?.[0]?.track;
+    const answer = track ? await lookup(issue.artist, track) : null;
     resolved = resolveOne(issue, () => answer);
   }
 
@@ -2400,10 +2406,9 @@ function issues() {
           : i.resolved
           ? ""
           : `<div style="margin-top:9px">
-              <button class="check ghost" type="button">Check release data</button>
+              <button class="check" type="button">Check release data</button>
               <span class="note" style="margin:0 0 0 9px;color:var(--dim)">
-                Looks up the consolidation target and release date for this one
-                finding.</span>
+                Looks up what the release databases hold for this one finding.</span>
             </div>`}
     </div>`).join("") : `<div class="panel">Nothing matches that filter.</div>`);
 

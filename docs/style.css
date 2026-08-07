@@ -283,3 +283,37 @@ html{scroll-behavior:smooth}
    answers the more useful question: fix the scrobbler, not the 18 entries. */
 .months{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;
   margin-top:7px;font-variant-numeric:tabular-nums}
+
+/* ------------------------------------------------- per-finding check button */
+/*
+ * Small and accented, not a full-size ghost button.
+ *
+ * It was rendered with `.ghost`, which is a large, low-contrast, outline-only
+ * control. On a finding card it read as disabled decoration rather than the one
+ * thing on the card you are meant to press, and it was reported as "too big and
+ * doesn't stand out at all". This is a secondary action on a dense list, so it
+ * wants to be compact and unmistakably clickable.
+ */
+button.check, button.check-all {
+  font-size: 12px;
+  padding: 4px 11px;
+  min-height: 0;
+  border-radius: 99px;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  font-weight: 600;
+  letter-spacing: .01em;
+  text-transform: none;
+}
+button.check:hover:not(:disabled),
+button.check-all:hover:not(:disabled) {
+  background: var(--accent);
+  color: #fff;
+}
+/* Disabled means "in flight", so it should read as busy rather than dead. */
+button.check:disabled, button.check-all:disabled {
+  opacity: .55;
+  border-color: var(--line);
+  color: var(--dim);
+}

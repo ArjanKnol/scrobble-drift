@@ -464,8 +464,11 @@ const code = html
   ok("and it is capped", /slice\(0, DISCOVERY_CAP\)/.test(code),
      "Uncapped, a leak-heavy library is back to twenty minutes.");
 
-  ok("a per-finding check button exists", /button class="check ghost"/.test(code));
-  ok("and a check-all", /button class="check-all ghost"/.test(code));
+  // Class list, not an exact string: `.ghost` was dropped because it rendered a
+  // large low-contrast outline that read as disabled decoration rather than the
+  // one control on the card you are meant to press.
+  ok("a per-finding check button exists", /button class="check"/.test(code));
+  ok("and a check-all", /button class="check-all/.test(code));
   ok("the handler is delegated, so it survives a re-render",
      /\$\("issues"\)\.onclick = async/.test(code),
      "Per-button binding leaves dead handlers behind on every filter change.");
