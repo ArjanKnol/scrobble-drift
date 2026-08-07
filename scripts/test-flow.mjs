@@ -451,6 +451,52 @@ const code = html
   }
 }
 
+/* ---- 15. on-demand resolution ------------------------------------------ */
+{
+  /*
+   * The scan resolved everything up front: 312 lookups and twenty minutes on a
+   * 2,000-scrobble library, to attach detail to findings nobody had opened.
+   * Enrichment moved to a button; discovery stayed in the scan, capped.
+   */
+  ok("step 2 is discovery only", /j\.kind === "era"/.test(code) &&
+     /DISCOVERY_CAP/.test(code),
+     "Splits and blank albums are enrichment and belong on a button.");
+  ok("and it is capped", /slice\(0, DISCOVERY_CAP\)/.test(code),
+     "Uncapped, a leak-heavy library is back to twenty minutes.");
+
+  ok("a per-finding check button exists", /button class="check ghost"/.test(code));
+  ok("and a check-all", /button class="check-all ghost"/.test(code));
+  ok("the handler is delegated, so it survives a re-render",
+     /\$\("issues"\)\.onclick = async/.test(code),
+     "Per-button binding leaves dead handlers behind on every filter change.");
+  ok("findings are addressed by index into report.issues",
+     /data-idx="\$\{report\.issues\.indexOf\(i\)\}"/.test(code),
+     "Position in the filtered list changes when the filter does.");
+
+  // The state that must not be conflated with "not checked".
+  // Matched across a line break: the template wraps, so a literal phrase spanning
+  // the wrap never appears in the source as written.
+  ok("a checked-but-unresolved finding says so",
+     /i\.unresolved[\s\S]{0,220}release database has an entry/.test(code),
+     "Otherwise 'we asked and got nothing' looks identical to 'we never asked'.");
+  ok("and a resolvable, unchecked finding offers the button",
+     /!isResolvable\(i\) \? "" :/.test(code));
+
+  // Era tracks skip Spotify here too: measured 2 hits in 318 tracks.
+  const at = code.indexOf("async function resolveIssue");
+  const body = code.slice(at, code.indexOf("async function checkAll"));
+  ok(/issue\.kind !== "era"/.test(body),
+     "the button skips Spotify for unreleased material, as the scan does");
+  ok(/artistExists: \(\) => \(r \? Boolean\(r\.found\) : null\)/.test(body),
+     "a failed artist lookup stays unknown rather than becoming a false negative");
+
+  // Dropping a finding shifts every later index, so order matters.
+  const all = code.slice(code.indexOf("async function checkAll"));
+  ok(/sort\(\(a, b\) => b - a\)/.test(all),
+     "check-all resolves highest index first, so a dropped finding cannot " +
+     "shift the indices still queued");
+}
+
 console.log(`\n  ${pass} passed, ${fails.length} failed`);
 if (fails.length) {
   console.log("\n  FAILED");

@@ -50,13 +50,15 @@
            align-items:baseline;color:var(--dim);font-size:12.5px">
       <input type="checkbox" id="resolve" checked
              style="min-width:auto;width:auto;position:relative;top:2px">
-      <span>Look up real release data
-        <button type="button" class="i" data-tip="Adds the consolidation target
-          for each split album, and checks whether any of your unreleased
-          material has since had an official release. Spotify is checked first
-          because it answers a whole artist at once; anything it has never had
-          falls through to MusicBrainz, which is slower but knows about bootlegs
-          and pre-streaming releases. Results appear before this runs and update
+      <span>Check for leaks that have since been released
+        <button type="button" class="i" data-tip="Looks up your most-played
+          unreleased tracks to see whether any has since had an official release.
+          This is the only check that cannot be done on demand, because the
+          finding exists only once the lookup has run: you cannot click something
+          that is not on screen yet. Everything else, like which album a split
+          should consolidate into, now has a Check button on the finding itself,
+          so it costs a lookup only when you actually want the answer. Results
+          appear before this runs and update
           as it finishes.">i</button>
       </span>
     </label>
@@ -137,6 +139,7 @@ import {
   analyse, partitionEra, resolutionPlan, d0Resolve, d14eReleasedSince,
   eraVerificationPlan, verifyEraNames, hygieneScore, chartImpact,
   weakEraCandidates, officialKey, d5Resolve, byImportance, d8VerifyJointCredits,
+  resolveOne, isResolvable,
 } from "./drift.js";
 
 import { apiBase, isConfigured, activeLinks } from "./config.js";
@@ -542,10 +545,11 @@ $("f").onsubmit = async (e) => {
     if ($("resolve").checked && !abort) {
       const t2 = Date.now();
       stats.phase = "resolving";
-      setPhase(2, 2, "Looking up real release data",
-               "Your results are already below and are complete except for " +
-               "release dates and consolidation targets. This step only adds " +
-               "detail, so you can read the findings now or leave this running.");
+      setPhase(2, 2, "Checking for leaks that have since been released",
+               "Your findings are already complete and readable below. This step " +
+               "only looks for unreleased tracks that have since had an official " +
+               "release, which is the one thing that cannot be checked on demand. " +
+               "Everything else has a Check button on the finding itself.");
       /*
        * Step 2 has its OWN catch, because a failure here is not a failed scan.
        *
@@ -1231,7 +1235,28 @@ async function fetchAll(user, cap, apiKey) {
  */
 async function resolvePhase(scrobbles, apiKey) {
   const base = apiBase().replace(/\/+$/, "");
-  const plan = resolutionPlan(scrobbles);
+  /*
+   * Step 2 is DISCOVERY ONLY now, and capped.
+   *
+   * It used to resolve everything: splits, blank albums and unreleased tracks
+   * alike. Measured on a 2,000-scrobble library that was 312 lookups and about
+   * twenty minutes, to attach detail to findings nobody had opened yet.
+   *
+   * Splits and blank albums are ENRICHMENT: the finding is already on screen and
+   * already correct, and the lookup only adds a consolidation target. Those moved
+   * to a button on the finding itself, so they cost a call only when someone
+   * actually wants the answer.
+   *
+   * What cannot move is DISCOVERY. D14e reports that a leak has since had an
+   * official release, and that finding exists only because a lookup ran. Nobody
+   * can click a finding that is not there. So era tracks stay in the scan, capped
+   * at the most-played DISCOVERY_CAP, which keeps this to about a minute instead
+   * of twenty while leaving the detector alive.
+   */
+  const DISCOVERY_CAP = 60;
+  const plan = resolutionPlan(scrobbles)
+    .filter((j) => j.kind === "era")
+    .slice(0, DISCOVERY_CAP);
   if (!plan.length) return;
 
   // Era names awaiting a sequel-vs-typo ruling are looked up too, so those
@@ -1950,6 +1975,79 @@ const SUBSCORE_TIPS = {
     "had an official release.",
 };
 
+/*
+ * Resolve one finding on demand, using the same paced, cached, breaker-guarded
+ * helpers the scan uses. Nothing here talks to an upstream directly.
+ *
+ * These live outside resolvePhase because they run long after it has finished,
+ * from a click, so they cannot close over its locals. They rebuild the small
+ * amount of context they need instead.
+ */
+async function resolveIssue(idx) {
+  const issue = report?.issues?.[idx];
+  if (!issue || !isResolvable(issue)) return;
+
+  const base = apiBase().replace(/\/+$/, "");
+  const one = new Pacer({ perSecond: 5, concurrency: 4 });
+
+  const call = async (path, params) => {
+    const qs = new URLSearchParams(params);
+    await one.slot();
+    try {
+      const res = await fetch(`${base}${path}?${qs}`);
+      if (!res.ok) return null;
+      return await res.json();
+    } catch { return null; } finally { one.release(); }
+  };
+
+  /*
+   * Spotify first, MusicBrainz second, exactly as the scan does, EXCEPT for
+   * unreleased material. Measured: Spotify resolved 2 of 318 unreleased tracks,
+   * because it does not carry leaks. Asking it here would spend a call to learn
+   * nothing and make the button feel slow for the findings most likely to need it.
+   */
+  const lookup = async (artist, track) => {
+    if (issue.kind !== "era") {
+      const sp = await call("/api/spotify/track", { artist, track });
+      if (sp?.groups?.length) return sp;
+    }
+    return await call("/api/mb/recording", { artist, track });
+  };
+
+  let resolved;
+  if (issue.detector === "D8") {
+    const r = await call("/api/spotify/artist-albums", { artist: issue.verify_artist });
+    // null is a failed call, not an answer: leave the finding untouched.
+    resolved = resolveOne(issue, null,
+      { artistExists: () => (r ? Boolean(r.found) : null) });
+  } else {
+    const answer = await lookup(issue.artist, issue.track);
+    resolved = resolveOne(issue, () => answer);
+  }
+
+  if (resolved?.dropped) report.issues.splice(idx, 1);
+  else report.issues[idx] = resolved;
+}
+
+/** Resolve every visible finding that has not been checked yet. */
+async function checkAll(btn) {
+  const idxs = report.issues
+    .map((i, n) => [i, n])
+    .filter(([i]) => isResolvable(i) && !i.resolved && !i.dropped)
+    .map(([, n]) => n);
+  if (!idxs.length) return;
+
+  btn.disabled = true;
+  let done = 0;
+  // Highest index first, so a dropped finding cannot shift the indices of the
+  // ones still queued.
+  for (const idx of idxs.sort((a, b) => b - a)) {
+    await resolveIssue(idx);
+    btn.textContent = `Checking ${++done} of ${idxs.length}…`;
+  }
+  render();
+}
+
 function render() {
   const d = report, p = d.profile, h = d.hygiene, era = d.era, im = d.impact;
   $("out").innerHTML = `
@@ -2176,8 +2274,24 @@ function issues() {
   const list = report.issues.filter((i) =>
     (!fDet || i.detector === fDet) && (!fCls || i.class === fCls)).slice(0, 200);
 
-  $("issues").innerHTML = list.length ? list.map((i) => `
-    <div class="issue">
+  /*
+   * Findings are addressed by index into report.issues, not by position in the
+   * filtered list, so a button still points at the right finding after the list
+   * is filtered or re-sorted.
+   */
+  const pending = report.issues.filter(
+    (i) => isResolvable(i) && !i.resolved && !i.dropped).length;
+
+  $("issues").innerHTML = (pending ? `
+    <div class="panel" style="margin-bottom:9px;display:flex;gap:11px;
+         align-items:center;flex-wrap:wrap">
+      <button class="check-all ghost" type="button">Check all ${N(pending)}</button>
+      <span class="note" style="margin:0;color:var(--dim)">Each finding can be
+        checked on its own. This does them all, about
+        ${pending < 20 ? "a few seconds" : Math.max(1, Math.round(pending / 60)) + " min"},
+        and the answers are shared so nobody pays for them twice.</span>
+    </div>` : "") + (list.length ? list.map((i) => `
+    <div class="issue" data-idx="${report.issues.indexOf(i)}">
       <h3>${esc(i.title)}</h3>
       <div>
         <span class="tag t-${i.class}">${i.class}</span>
@@ -2253,7 +2367,52 @@ function issues() {
               library</span>${links.join("")}</div>`
           : "";
       })()}
-    </div>`).join("") : `<div class="panel">Nothing matches that filter.</div>`;
+      ${/*
+         * Four states, and the fourth is the reason this exists.
+         *
+         * unchecked  a lookup could add detail, and has not run
+         * checking   in flight
+         * resolved   ran, and the detail is above
+         * unresolved ran, and the databases had nothing
+         *
+         * "Not checked" and "checked, nothing found" must never look alike. The
+         * scan used to resolve everything up front, so absence of detail always
+         * meant "nothing found"; now that most findings go unchecked, conflating
+         * the two would misrepresent what the tool actually knows. That confusion
+         * has been the root cause of four separate bugs in this project.
+         */
+        !isResolvable(i) ? "" :
+        i.dropped ? "" :
+        i.unresolved
+          ? `<div class="note" style="margin-top:9px;opacity:.7">Checked: no
+              release database has an entry for this, which is normal for
+              unreleased material.</div>`
+          : i.resolved
+          ? ""
+          : `<div style="margin-top:9px">
+              <button class="check ghost" type="button">Check release data</button>
+              <span class="note" style="margin:0 0 0 9px;color:var(--dim)">
+                Looks up the consolidation target and release date for this one
+                finding.</span>
+            </div>`}
+    </div>`).join("") : `<div class="panel">Nothing matches that filter.</div>`);
+
+  /*
+   * Delegated, so it survives every re-render. Binding per button would leave
+   * dead handlers behind each time the list is filtered.
+   */
+  $("issues").onclick = async (ev) => {
+    const btn = ev.target.closest("button.check, button.check-all");
+    if (!btn) return;
+    if (btn.classList.contains("check-all")) return checkAll(btn);
+    const card = btn.closest(".issue");
+    const idx = Number(card?.dataset.idx);
+    if (!Number.isInteger(idx)) return;
+    btn.disabled = true;
+    btn.textContent = "Checking…";
+    await resolveIssue(idx);
+    render();
+  };
 }
 </script>
 </body>

@@ -206,6 +206,33 @@ which containment cannot catch.
 
 ---
 
+## Resolution is on demand
+
+The scan used to resolve every finding up front. Measured on a 2,000-scrobble
+library that was **312 lookups and about twenty minutes**, spent attaching detail
+to findings nobody had opened. Attention is demand-driven, so resolution is too.
+
+The split that makes this safe:
+
+**Enrichment** adds detail to a finding that already exists and is already
+correct. Which album a split should consolidate into, which album a blank-album
+track belongs to, whether a joint artist credit is a real act. Nothing disappears
+if it never runs, so each of these gets a **Check** button on the finding itself,
+plus a **Check all** for the impatient. One finding, one or two calls, and the
+answer goes into the shared cache so nobody pays for it twice.
+
+**Discovery** is the opposite: the finding exists *only* because the lookup ran.
+"This leak has since had an official release" cannot be a button, because you
+cannot click a finding that is not on screen. So that stays in the scan, capped at
+the 60 most-played unreleased tracks, which takes about a minute rather than
+twenty and keeps the detector alive.
+
+A finding therefore has four states, and the fourth is the one that matters:
+unchecked, checking, checked-and-resolved, and **checked-and-nothing-found**. That
+last pair must never look alike. When the scan resolved everything, absence of
+detail always meant "nothing found"; now that most findings go unchecked,
+conflating the two would misrepresent what the tool knows.
+
 ## The hygiene score
 
 **100 is reserved for a library with nothing left to fix.** Any actionable
