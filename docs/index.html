@@ -1528,16 +1528,40 @@ async function resolvePhase(scrobbles, apiKey) {
      * AND once per hit, and inflated `total` by the artist count to compensate,
      * which is why the estimate lurched.
      */
-    $("status").textContent =
-      `Checking ${N(plan.length)} tracks against Spotify first (about ${
-        Math.round(plan.length / 3) > 90
-          ? Math.round(plan.length / 180) + " min"
-          : Math.round(plan.length / 3) + "s"})…`;
+    $("status").textContent = spotifyJobs.length
+      ? `Checking ${N(spotifyJobs.length)} tracks against Spotify first ` +
+        `(about ${Math.round(spotifyJobs.length / 5) > 90
+          ? Math.round(spotifyJobs.length / 300) + " min"
+          : Math.round(spotifyJobs.length / 5) + "s"})…` +
+        (eraTracks.length
+          ? ` ${N(eraTracks.length)} unreleased tracks go straight to MusicBrainz, ` +
+            `which is the one that catalogues them.`
+          : "")
+      : `${N(eraTracks.length)} unreleased tracks go straight to MusicBrainz, ` +
+        `which is the one that catalogues them.`;
 
-    const misses = [];
+    /*
+     * Era tracks skip Spotify entirely and go straight to MusicBrainz.
+     *
+     * Measured on a real unreleased-heavy library: 318 tracks checked against
+     * Spotify, 2 resolved. A 0.6% hit rate costing 159 seconds, after which 316
+     * misses went to MusicBrainz anyway. Spotify does not carry leaks, which the
+     * era-NAME phase already says out loud and then does not act on for era
+     * TRACKS.
+     *
+     * Nothing is lost by routing them straight to MusicBrainz. D14e asks "has this
+     * leak since had an official release", and MusicBrainz catalogues both
+     * bootlegs and official releases, so it answers that question at least as well
+     * as Spotify. It also unlocks the per-artist catalogue batching in
+     * splitByStrategy: unreleased material clusters heavily by artist, so one
+     * browse can cover dozens of tracks that would otherwise be one lookup each.
+     */
+    const spotifyJobs = plan.filter((j) => j.kind !== "era");
+    const eraTracks = plan.filter((j) => j.kind === "era");
+    const misses = [...eraTracks];
     let gaveUp = false, checked = 0;
     const phaseStart = Date.now();
-    await pool(plan, 6, async (job) => {
+    await pool(spotifyJobs, 6, async (job) => {
       if (gaveUp) { misses.push(job); return; }
 
       if (spFails >= SP_GIVE_UP) {
@@ -1581,7 +1605,7 @@ async function resolvePhase(scrobbles, apiKey) {
       if (!hit.error && hit.groups.length) {
         recCache.set(key(job.artist, job.track), hit);
         spHits++;
-        tick(`Spotify: ${N(spHits)} of ${N(plan.length)} tracks resolved`);
+        tick(`Spotify: ${N(spHits)} of ${N(spotifyJobs.length)} tracks resolved`);
       } else {
         misses.push(job);
       }
@@ -1596,8 +1620,8 @@ async function resolvePhase(scrobbles, apiKey) {
        */
       checked++;
       const per = checked / Math.max((Date.now() - phaseStart) / 1000, 0.001);
-      const left = Math.round((plan.length - checked) / Math.max(per, 0.01));
-      say(`Spotify: ${N(checked)} of ${N(plan.length)} checked` +
+      const left = Math.round((spotifyJobs.length - checked) / Math.max(per, 0.01));
+      say(`Spotify: ${N(checked)} of ${N(spotifyJobs.length)} checked` +
           `, ${N(spHits)} resolved` +
           (cacheHits ? ` · ${N(cacheHits)} from local cache` : "") +
           (checked > 5 ? ` · about ${left > 90

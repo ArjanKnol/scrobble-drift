@@ -391,6 +391,40 @@ const code = html
      "and it sits on the hit branch, not the miss branch");
 }
 
+/* ---- 13. unreleased tracks do not go to Spotify ------------------------- */
+{
+  /*
+   * Measured on a real unreleased-heavy library: 318 tracks checked against
+   * Spotify, 2 resolved. A 0.6% hit rate costing 159 seconds, after which 316
+   * misses went to MusicBrainz anyway. Spotify does not carry leaks, which the
+   * era-NAME phase already states plainly and then failed to apply to era TRACKS.
+   *
+   * Routing them straight to MusicBrainz loses nothing: D14e asks whether a leak
+   * has since had an official release, and MusicBrainz catalogues bootlegs AND
+   * official releases. It also unlocks per-artist catalogue batching, because
+   * unreleased material clusters hard by artist.
+   */
+  ok("era tracks are separated out before the Spotify pass",
+     /const eraTracks = plan\.filter\(\(j\) => j\.kind === "era"\)/.test(code));
+  ok("and the Spotify pass runs only over the rest",
+     /await pool\(spotifyJobs, \d+, async \(job\) => \{/.test(code),
+     "Pooling over `plan` again would undo this silently.");
+  ok("era tracks start out as MusicBrainz work rather than being dropped",
+     /const misses = \[\.\.\.eraTracks\]/.test(code),
+     "They must still be resolved, just by the source that has them.");
+
+  // The counters have to describe the jobs this phase actually handles, or the
+  // progress line reads "2 of 319" while only 60 are being attempted.
+  ok("phase progress counts the Spotify jobs, not the whole plan",
+     /of \$\{N\(spotifyJobs\.length\)\} checked/.test(code));
+  ok(!/of \$\{N\(plan\.length\)\} checked/.test(code),
+     "no counter still measures against the full plan");
+
+  ok("and the user is told where the unreleased tracks went",
+     /go straight to MusicBrainz/.test(code),
+     "Otherwise a shrunken Spotify count looks like work went missing.");
+}
+
 console.log(`\n  ${pass} passed, ${fails.length} failed`);
 if (fails.length) {
   console.log("\n  FAILED");
