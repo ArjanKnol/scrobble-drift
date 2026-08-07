@@ -425,6 +425,32 @@ const code = html
      "Otherwise a shrunken Spotify count looks like work went missing.");
 }
 
+/* ---- 14. the Spotify phase locals are declared before they are read ----- */
+{
+  /*
+   * A temporal dead zone error shipped: the status line read `spotifyJobs.length`
+   * about twenty lines ABOVE `const spotifyJobs = ...`. `const` is hoisted but
+   * unusable until its initialiser runs, so this threw "Cannot access
+   * 'spotifyJobs' before initialization" on the first real scan. `node --check`
+   * cannot see it, because it is a runtime fault and not a syntax one.
+   *
+   * A general "nothing is read before it is declared" check was tried first and
+   * abandoned. A flat text scan cannot tell an out-of-order read from a name
+   * legitimately redeclared in an inner scope, and it flagged five innocent
+   * locals. Doing it properly needs scope analysis, which is a parser, which is
+   * more machinery than this earns. So this checks the specific variables the
+   * phase depends on, which is verifiable and honest about its limits.
+   */
+  for (const name of ["spotifyJobs", "eraTracks", "misses", "phaseStart"]) {
+    const decl = code.search(new RegExp(`^\\s*(?:const|let) ${name}\\b`, "m"));
+    const first = code.search(new RegExp(`\\b${name}\\b`));
+    ok(`${name} is declared before it is used`,
+       decl > 0 && first >= decl,
+       `declared at ${decl}, first read at ${first}. A const read above its ` +
+       `declaration throws at runtime and passes every static check.`);
+  }
+}
+
 console.log(`\n  ${pass} passed, ${fails.length} failed`);
 if (fails.length) {
   console.log("\n  FAILED");

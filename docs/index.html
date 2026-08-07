@@ -1528,18 +1528,6 @@ async function resolvePhase(scrobbles, apiKey) {
      * AND once per hit, and inflated `total` by the artist count to compensate,
      * which is why the estimate lurched.
      */
-    $("status").textContent = spotifyJobs.length
-      ? `Checking ${N(spotifyJobs.length)} tracks against Spotify first ` +
-        `(about ${Math.round(spotifyJobs.length / 5) > 90
-          ? Math.round(spotifyJobs.length / 300) + " min"
-          : Math.round(spotifyJobs.length / 5) + "s"})…` +
-        (eraTracks.length
-          ? ` ${N(eraTracks.length)} unreleased tracks go straight to MusicBrainz, ` +
-            `which is the one that catalogues them.`
-          : "")
-      : `${N(eraTracks.length)} unreleased tracks go straight to MusicBrainz, ` +
-        `which is the one that catalogues them.`;
-
     /*
      * Era tracks skip Spotify entirely and go straight to MusicBrainz.
      *
@@ -1560,6 +1548,18 @@ async function resolvePhase(scrobbles, apiKey) {
     const eraTracks = plan.filter((j) => j.kind === "era");
     const misses = [...eraTracks];
     let gaveUp = false, checked = 0;
+    $("status").textContent = spotifyJobs.length
+      ? `Checking ${N(spotifyJobs.length)} tracks against Spotify first ` +
+        `(about ${Math.round(spotifyJobs.length / 5) > 90
+          ? Math.round(spotifyJobs.length / 300) + " min"
+          : Math.round(spotifyJobs.length / 5) + "s"})…` +
+        (eraTracks.length
+          ? ` ${N(eraTracks.length)} unreleased tracks go straight to MusicBrainz, ` +
+            `which is the one that catalogues them.`
+          : "")
+      : `${N(eraTracks.length)} unreleased tracks go straight to MusicBrainz, ` +
+        `which is the one that catalogues them.`;
+
     const phaseStart = Date.now();
     await pool(spotifyJobs, 6, async (job) => {
       if (gaveUp) { misses.push(job); return; }
