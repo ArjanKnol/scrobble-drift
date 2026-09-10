@@ -2258,6 +2258,81 @@ export function eraVerificationPlan(issues) {
   return [...jobs.values()];
 }
 
+/* ---------------------------------------------------- discovery offers ---- */
+/**
+ * Work that can only be found by looking, described so it can be OFFERED.
+ *
+ * The distinction that used to justify a scan phase, and the reasoning that was
+ * wrong about it.
+ *
+ * Enrichment adds detail to a finding already on screen, so it can wait for a
+ * button. Discovery creates the finding, and the argument ran: you cannot click a
+ * button on a finding that is not there, therefore discovery has to run during
+ * the scan. That conclusion does not follow. You cannot click the FINDING, but
+ * you can click the CATEGORY, and the category is knowable from local data alone.
+ * "312 of your tracks are filed as unreleased" needs no network at all.
+ *
+ * So discovery becomes an offer: a card describing what could be found, what it
+ * would cost, and a button. Nothing is lost, the scan makes zero external calls,
+ * and the user decides whether the minute is worth it. That last part matters
+ * beyond politeness, because these lookups are the expensive ones and they were
+ * being spent on every scan for findings nobody had asked for.
+ *
+ * Returns descriptors, not findings. Each carries the jobs its lookup needs, so
+ * the caller does the pacing, progress and caching that do not belong in here.
+ */
+export function discoveryOffers(scrobbles) {
+  const { era, rest } = partitionEra(scrobbles || []);
+  const offers = [];
+
+  // D14e: unreleased material that may since have had an official release.
+  const eraTracks = new Map();
+  for (const s of era) {
+    if (!s.artist || !s.track) continue;
+    const k = `${s.artist}␟${s.track}`;
+    const cur = eraTracks.get(k) || { artist: s.artist, track: s.track, plays: 0 };
+    cur.plays++;
+    eraTracks.set(k, cur);
+  }
+  if (eraTracks.size) {
+    const jobs = [...eraTracks.values()].sort((a, b) => b.plays - a.plays);
+    offers.push({
+      id: "era_released",
+      detector: "D14e",
+      title: `${jobs.length} track${jobs.length === 1 ? " is" : "s are"} filed ` +
+             `as unreleased or leaked`,
+      note: "Some may have had an official release since you tagged them, which " +
+            "would mean the plays are stranded on a bootleg entry instead of " +
+            "counting towards the record. Nothing in your own data can show " +
+            "this, so it needs a lookup per track.",
+      action: "Check for official releases",
+      jobs,
+    });
+  }
+
+  // D16: singles that were never re-scrobbled once the album arrived.
+  const owned = new Set();
+  for (const s of rest) if (s.album) owned.add(norm(s.album));
+  const cands = d16Candidates(rest);
+  if (cands.length) {
+    offers.push({
+      id: "stranded_singles",
+      detector: "D16",
+      title: `${cands.length} track${cands.length === 1 ? "" : "s"} ` +
+             `${cands.length === 1 ? "is" : "are"} only filed under a single or EP`,
+      note: "If a track later appeared on an album and you never played it " +
+            "again, the plays stay on the single and your album chart never " +
+            "sees them. Your library holds only one album string for these, so " +
+            "there is nothing to compare against locally.",
+      action: "Check for album versions",
+      jobs: cands,
+      owned,
+    });
+  }
+
+  return offers;
+}
+
 /* ------------------------------------ D0 and D14e: MusicBrainz resolution */
 
 /**
@@ -3047,9 +3122,19 @@ export function hygieneScore(totalPlays, issues, albumStrings = 0, weights = nul
  * two distinct recordings destroys information that cannot be recovered, while
  * leaving a real split alone merely leaves a report item.
  *
- * MusicBrainz gives every recording its own ID, so this is answerable rather than
- * guessable. Both /api/mb/recording and /api/spotify/track return groups carrying
- * `recording_id` where it is known.
+ * Two identifiers answer it, and both are carried on the group shape.
+ *
+ *   recording_id  MusicBrainz, on /api/mb/recording. Authoritative, one second
+ *                 per lookup.
+ *   isrc          Spotify, on /api/spotify/track. The international standard
+ *                 code for a RECORDING, assigned at the master rather than at
+ *                 the release, so a remix or a re-recording gets its own. Just
+ *                 as conclusive and vastly faster.
+ *
+ * They are namespaced apart before comparison. A raw union would let a
+ * MusicBrainz UUID and an ISRC land in one set, and while a collision between
+ * those two formats is not realistic, a set that mixes identifier systems is the
+ * kind of thing that silently becomes wrong when a third source is added.
  *
  * Returns "same", "different", or "unknown". The third is not a failure and must
  * never be collapsed into "different": an absent ID means nobody told us, and
@@ -3057,15 +3142,88 @@ export function hygieneScore(totalPlays, issues, albumStrings = 0, weights = nul
  * codebase.
  */
 export function sameRecording(a, b) {
-  const ids = (r) => new Set(
-    (r?.groups || [])
-      .map((g) => g?.recording_id)
-      .filter(Boolean));
+  const ids = (r) => {
+    const mb = new Set(), isrc = new Set();
+    for (const g of r?.groups || []) {
+      if (g?.recording_id) mb.add(String(g.recording_id));
+      if (g?.isrc) isrc.add(String(g.isrc).toUpperCase());
+    }
+    return { mb, isrc };
+  };
 
   const A = ids(a), B = ids(b);
-  if (!A.size || !B.size) return "unknown";
-  for (const id of A) if (B.has(id)) return "same";
-  return "different";
+
+  /*
+   * Compared PER IDENTIFIER SYSTEM, and this is not a stylistic point.
+   *
+   * The client tries Spotify first and falls back to MusicBrainz, so one title
+   * can come back carrying only an ISRC while the other carries only a
+   * MusicBrainz recording ID. Pooling them into one set, which is how this was
+   * first written, makes those two sets trivially disjoint and returns
+   * "different" with total confidence, on no evidence whatsoever.
+   *
+   * That failure would have landed precisely on the case this was built for: a
+   * track revised after release, where the original is gone from Spotify and only
+   * MusicBrainz still has it. The tool would have got the right answer by
+   * accident, for a reason that is wrong, and would have got the reverse case
+   * wrong the same way.
+   *
+   * "Different" therefore requires BOTH sides to speak the same identifier
+   * system. Anything else is "unknown", which is honest.
+   */
+  let comparable = false;
+  for (const k of ["mb", "isrc"]) {
+    if (!A[k].size || !B[k].size) continue;
+    comparable = true;
+    for (const id of A[k]) if (B[k].has(id)) return "same";
+  }
+  return comparable ? "different" : "unknown";
+}
+
+/**
+ * Do two title variants occupy separate, consecutive stretches of time?
+ *
+ * The signal that the Kanye case turned on. `I CAN'T WAIT` ran March to June and
+ * `I CAN'T WAIT (feat. Ms. Lauryn Hill)` June to August, with no overlap. The
+ * report saw those dates, printed them, and drew nothing from them: it still said
+ * "standardise on 'I CAN'T WAIT'", which for that track is actively wrong advice.
+ *
+ * The album was revised after release. Ye does this repeatedly, and he is not
+ * alone: a track gets a guest verse added, or remixed, or re-cut, and the album
+ * updates in place on streaming. The listener's history then shows one title
+ * stopping and another starting, because the file itself changed underneath them.
+ * Nothing was mis-tagged and there is nothing to standardise.
+ *
+ * D4 has had this reasoning for album strings since `temporalSignature`. D8 never
+ * got it, which is why title variants were the one place the report gave
+ * confident bad advice.
+ *
+ * IMPORTANT: on its own this is suggestive, not conclusive. The identical shape
+ * appears when somebody changes music player, or when Last.fm corrects its own
+ * metadata, and both of those ARE ordinary tagging inconsistencies worth fixing.
+ * So this lowers confidence and explains itself; it never asserts on its own. It
+ * becomes conclusive only alongside a recording verdict.
+ */
+export function variantTiming(issue) {
+  const m = (issue?.members || []).filter(
+    (x) => x && x.track && Number.isFinite(x.first) && Number.isFinite(x.last));
+  if (m.length !== 2) return null;
+  const [a, b] = [...m].sort((x, y) => x.first - y.first);
+  if (a.last > b.first) return null;              // overlapping, so concurrent
+
+  // Which one gained the credit. A feature appearing in the LATER title is the
+  // direction a revised release produces; the reverse is likelier to be Last.fm
+  // tidying a title after the fact.
+  const gained = hasCredit(b.track) && !hasCredit(a.track);
+  return {
+    earlier: a.track, later: b.track,
+    boundary: b.first, gained_credit: gained,
+  };
+}
+
+/** Does this title carry a feature credit of any kind? */
+function hasCredit(title) {
+  return /\(?\s*(?:feat\.?|ft\.?|featuring|with)\s+/i.test(String(title || ""));
 }
 
 /**
@@ -3076,31 +3234,116 @@ export function sameRecording(a, b) {
  * merely lower confidence: it makes the suggestion WRONG, so the finding must
  * stop recommending a merge and say what it actually found instead.
  */
-export function applyRecordingVerdict(issue, verdict) {
-  if (!issue || verdict === "unknown") return issue;
+export function applyRecordingVerdict(issue, verdict, timing = null) {
+  if (!issue) return issue;
+
+  /*
+   * The verdict is attached as its own FIELD, not appended to the suggestion.
+   *
+   * It used to be concatenated onto the end of `suggest`, and that is why the
+   * button felt like it did nothing: the answer arrived as a third sentence
+   * tacked onto an existing paragraph, in the same colour, below a headline still
+   * asserting the opposite. The reader looked up a track and could not tell what
+   * they had learned.
+   *
+   * A separate field lets the UI give the answer its own line and its own
+   * treatment, which is the whole point of having asked.
+   */
+  const timed = timing
+    ? ` Your plays do not overlap: '${timing.earlier}' stops where ` +
+      `'${timing.later}' starts, which is what a revised release looks like ` +
+      `from the listener's side.`
+    : "";
 
   if (verdict === "same") {
     return {
       ...issue,
+      class: "error",
       confidence: 0.97,
-      evidence: "same MusicBrainz recording",
-      suggest: (issue.suggest || "") +
-        " Confirmed: both spellings are the same recording in MusicBrainz, so " +
-        "merging them is provably correct rather than a guess.",
+      evidence: "same recording",
+      verdict: {
+        state: "same",
+        text: "One recording, two names. The release databases give both " +
+              "spellings the same recording ID, so merging them is provably " +
+              "correct rather than a guess.",
+      },
+    };
+  }
+
+  if (verdict === "different") {
+    return {
+      ...issue,
+      class: "review",
+      confidence: 0.1,
+      evidence: "different recordings",
+      resolved: true,
+      no_auto_action: true,
+      /*
+       * The old suggestion is RETIRED, not left sitting above the verdict.
+       *
+       * It says "standardise on 'X'", and the lookup has just established that
+       * doing so would merge two different masters. Leaving it in place would
+       * have the card contradict itself, with the wrong half printed first and in
+       * the more prominent position. It is kept, dimmed and labelled, because
+       * seeing what the tool believed before the check is useful; it is no longer
+       * presented as advice.
+       */
+      suggest: null,
+      superseded: issue.suggest || null,
+      verdict: {
+        state: "different",
+        text: "Two different recordings, not one track under two names. The " +
+              "credited version is a separate master: a remix, a re-cut, or a " +
+              "guest verse added to a later edition of the album." + timed +
+              " Do not merge them. It cannot be undone, and it would destroy a " +
+              "real distinction.",
+      },
+    };
+  }
+
+  /*
+   * Unknown, which is a real outcome and gets said out loud.
+   *
+   * Previously this returned the issue untouched, so a lookup that resolved
+   * nothing was indistinguishable from a button that had not been pressed. That
+   * is the same "absence of an answer treated as no answer at all" mistake this
+   * codebase keeps making, one step further along.
+   *
+   * The timing evidence still applies here, and it is the one case where it
+   * carries real weight on its own: no database could confirm either way, but the
+   * plays are cleanly sequential, so a merge is a gamble rather than a fix.
+   */
+  if (timing) {
+    return {
+      ...issue,
+      class: "review",
+      confidence: 0.3,
+      evidence: "sequential plays, unconfirmed",
+      resolved: true,
+      no_auto_action: true,
+      // Same reasoning as the confirmed case: the finding no longer recommends a
+      // merge, so it must stop printing one.
+      suggest: null,
+      superseded: issue.suggest || null,
+      verdict: {
+        state: "unclear",
+        text: "No release database could confirm whether these are one " +
+              "recording or two." + timed + " That is how a track revised after " +
+              "release behaves, so treat this as two versions until you have " +
+              "listened. Merging on a guess is not worth it.",
+      },
     };
   }
 
   return {
     ...issue,
-    class: "review",
-    confidence: 0.1,
-    evidence: "different recordings",
     resolved: true,
-    suggest:
-      "These are two DIFFERENT recordings in MusicBrainz, not one track under two " +
-      "names, so the version with the feature credit is likely a remix or a " +
-      "rework rather than the same song relabelled. Merging them would lose the " +
-      "distinction, and it cannot be undone. Nothing to fix here.",
+    verdict: {
+      state: "unclear",
+      text: "No release database has an entry that settles whether these are " +
+            "one recording or two, so the suggestion above is still a judgement " +
+            "call rather than a confirmed fix.",
+    },
   };
 }
 
@@ -3169,8 +3412,29 @@ export function isResolvable(issue) {
  * question and may return null for "do not know", which must leave the finding
  * alone rather than promote or drop it.
  */
-export function resolveOne(issue, lookup, { artistExists = null } = {}) {
+export function resolveOne(
+  issue, lookup, { artistExists = null, releaseExists = null } = {},
+) {
   if (!isResolvable(issue)) return issue;
+
+  /*
+   * Era names awaiting a sequel-versus-typo ruling.
+   *
+   * `'Rodeo'` and `'Rodeo 2'` differ by a version marker, which is either two
+   * real projects or one of them being a typo, and only a release database can
+   * say which. This ran as its own pass inside the scan; it belongs here, because
+   * the finding is already on screen and the lookup only settles it.
+   *
+   * verifyEraNames is reused rather than reimplemented, so the on-demand ruling
+   * and the batch ruling can never drift apart. It returns an empty array when
+   * both names turn out to be real releases, which means the finding was a false
+   * positive and should disappear.
+   */
+  if (issue.verify) {
+    const [out] = verifyEraNames([issue], releaseExists || (() => null));
+    return out ? { ...out, resolved: true }
+               : { ...issue, resolved: true, dropped: true };
+  }
 
   /*
    * ONLY joint credits take this branch.
@@ -3215,6 +3479,35 @@ export function resolveOne(issue, lookup, { artistExists = null } = {}) {
    * what artist it is credited to. Attaching it beats refusing to look.
    */
   /*
+   * TWO TITLES: ask whether they are one recording, because that is the question.
+   *
+   * This is the fix for the worst behaviour the report had. A finding that says
+   * "'I CAN'T WAIT' and 'I CAN'T WAIT (feat. Ms. Lauryn Hill)' are the same track
+   * under two names" was looking up ONE of those titles and reporting which album
+   * it appears on. Both titles are on the same album, so the answer was identical
+   * either way and settled nothing, while the headline went on recommending a
+   * merge that would have been wrong.
+   *
+   * Two lookups, one per title, and compare identifiers. That is a whole extra
+   * call, and it is the correct place to spend one: this is the only finding in
+   * the report whose advice can actively destroy something.
+   */
+  const variants = (issue.members || []).filter((m) => m?.track);
+  if (variants.length === 2 && variants[0].track !== variants[1].track) {
+    const a = lookup?.(issue.artist, variants[0].track);
+    const b = lookup?.(issue.artist, variants[1].track);
+    const out = applyRecordingVerdict(
+      issue, sameRecording(a, b), variantTiming(issue));
+    const best = (a?.groups || [])[0] || (b?.groups || [])[0] || null;
+    return {
+      ...out,
+      resolved: true,
+      external: out.external || best,
+      candidates: (a?.groups || []).slice(0, 5),
+    };
+  }
+
+  /*
    * A title-variant finding has no single `track`: the whole point is that it has
    * two. The first member is the spelling being standardised on, so that is what
    * gets looked up.
@@ -3234,12 +3527,21 @@ export function resolveOne(issue, lookup, { artistExists = null } = {}) {
     external: best,
     candidates: groups.slice(0, 5),
     evidence: issue.evidence || "release data",
-    suggest: (issue.suggest || "") +
-      ` Release data: '${best.title}'` +
-      (best.primary ? ` (${best.primary}` +
-        (best.first_release ? `, ${best.first_release})` : ")") : "") +
-      (groups.length > 1 ? ` and ${groups.length - 1} other release` +
-        `${groups.length > 2 ? "s" : ""}.` : "."),
+    /*
+     * A field, not an append. The result used to be concatenated onto the end of
+     * `suggest`, which put a freshly fetched answer in the same colour and the
+     * same paragraph as the guess it was meant to settle. It read as trailing
+     * text, and users reported the button doing nothing when it had in fact
+     * worked.
+     */
+    verdict: {
+      state: "info",
+      text: `Release data: '${best.title}'` +
+        (best.primary ? ` (${best.primary}` +
+          (best.first_release ? `, ${best.first_release})` : ")") : "") +
+        (groups.length > 1 ? `, and ${groups.length - 1} other release` +
+          `${groups.length > 2 ? "s" : ""}.` : "."),
+    },
   };
 }
 

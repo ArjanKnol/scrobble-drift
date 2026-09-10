@@ -58,7 +58,7 @@
  *
  * Bump this in the same commit as any Worker change. /api/health reports it.
  */
-const BUILD = "2026-08-06-15-honest-delay-wording";
+const BUILD = "2026-09-10-17-isrc-and-recording-release-dates";
 
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";
@@ -1040,7 +1040,28 @@ async function mbRecording(url, env, request, cors) {
         title: rg.title,
         primary: rg["primary-type"],
         secondary: rg["secondary-types"] || [],
-        first_release: rg["first-release-date"] || null,
+        /*
+         * `|| rel.date` matters here, and its absence silently disabled a whole
+         * detector.
+         *
+         * MusicBrainz's RECORDING SEARCH returns release-group stubs with no
+         * first-release-date. Verified live against this endpoint: all 31 groups
+         * for one track came back with `first_release: null`. The release's own
+         * date sits on the same object and was being ignored.
+         *
+         * D14e's first guard is "no release date, no claim", which exists to stop
+         * it announcing that a leak came out on the strength of a MusicBrainz
+         * entry for the leak itself. With every date null that guard rejected
+         * every candidate, so D14e could only ever fire from Spotify, and era
+         * tracks deliberately skip Spotify because it does not carry leaks. The
+         * detector was structurally incapable of producing a finding.
+         *
+         * The sibling parser eighty lines up has had this fallback all along.
+         * Two functions reading one upstream shape, one of them wrong: the kind
+         * of divergence a test on parsed OUTPUT catches and a test on code SHAPE
+         * never will.
+         */
+        first_release: rg["first-release-date"] || rel.date || null,
         status: rel.status || null,
         recording_id: rec.id,
       };
@@ -1319,7 +1340,12 @@ async function spTrack(url, env, cors) {
   }
 
   const { body, shared } = await spShared(
-    env, `one:${spNorm(artist)}\u241f${spNorm(track)}`, async () => {
+    // `one2:`, not `one:`. The cached shape changed when ISRC was added, and a
+    // stale entry is indistinguishable from a track Spotify has no ISRC for, so
+    // reusing the key would have made every previously-cached track answer
+    // "cannot confirm" for the whole seven-day TTL. Changing the prefix retires
+    // the old entries rather than serving them in the wrong shape.
+    env, `one2:${spNorm(artist)}\u241f${spNorm(track)}`, async () => {
     // No `limit`: Spotify refuses an explicit one above 10 on these endpoints and
     // its default is adequate. See SP_PAGE.
     const q = `track:${JSON.stringify(track)} artist:${JSON.stringify(artist)}`;
@@ -1334,7 +1360,29 @@ async function spTrack(url, env, cors) {
       const exact = spNorm(t.name) === wantTrack &&
                     (t.artists || []).some((a) => spNorm(a.name) === wantArtist);
       if (!exact) continue;
-      const g = spAlbumToGroup(t.album);
+      /*
+       * ISRC is carried through, and it is the most valuable field on this
+       * endpoint.
+       *
+       * The report's hardest question is whether two titles are one recording or
+       * two, and until now nothing answered it: the client looked up one title,
+       * reported which album it sits on, and left the actual question untouched.
+       * MusicBrainz recording IDs can settle it but cost a second each.
+       *
+       * An ISRC is the international standard code for a RECORDING, assigned at
+       * the master, not at the release. Two titles sharing an ISRC are the same
+       * master by definition, and a remix or re-recording gets its own. So this
+       * is a stronger answer than MusicBrainz gives, from a source that tolerates
+       * a hundred times the request rate.
+       *
+       * Null is normal and must stay distinguishable from "different". A missing
+       * ISRC means Spotify did not tell us, which is not evidence of anything.
+       */
+      const g = {
+        ...spAlbumToGroup(t.album),
+        isrc: t.external_ids?.isrc || null,
+        sp_track_id: t.id || null,
+      };
       const cur = best.get(g.rg_id);
       // Earliest edition wins, so a deluxe reissue does not shadow the original.
       if (!cur || (g.first_release || "9999") < (cur.first_release || "9999")) {

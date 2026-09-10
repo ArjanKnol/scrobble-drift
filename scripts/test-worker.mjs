@@ -722,5 +722,37 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
      "it throws immediately rather than retrying something that cannot succeed");
 }
 
+/* ---- both MusicBrainz parsers must read a date the same way ------------- */
+{
+  /*
+   * Found by fetching the live endpoint and reading the output rather than the
+   * code. A recording search returned 31 release groups for one track, every one
+   * with `first_release: null`, because MusicBrainz's search embeds release-group
+   * STUBS with no first-release-date. The release's own `date` was right there on
+   * the same object, and the catalogue parser eighty lines away had been reading
+   * it all along.
+   *
+   * The consequence was not cosmetic. D14e's first guard is "no release date, no
+   * claim", so with every date null it rejected every candidate. Era tracks skip
+   * Spotify on purpose, because Spotify does not carry leaks, which left D14e
+   * with no source that could ever satisfy its own guard. A detector with 22
+   * assertions behind it could not produce a finding.
+   *
+   * Asserted as a shape check because the parsers are inline in a fetch handler
+   * and not separately exported. It is the weaker kind of test, and worth being
+   * honest about that: what it really pins is that the two stay identical, which
+   * is the property that was violated.
+   */
+  const src = await readFile(
+    new URL("../worker/src/index.js", import.meta.url), "utf8");
+  const dateReads = src.match(/first_release: rg\["first-release-date"\][^,\n]*/g) || [];
+  ok(dateReads.length >= 2,
+     `both MusicBrainz parsers read a release date  (found ${dateReads.length})`);
+  ok(dateReads.every((r) => /rel\.date/.test(r)),
+     "and both fall back to the release's own date when the group has none",
+     "A search-embedded release-group stub never carries first-release-date, " +
+     "so without the fallback every date is null and D14e can never fire.");
+}
+
 console.log(`\n${pass} passed, ${fail} failed (including MusicBrainz cache block)\n`);
 process.exit(fail ? 1 : 0);

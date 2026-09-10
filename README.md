@@ -206,32 +206,74 @@ which containment cannot catch.
 
 ---
 
-## Resolution is on demand
+## A scan contacts nothing. Every lookup is offered
 
 The scan used to resolve every finding up front. Measured on a 2,000-scrobble
 library that was **312 lookups and about twenty minutes**, spent attaching detail
 to findings nobody had opened. Attention is demand-driven, so resolution is too.
 
+A scan is now your scrobbles plus local analysis. No MusicBrainz, no Spotify, no
+waiting. Every outside answer is offered inside the report, priced, and spent only
+when asked for.
+
 The split that makes this safe:
 
 **Enrichment** adds detail to a finding that already exists and is already
 correct. Which album a split should consolidate into, which album a blank-album
-track belongs to, whether a joint artist credit is a real act. Nothing disappears
-if it never runs, so each of these gets a **Check** button on the finding itself,
-plus a **Check all** for the impatient. One finding, one or two calls, and the
-answer goes into the shared cache so nobody pays for it twice.
+track belongs to, whether a joint artist credit is a real act, whether two era
+names are both real releases. Nothing disappears if it never runs, so each gets a
+**Check** button on the finding itself, plus a **Check all** for the impatient.
+The answer goes into the shared cache, so nobody pays for it twice.
 
 **Discovery** is the opposite: the finding exists *only* because the lookup ran.
-"This leak has since had an official release" cannot be a button, because you
-cannot click a finding that is not on screen. So that stays in the scan, capped at
-the 60 most-played unreleased tracks, which takes about a minute rather than
-twenty and keeps the detector alive.
+"This leak has since had an official release" cannot be a button on a finding,
+because there is no finding to click until something has been looked up.
+
+The first version of this concluded that discovery therefore had to run during the
+scan. That does not follow. You cannot click the *finding*, but you can click the
+*category*, and the category is knowable from local data alone: "312 of your
+tracks are filed as unreleased" needs no network at all. So discovery is an
+**offer card** at the top of the report, saying what could be found and what it
+would cost. Nothing is lost, and the choice belongs to the person paying for it.
+
+That reframing is also what finally wired up D16, which had been built and tested
+for weeks with no route into the report.
 
 A finding therefore has four states, and the fourth is the one that matters:
 unchecked, checking, checked-and-resolved, and **checked-and-nothing-found**. That
 last pair must never look alike. When the scan resolved everything, absence of
 detail always meant "nothing found"; now that most findings go unchecked,
 conflating the two would misrepresent what the tool knows.
+
+## Two titles, one question
+
+The report's most dangerous finding is "these two spellings are the same track",
+because acting on it merges two things irreversibly. For a long time the lookup
+behind it asked the wrong question entirely: it looked up **one** of the two
+titles and reported which album that title appears on.
+
+Ye's `I CAN'T WAIT` and `I CAN'T WAIT (feat. Ms. Lauryn Hill)` are both on
+`BULLY`. The album was revised after release and the track replaced, so these are
+two different masters. The tool looked up one title, answered "Release data:
+'BULLY' (Album, 2026-03-28)", and went on recommending the merge.
+
+It now looks up **both** titles and compares recording identifiers:
+
+| Source | Identifier | Notes |
+|---|---|---|
+| MusicBrainz | `recording_id` | Authoritative, one second per lookup |
+| Spotify | `isrc` | The standard code for a *master*, so a remix gets its own. Just as conclusive, roughly a hundred times the throughput |
+
+Compared **per identifier system**. The client falls back from Spotify to
+MusicBrainz, so one title can come back holding only an ISRC and the other only a
+MusicBrainz ID. Pooling those into one set makes them trivially disjoint and
+returns "different" with total confidence on no evidence whatsoever.
+
+Non-overlapping play dates are a second signal: one title stopping exactly where
+the other starts is what a revised release looks like from the listener's side.
+On its own it is suggestive rather than conclusive, because changing music player
+produces the same shape and *is* an ordinary tagging inconsistency. So it lowers
+confidence and explains itself; it never asserts alone.
 
 ## The hygiene score
 
