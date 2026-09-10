@@ -261,8 +261,15 @@ The first fix for this looked up **both** titles and compared recording
 identifiers. It answered your Kanye card and nothing else, and the reason is the
 single most important thing to know about this data:
 
-> Last.fm scrobbles carry the feature credit **in the title**. MusicBrainz and
+> A scrobble often carries the feature credit **in the title**. MusicBrainz and
 > Spotify put it in the **artist credit** and leave the title bare.
+
+"Often", not "always". Last.fm stores whatever the scrobbling client sends, and
+the client copies whatever its source gave it. Spotify is common enough to make
+title-embedded credits the usual shape, which is why it looked like a rule, but
+SoundCloud, manual entry through Open Scrobbler and hand-edited local tags all
+land differently. A scrobble can perfectly well arrive as artist `Fetty Wap feat.
+Azealia Banks`, title `Trap Queen`. Both fields are read.
 
 So `Trap Queen (feat. Azealia Banks, Quavo & Gucci Mane)` exists in neither
 database under that name. Verified live against both: empty result. One half of
