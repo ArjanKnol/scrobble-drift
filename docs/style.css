@@ -237,13 +237,12 @@ html{scroll-behavior:smooth}
   font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
 
 /* --------------------------------------------------------- phase indicator */
-/* The progress bar fills, resets and fills again across the two steps of a
-   scan. Unlabelled, that reads as "done, then restarted for no reason". */
+/* The `.step` pill went with the second step of the scan. It printed "STEP 1
+   OF 2" for a scan that has exactly one phase, which is worse than no counter:
+   it promised a step 2 that was never coming. Removed rather than renumbered,
+   because counting to one is not information. */
 .phase{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;
   margin:14px 0 2px;font-size:13px}
-.phase .step{flex:0 0 auto;font-size:10.5px;font-weight:700;
-  text-transform:uppercase;letter-spacing:.07em;color:var(--accent);
-  border:1px solid var(--accent);border-radius:99px;padding:2px 8px}
 .phase strong{font-weight:600}
 .phase .phase-detail{flex:1 1 100%;color:var(--dim);font-size:12.5px}
 
