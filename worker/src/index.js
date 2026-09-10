@@ -58,7 +58,7 @@
  *
  * Bump this in the same commit as any Worker change. /api/health reports it.
  */
-const BUILD = "2026-09-10-17-isrc-and-recording-release-dates";
+const BUILD = "2026-09-10-18-retire-stale-recording-cache";
 
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";
@@ -1022,7 +1022,23 @@ async function mbRecording(url, env, request, cors) {
   }
   await chargeMb(env, clientId(request));
   const { body, shared } = await mbShared(
-    env, `rec:${spNorm(artist)}\u241f${spNorm(track)}`, async () => {
+    /*
+     * `rec2:`, not `rec:`. The cached SHAPE changed when the release-date
+     * fallback was added, so every existing row holds `first_release: null`.
+     *
+     * Verified live rather than assumed: after deploying the fix, a fresh track
+     * came back with dates and a previously-cached one came back with
+     * `"shared": true` and every date still null. D14e's first guard rejects a
+     * candidate with no date, so 1,781 cached answers would have kept the
+     * detector switched off for the full thirty-day TTL, with the bug fixed and
+     * the symptom unchanged.
+     *
+     * The identical reasoning was applied to the Spotify track cache in the same
+     * edit and missed here, which is the whole argument for versioning a cache
+     * key by reflex whenever the value shape moves, rather than deciding case by
+     * case whether it matters.
+     */
+    env, `rec2:${spNorm(artist)}\u241f${spNorm(track)}`, async () => {
   const esc = (s) => s.replace(/[\\+\-!(){}\[\]^"~*?:/&|]/g, (c) => "\\" + c);
   const query = `artist:"${esc(artist)}" AND recording:"${esc(track)}"`;
   const res = await mbFetch(
