@@ -15,7 +15,8 @@
  *     node scripts/test-resolveone.mjs
  */
 import { resolveOne, isResolvable, RESOLVABLE, sameRecording,
-         applyRecordingVerdict, variantTiming } from "../docs/drift.js";
+         applyRecordingVerdict, variantTiming, matchRecording,
+         candidateRecordings, artistCredits } from "../docs/drift.js";
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log(`  ok   ${m}`); }
@@ -474,6 +475,37 @@ console.log("\nnothing is mutated");
      "and says what it actually found, rather than 'could not confirm'");
   ok(orphan.confidence > 0.3 && orphan.confidence < 0.6,
      `held at a middling confidence  (${orphan.confidence})`);
+
+  /* ---- where the credit lands depends on the SCROBBLING CLIENT ---------- */
+  /*
+   * "Last.fm puts the feature credit in the title" was my wording and it is
+   * wrong. Last.fm puts nothing anywhere: the scrobbling client does, copying
+   * whatever the source gave it. Spotify is common enough that title-embedded
+   * credits are the usual shape, but SoundCloud, manual entry through Open
+   * Scrobbler, and hand-edited local tags all land differently, and a scrobble
+   * can arrive as artist `Fetty Wap feat. Azealia Banks`, title `Trap Queen`.
+   *
+   * Two bugs followed from assuming the title. The artist string was used whole
+   * as the "primary", so it matched nobody in a candidate's artist list and the
+   * real primary artist was counted as a GUEST, corrupting every comparison. And
+   * a credit stated in the artist field was not read at all.
+   */
+  const two = candidateRecordings({ recordings: [
+    { id: "plain", title: "Trap Queen", artists: ["Fetty Wap"] },
+    { id: "guest", title: "Trap Queen", artists: ["Fetty Wap", "Azealia Banks"] },
+  ]});
+
+  eq(matchRecording(two, "Trap Queen", "Fetty Wap feat. Azealia Banks")?.key,
+     "mb:guest", "a credit in the ARTIST field is read, not just the title");
+  eq(matchRecording(two, "Trap Queen", "Fetty Wap")?.key, "mb:plain",
+     "and a bare artist still matches the uncredited recording");
+  eq(matchRecording(two, "Trap Queen (feat. Azealia Banks)", "Fetty Wap")?.key,
+     "mb:guest", "the title-borne credit keeps working");
+
+  eq([...artistCredits("Fetty Wap feat. Azealia Banks")].join(),
+     "azealia banks", "artistCredits reads an unbracketed artist-field credit");
+  eq([...artistCredits("Macklemore & Ryan Lewis")].length, 0,
+     "and an ampersand is a band name, never a feature marker");
 
   // Nothing at all still has to stay distinguishable from all of the above.
   const silent = verdictOf("X", "A", "A (feat. B)", { recordings: [] });

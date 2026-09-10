@@ -1409,6 +1409,35 @@ export function featCredits(title) {
   return names;
 }
 
+/**
+ * Featured artists named in an ARTIST field rather than in a title.
+ *
+ * `Fetty Wap feat. Azealia Banks` -> {"azealia banks"}
+ * `Fetty Wap`                     -> {} (nothing stated)
+ *
+ * featCredits() cannot do this: it reads a bracketed clause, and an artist field
+ * almost never brackets one. A separate reader rather than a looser regex,
+ * because the two fields have genuinely different conventions and merging them
+ * would drag `&` and `,` back into feature detection, which this file has
+ * already been burned by: `Macklemore & Ryan Lewis` is one act, not a feature.
+ *
+ * Needed because where the credit lands depends on the SCROBBLING CLIENT, not on
+ * Last.fm. Spotify tends to put it in the title, SoundCloud and manual entry
+ * through Open Scrobbler frequently put it in the artist, and hand-edited local
+ * tags do whatever the owner felt like.
+ */
+export function artistCredits(artist) {
+  const names = new Set();
+  const parts = String(artist || "").split(ARTIST_FEAT_STRONG);
+  for (const tail of parts.slice(1)) {
+    for (const n of tail.split(ARTIST_JOIN)) {
+      const k = norm(n);
+      if (k) names.add(k);
+    }
+  }
+  return names;
+}
+
 const isSubset = (a, b) => [...a].every((x) => b.has(x));
 
 /**
@@ -3209,9 +3238,34 @@ export function candidateRecordings(answer) {
  * identical, and the report has no finding whose errors cost more.
  */
 export function matchRecording(candidates, title, primaryArtist) {
-  const want = featCredits(title);
+  /*
+   * The credit is read from the TITLE AND THE ARTIST FIELD, because nothing
+   * guarantees which one holds it.
+   *
+   * An earlier version of this looked only at the title, on the reasoning that
+   * "Last.fm puts the feature credit in the title". Last.fm puts nothing
+   * anywhere: the scrobbling client does, and it copies whatever the source gave
+   * it. Spotify is common enough to make title-embedded credits the usual shape,
+   * but SoundCloud, manual entry through Open Scrobbler, and local files with
+   * hand-edited tags all land differently. A scrobble can perfectly well arrive
+   * as artist `Fetty Wap feat. Azealia Banks`, title `Trap Queen`.
+   *
+   * Two things follow, and both were bugs before this.
+   *
+   * `primary` must have any credit stripped off it. Otherwise the whole string
+   * `fetty wap feat. azealia banks` is compared against a candidate's artist list,
+   * matches nobody, and the real primary artist gets counted as a GUEST, which
+   * corrupts every comparison below.
+   *
+   * And the artist-side names belong in `want`, so a credit stated there is
+   * honoured exactly as one stated in the title.
+   */
+  const artistStr = String(primaryArtist || "");
+  const want = new Set([...featCredits(title), ...artistCredits(artistStr)]);
   const base = norm(baseTitle(title));
-  const primary = norm(primaryArtist || "");
+  // Only the unambiguous markers. `&` and `,` are band-name separators far more
+  // often than feature markers, which is a lesson this file already paid for.
+  const primary = norm(artistStr.split(ARTIST_FEAT_STRONG)[0]);
   if (!base || !(candidates || []).length) return null;
 
   const scored = [];
