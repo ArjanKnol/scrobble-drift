@@ -3323,19 +3323,43 @@ export function matchRecording(candidates, title, primaryArtist) {
      * Below the credit score, not above it, because a credit is stated evidence
      * and a title shape is an inference.
      */
-    scored.push({ c, score, exact: cTitle === base ? 1 : 0, guests: guests.size });
+    /*
+     * The BUCKET, which is what actually gets compared. Not the recording ID.
+     *
+     * MusicBrainz does not give one performance one ID. `Love Never Felt So
+     * Good` came back with three separate recording IDs for the solo version and
+     * four more for the Justin Timberlake duet, because a recording entry is per
+     * release rather than per master. Comparing IDs therefore reported a tie
+     * between several equally good candidates, the tie resolved to null, and both
+     * halves of the comparison matched nothing. That is why a song whose two
+     * versions are documented everywhere came back "not confirmed".
+     *
+     * What distinguishes the versions is not the ID, it is WHO IS CREDITED and
+     * WHAT THE TITLE ADDS. Seven IDs collapse into two buckets, `{}` and
+     * `{justin timberlake}`, and the question "are these the same recording"
+     * becomes "do the two spellings land in the same bucket", which is both
+     * answerable and the thing the user actually wants to know.
+     */
+    const extra = norm(cTitle.replace(base, ""));
+    const bucket = `${[...guests].sort().join(",")}|${extra}`;
+    scored.push({ c, bucket, score, exact: cTitle === base ? 1 : 0,
+                  guests: guests.size });
   }
   if (!scored.length) return null;
 
   // Credit match, then exact title, then the least decorated line-up.
   scored.sort((x, y) =>
     (y.score - x.score) || (y.exact - x.exact) || (x.guests - y.guests));
-  // A tie between two DIFFERENT recordings is not a match. Ties between entries
-  // for the same recording are fine and common: one release each.
   const top = scored.filter((s) => s.score === scored[0].score &&
     s.exact === scored[0].exact && s.guests === scored[0].guests);
-  const keys = new Set(top.map((s) => s.c.key));
-  return keys.size === 1 ? top[0].c : null;
+  /*
+   * Ambiguity is measured across BUCKETS, so several IDs for one version are not
+   * a tie. Two genuinely different versions scoring equally still are, and still
+   * return null: a wrong match here produces a confident "do not merge" about two
+   * identical things, and no finding in the report costs more when wrong.
+   */
+  const buckets = new Set(top.map((s) => s.bucket));
+  return buckets.size === 1 ? { ...top[0].c, bucket: top[0].bucket } : null;
 }
 
 export function sameRecording(a, b) {
@@ -3433,7 +3457,30 @@ function hasCredit(title) {
  */
 export function applyRecordingVerdict(issue, verdict, timing = null, opts = {}) {
   if (!issue) return issue;
-  const { orphan = null, artist = "" } = opts;
+  const { orphan = null, artist = "", failed = false } = opts;
+
+  /*
+   * The lookup did not happen. Say that, and leave the finding alone.
+   *
+   * Handled before every other branch, because a failed request must not be
+   * allowed to look like an answer. It must not lower confidence, must not
+   * reclassify the finding, and must NOT be marked resolved: the question is
+   * still open and the button has to come back so it can be asked again.
+   *
+   * The rest of this function decides what the databases said. This is the case
+   * where they said nothing because we never reached them.
+   */
+  if (failed && verdict === "unknown") {
+    return {
+      ...issue,
+      verdict: {
+        state: "unclear",
+        text: "Could not reach the release databases just now, so nothing was " +
+              "checked. This is a network or rate-limit problem rather than an " +
+              "answer about your library. Try again in a minute.",
+      },
+    };
+  }
 
   /*
    * The verdict is attached as its own FIELD, not appended to the suggestion.
@@ -3742,8 +3789,15 @@ export function resolveOne(
     const ma = matchRecording(cands, variants[0].track, issue.artist);
     const mb = matchRecording(cands, variants[1].track, issue.artist);
 
+    /*
+     * Compared by bucket, not by recording ID. One performance can carry several
+     * MusicBrainz recording IDs, one per release, so `ma.key !== mb.key` reported
+     * "different" for two entries of the same thing. The bucket is the credited
+     * line-up plus whatever the title adds, which is what actually separates a
+     * version from a reissue of it.
+     */
     const verdict = (ma && mb)
-      ? (ma.key === mb.key ? "same" : "different")
+      ? (ma.bucket === mb.bucket ? "same" : "different")
       : "unknown";
 
     /*
@@ -3757,11 +3811,22 @@ export function resolveOne(
      * is not proof, because the databases are incomplete, so it does not become
      * a merge instruction. It is still worth saying out loud.
      */
-    const orphan = cands.length && (Boolean(ma) !== Boolean(mb))
+    /*
+     * `!answer.failed` gates this, and it is not a formality.
+     *
+     * A lookup that returned 429 arrives here looking exactly like a lookup that
+     * returned nothing, and the orphan branch turns "nothing" into the claim that
+     * no release credits these artists. Made live during testing: the burst
+     * limiter tripped, every Spotify call came back rate-limited, and the card
+     * asserted a fact about the world on the strength of a failed request.
+     */
+    const orphan = !answer?.failed && cands.length &&
+      (Boolean(ma) !== Boolean(mb))
       ? (ma ? variants[1] : variants[0]).track : null;
 
     const out = applyRecordingVerdict(
-      issue, verdict, variantTiming(issue), { orphan, artist: issue.artist });
+      issue, verdict, variantTiming(issue),
+      { orphan, artist: issue.artist, failed: Boolean(answer?.failed) });
     const best = (answer?.groups || [])[0] || null;
     return {
       ...out,
