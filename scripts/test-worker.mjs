@@ -752,6 +752,31 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
      "and both fall back to the release's own date when the group has none",
      "A search-embedded release-group stub never carries first-release-date, " +
      "so without the fallback every date is null and D14e can never fire.");
+
+  /*
+   * A shape change is only half a fix while the cache still holds the old shape.
+   *
+   * Both of these caches survive a deploy: MusicBrainz answers for 30 days,
+   * Spotify for 7. After deploying the date fix above, a previously-cached track
+   * still came back with `"shared": true` and every date null, because the key
+   * had not moved. 1,781 rows would have kept D14e switched off for a month with
+   * the bug already fixed, which is the hardest kind of problem to find: the
+   * symptom outlives the cause.
+   *
+   * Both keys carry a version digit for that reason. Asserted as a pair
+   * deliberately: the Spotify one was versioned and the MusicBrainz one was not,
+   * in a single edit, because each was judged on its own.
+   *
+   * Scoped to those two, though, and not to every cache in the file. Three others
+   * here have never changed shape, and demanding a version digit on those would
+   * be ritual rather than reasoning: a versioned key that never moves teaches the
+   * next reader nothing and costs a cache flush the first time somebody bumps it
+   * out of superstition.
+   */
+  ok(/env, `rec\d+:/.test(src),
+     "the recording cache key is versioned, so the date fix retires old rows");
+  ok(/env, `one\d+:/.test(src),
+     "and so is the per-track Spotify key, which gained an ISRC field");
 }
 
 console.log(`\n${pass} passed, ${fail} failed (including MusicBrainz cache block)\n`);
