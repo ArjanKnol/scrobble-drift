@@ -405,20 +405,54 @@ console.log("\nnothing is mutated");
   const verdictOf = (artist, a, b, answer) =>
     resolveOne(issueFor(artist, a, b), () => answer);
 
-  // Michael Jackson: the Justin Timberlake duet is a separate recording, and
-  // MusicBrainz distinguishes them only by the artist credit. Both titles are
-  // the identical string.
+  /*
+   * Michael Jackson, VERBATIM from the live endpoint rather than trimmed to
+   * three tidy entries.
+   *
+   * A three-recording version of this fixture passed while the real thing
+   * failed, and the difference is the whole lesson: MusicBrainz does not give one
+   * performance one ID. The real answer holds THREE ids for the solo version and
+   * FOUR for the duet, because a recording entry is per release, not per master.
+   *
+   * Comparing IDs therefore found several equally good candidates on each side,
+   * called that ambiguous, and matched nothing. A song whose two versions are
+   * documented everywhere came back "not confirmed". Reported as: "It is widely
+   * documented that a solo and a Justin version of this song exists."
+   *
+   * So the comparison is by BUCKET, the credited line-up plus whatever the title
+   * adds. Seven IDs collapse to two buckets and the question becomes answerable.
+   */
+  const mjLive = { recordings: [
+    { id: "bd744206", title: "Love Never Felt So Good", artists: ["Michael Jackson"] },
+    { id: "e7ed94d0", title: "Love Never Felt So Good", artists: ["Michael Jackson"] },
+    { id: "0efd5c11", title: "Love Never Felt So Good", artists: ["Michael Jackson"] },
+    { id: "80c38c78", title: "Love never felt so good (Demo)", artists: ["Michael Jackson"] },
+    { id: "e0010eda", title: "Love Never Felt So Good (original version)",
+      artists: ["Michael Jackson"] },
+    { id: "41601c57", title: "Love Never Felt So Good",
+      artists: ["Michael Jackson", "Justin Timberlake"] },
+    { id: "d737719f", title: "Love Never Felt So Good",
+      artists: ["Michael Jackson", "Justin Timberlake"] },
+    { id: "91f73ec4", title: "Love Never Felt So Good",
+      artists: ["Michael Jackson", "Justin Timberlake"] },
+    { id: "1099ca87", title: "Love Never Felt So Good",
+      artists: ["Michael Jackson", "Justin Timberlake"] },
+    { id: "dedb4931", title: "Love Never Felt So Good (Fedde Le Grand remix)",
+      artists: ["Michael Jackson"] },
+    { id: "f01ff502", title: "Love Never Felt So Good (DM Classic radio mix)",
+      artists: ["Michael Jackson", "Justin Timberlake"] },
+  ]};
+  const mjc = candidateRecordings(mjLive);
+  eq(matchRecording(mjc, "Love Never Felt So Good", "Michael Jackson")?.bucket, "|",
+     "three IDs for the solo version are one bucket, not an ambiguous tie");
+  eq(matchRecording(mjc, "Love Never Felt So Good (feat. Justin Timberlake)",
+                    "Michael Jackson")?.bucket, "justin timberlake|",
+     "and four IDs for the duet are another");
+
   const mj = verdictOf("Michael Jackson", "Love Never Felt So Good",
-    "Love Never Felt So Good (feat. Justin Timberlake)", { recordings: [
-      { id: "bd744206", title: "Love Never Felt So Good",
-        artists: ["Michael Jackson"] },
-      { id: "91f73ec4", title: "Love Never Felt So Good",
-        artists: ["Michael Jackson", "Justin Timberlake"] },
-      { id: "dedb4931", title: "Love Never Felt So Good (Fedde Le Grand Remix)",
-        artists: ["Michael Jackson"] },
-    ]});
+    "Love Never Felt So Good (feat. Justin Timberlake)", mjLive);
   eq(mj.verdict?.state, "different",
-     "a duet credited to a guest is told apart from the solo version");
+     "so the duet is told apart from the solo version, on the real payload");
 
   /*
    * Fetty Wap: MusicBrainz writes the remixers into the recording TITLE rather

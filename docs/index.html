@@ -1979,8 +1979,9 @@ async function resolveIssue(idx) {
      * This is one extra call on a single button press, spent on the only finding
      * in the report whose advice destroys something irreversibly.
      */
+    const skipSpotify = issue.kind === "era";
     const [sp, mb] = await Promise.all([
-      issue.kind === "era" ? null : call("/api/spotify/track", { artist, track }),
+      skipSpotify ? null : call("/api/spotify/track", { artist, track }),
       call("/api/mb/recording", { artist, track }),
     ]);
 
@@ -1988,6 +1989,20 @@ async function resolveIssue(idx) {
       groups: [...(mb?.groups || []), ...(sp?.groups || [])],
       recordings: mb?.recordings || [],
       candidates: sp?.candidates || [],
+      /*
+       * A CALL THAT FAILED IS NOT AN EMPTY ANSWER.
+       *
+       * `call()` returns null for a 429, a 500 and a dropped connection alike,
+       * and without this flag the verdict logic cannot tell that from "the
+       * database has no such recording". It would then report "no release credits
+       * these artists", which is a claim about the world made from a rate limit.
+       *
+       * Caught live: probing the API by hand tripped the burst limiter, every
+       * Spotify lookup came back 429, and a card confidently said the credit did
+       * not exist. Same bug this codebase has now shipped five times, in code
+       * written specifically to avoid it.
+       */
+      failed: (!skipSpotify && sp === null) || mb === null,
     };
   };
 
