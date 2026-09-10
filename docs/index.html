@@ -143,7 +143,7 @@
 import {
   analyse, partitionEra, d14eReleasedSince, d16StrandedSingles,
   hygieneScore, weakEraCandidates, officialKey, byImportance,
-  resolveOne, isResolvable, discoveryOffers,
+  resolveOne, isResolvable, discoveryOffers, baseTitle,
 } from "./drift.js";
 /*
  * Six imports left with the resolve phase: d0Resolve, d5Resolve, verifyEraNames,
@@ -455,6 +455,10 @@ const freshStats = () => ({
   scrobbles: 0,
   pages: 0,
   resumed: false,
+  // Ambiguous album names checked against a release database during the scan.
+  // Counted so the summary can state it: the panel used to claim nothing was
+  // contacted, and this is the one thing that is.
+  name_checks: 0,
   // `resolve_ms`, `resolve_requested`, `resolve_error` and `spotify_available`
   // are gone with the scan phase they measured. A counter for work that can no
   // longer happen reads, to the next person, as work that is silently failing.
@@ -513,7 +517,7 @@ $("f").onsubmit = async (e) => {
   $("fill").style.width = "0";
 
   const cap = Number($("depth").value);
-  setPhase(1, 2, "Reading your scrobbles from Last.fm",
+  setPhase("Reading your scrobbles from Last.fm",
            "Nothing is looked up yet, this is just your listening history.");
   $("status").textContent = cap
     ? `Starting scan of ${N(cap)} scrobbles…`
@@ -559,7 +563,7 @@ $("f").onsubmit = async (e) => {
     report = analyse(scrobbles, { official, topAlbums });
     stats.analyse_ms = Date.now() - t1;
     stats.phase = "analysing";
-    setPhase(2, 2, "Analysing in your browser",
+    setPhase("Analysing in your browser",
              "Finding splits, variants and duplicates. No network needed.");
     report.user = user;
 
@@ -636,16 +640,30 @@ function scanSummary() {
              (s.resumed ? ", resuming a saved scan" : "") + ".");
   lines.push(`Analysed them in your browser in ${dur(s.analyse_ms)}.`);
   /*
-   * Says what the scan did NOT do, which is the part that changed.
+   * Says what the scan did and did not ask, and the exact wording matters.
    *
-   * Everything below this panel now comes from the user's own data and nothing
-   * else. That is worth stating rather than leaving to be inferred, because it
-   * tells the reader why it was fast, and it sets up the offer cards further
-   * down as the deliberate, priced alternative rather than as leftovers.
+   * This said "No release databases were contacted", which was FALSE.
+   * verifyOfficialAlbums runs during the scan and asks Spotify and MusicBrainz
+   * whether a handful of ambiguous album names are real releases. It has to: a
+   * name like 'The Leaks' is both a Lil Baby record and a common way to label
+   * leaks, and the answer decides whether the era guard protects that album from
+   * the split detectors. Deferring it would change which findings exist, so it is
+   * not enrichment and cannot move to a button.
+   *
+   * A summary panel that overstates the tool's own restraint is worse than one
+   * that says nothing, because the whole claim being made here is that the report
+   * is honest about what it knows and how it knows it. So it reports the real
+   * number, and only claims silence when there was silence.
    */
-  lines.push(`No release databases were contacted. Every finding below comes
-              from your own listening data, which is why this took seconds.
-              Anything that needs an outside answer has a button on it.`);
+  lines.push(s.name_checks
+    ? `Asked a release database about <strong>${N(s.name_checks)}</strong>
+       ambiguous album name${s.name_checks === 1 ? "" : "s"}, which decides
+       whether they are real records or folders of unreleased tracks. Nothing
+       else was looked up: every other finding below comes from your own
+       listening data. Anything needing an outside answer has a button on it.`
+    : `No release database was contacted. Every finding below comes from your own
+       listening data, which is why this took seconds. Anything that needs an
+       outside answer has a button on it.`);
 
   const warn = [];
   if (s.spotify_gave_up) {
@@ -705,25 +723,24 @@ const failure = (msg, detail = "", opts = {}) =>
   Object.assign(new Error(msg), { detail, ...opts });
 
 /**
- * Say which step is running, and that there are two of them.
+ * Say what is running.
  *
- * A scan is: read the scrobbles, then look up release data. The progress bar
- * fills for step 1, resets, and fills again for step 2. With no label that reads
- * as "finished, then mysteriously started over", which is exactly how it was
- * reported. Naming the step and its total costs one line and removes the whole
- * confusion.
- */
-/*
- * `of === 0` means "not part of the scan", and prints no step counter.
+ * There used to be a "Step N of 2" counter here, because a scan was: read the
+ * scrobbles, then look up release data. The progress bar filled, reset, and
+ * filled again, which read as "finished, then mysteriously started over", and
+ * naming the step fixed that.
  *
- * Discovery lookups reuse this progress bar but are no longer a step of anything:
- * they run from the report, minutes or days after the scan finished. Labelling
- * one "Step 2 of 2" while the user is reading their completed results would say
- * the scan had restarted.
+ * The second step is gone, and the counter went stale rather than wrong-looking:
+ * it kept saying "Step 1 of 2" for a scan that has no step 2, and the discovery
+ * lookups it might have described now run from the report, minutes or days after
+ * the scan finished. Labelling one of those "Step 2 of 2" would tell someone
+ * reading their completed results that the scan had restarted.
+ *
+ * So the counter is removed rather than renumbered. Counting to one is not
+ * information, and a phase label carries everything the counter did.
  */
-function setPhase(n, of, label, detail = "") {
+function setPhase(label, detail = "") {
   $("phase").innerHTML =
-    (of ? `<span class="step">Step ${n} of ${of}</span>` : "") +
     `<strong>${esc(label)}</strong>` +
     (detail ? `<span class="phase-detail">${esc(detail)}</span>` : "");
 }
@@ -826,7 +843,7 @@ async function verifyOfficialAlbums(scrobbles, apiKey) {
   if (!candidates.length) return official;
 
   const base = apiBase().replace(/\/+$/, "");
-  setPhase(1, 2, "Checking a few album names",
+  setPhase("Checking a few album names",
            `${N(candidates.length)} album name${candidates.length === 1 ? "" : "s"} ` +
            `could be either a real release or a folder of unreleased tracks. ` +
            `Asking, so real albums are not hidden from the split detectors.`);
@@ -840,6 +857,10 @@ async function verifyOfficialAlbums(scrobbles, apiKey) {
       if (cached?.exists) official.add(officialKey(c.artist, c.album));
       continue;
     }
+
+    // Counted only past the cache check, so a repeat scan honestly reports zero
+    // rather than claiming lookups it never made.
+    if (stats) stats.name_checks++;
 
     let exists = null;
     if (spotifyOn) {
@@ -1691,7 +1712,7 @@ async function runDiscovery(offer) {
   }
 
   if (split.catalogue.length) {
-    setPhase(0, 0, "Looking up real release data",
+    setPhase("Looking up real release data",
       `${N(mbEst.catalogue_tracks)} tracks belong to ${N(mbEst.artists)} ` +
       `artists, so their catalogues are fetched once each instead of one lookup ` +
       `per track. About ${mbEst.seconds}s for the rest.`);
@@ -1945,15 +1966,29 @@ async function resolveIssue(idx) {
    * whose advice can destroy something irreversibly.
    */
   const identifyingLookup = async (artist, track) => {
-    const sp = issue.kind === "era"
-      ? null : await call("/api/spotify/track", { artist, track });
-    if ((sp?.groups || []).some((g) => g?.isrc)) return sp;
+    /*
+     * BOTH sources, always, and merged. No early return.
+     *
+     * The previous version stopped at Spotify whenever it had an ISRC, which
+     * looked like a saving and was the reason the check could not answer. The
+     * two sources disagree about which recordings exist and about how they are
+     * credited: Spotify lists guests as artists, MusicBrainz often writes the
+     * remixer into the recording title instead. Either one alone leaves gaps,
+     * and a gap here is indistinguishable from "the databases say these differ".
+     *
+     * This is one extra call on a single button press, spent on the only finding
+     * in the report whose advice destroys something irreversibly.
+     */
+    const [sp, mb] = await Promise.all([
+      issue.kind === "era" ? null : call("/api/spotify/track", { artist, track }),
+      call("/api/mb/recording", { artist, track }),
+    ]);
 
-    const mb = await call("/api/mb/recording", { artist, track });
-    if (mb?.groups?.length && sp?.groups?.length) {
-      return { groups: [...mb.groups, ...sp.groups] };
-    }
-    return mb || sp;
+    return {
+      groups: [...(mb?.groups || []), ...(sp?.groups || [])],
+      recordings: mb?.recordings || [],
+      candidates: sp?.candidates || [],
+    };
   };
 
   let resolved;
@@ -2003,8 +2038,18 @@ async function resolveIssue(idx) {
     const variants = (issue.members || []).map((m) => m?.track).filter(Boolean);
     const twoVariants = new Set(variants).size === 2;
 
-    const tracks = [...new Set(
-      [issue.track, ...variants].filter(Boolean))].slice(0, 3);
+    /*
+     * A two-variant finding is looked up ONCE, on the bare title.
+     *
+     * Not once per spelling. `Trap Queen (feat. Azealia Banks, Quavo & Gucci
+     * Mane)` exists in no database under that name, so asking for it verbatim
+     * returns nothing and the comparison has one side missing. `Trap Queen`
+     * returns every recording of the song, credits included, and resolveOne
+     * works out which one each spelling means.
+     */
+    const tracks = twoVariants
+      ? [baseTitle(variants[0]) || variants[0]]
+      : [...new Set([issue.track, ...variants].filter(Boolean))].slice(0, 3);
 
     const ask = twoVariants ? identifyingLookup : lookup;
     const answers = new Map();
@@ -2175,7 +2220,8 @@ function render() {
       </div>
       <p class="note">Unreleased material is protected. No detector will ever
       suggest merging it into an official release, whichever convention you
-      use.</p>` : ""}
+      use.</p>
+      ${offerCards("era")}` : ""}
 
     ${im.biggest_movers.length ? (() => {
       const mergedRows = im.biggest_movers.filter((m) => m.reason === "merged");
@@ -2264,6 +2310,50 @@ function render() {
   issues();
 }
 
+/**
+ * The cards that offer a lookup, for one section of the page.
+ *
+ * These are not findings, and they must not read as findings. Each describes work
+ * that can only be done by looking: nothing in your own scrobbles can reveal that
+ * a leak came out, so there is no card to attach a button to until a lookup has
+ * run. Naming the CATEGORY is enough to make the choice clickable, and a category
+ * is free to display because it comes from local data.
+ *
+ * Placed by section rather than all together. The unreleased-material offer sits
+ * inside the Unreleased material panel, directly under the numbers that give it
+ * meaning, because "1,498 tracks are filed as unreleased" is a fact about that
+ * section and reads as an accusation at the top of a list of problems.
+ *
+ * A completed offer STAYS VISIBLE and says what it found, including when it found
+ * nothing. Removing it would leave the reader unable to tell a check they never
+ * ran from a check that came back empty, which is the distinction this codebase
+ * has got wrong more times than any other.
+ */
+function offerCards(section) {
+  return (report.offers || [])
+    .filter((o) => (o.section || "issues") === section)
+    .map((o) => o.done
+      ? `<div class="panel offer done">
+           <strong>${esc(o.title)}</strong>
+           <div class="note" style="margin:5px 0 0">Checked ${N(o.checked)}.
+             ${o.found
+               ? `${N(o.found)} added to the findings below.`
+               : "Nothing came back, so none of these has a release the " +
+                 "databases know about. That is the normal answer for genuinely " +
+                 "unreleased material."}</div>
+         </div>`
+      : `<div class="panel offer" data-offer="${esc(o.id)}">
+           <strong>${esc(o.title)}</strong>
+           <div class="note" style="margin:5px 0 8px">${esc(o.note)}</div>
+           <button class="check discover" type="button">${esc(o.action)}</button>
+           <span class="note" style="margin:0 0 0 9px;color:var(--dim)">${
+             N(o.jobs.length)} lookup${o.jobs.length === 1 ? "" : "s"}, about ${
+             o.jobs.length < 30 ? "a few seconds"
+               : Math.max(1, Math.round(o.jobs.length / 60)) + " min"
+           }. Answers are cached and shared, so nobody pays for them twice.</span>
+         </div>`).join("");
+}
+
 function issues() {
   const list = report.issues.filter((i) =>
     (!fDet || i.detector === fDet) && (!fCls || i.class === fCls)).slice(0, 200);
@@ -2276,38 +2366,7 @@ function issues() {
   const pending = report.issues.filter(
     (i) => isResolvable(i) && !i.resolved && !i.dropped).length;
 
-  /*
-   * Offers sit ABOVE the findings, and they are not findings themselves.
-   *
-   * Each one describes work that can only be done by looking: nothing in your own
-   * scrobbles can reveal that a leak came out, so there is no card to attach a
-   * button to until a lookup has run. Naming the category is enough to make the
-   * choice clickable, and it costs nothing to display.
-   *
-   * A completed offer stays visible and says what it found, including when it
-   * found nothing. Removing it would leave the reader unable to tell a check they
-   * never ran from a check that came back empty.
-   */
-  const offers = (report.offers || []).map((o) => o.done
-    ? `<div class="panel offer done">
-         <strong>${esc(o.title)}</strong>
-         <div class="note" style="margin:5px 0 0">Checked ${N(o.checked)}.
-           ${o.found
-             ? `${N(o.found)} added to the findings below.`
-             : "Nothing came back, so none of these has a release the databases " +
-               "know about. That is the normal answer for genuinely unreleased " +
-               "material."}</div>
-       </div>`
-    : `<div class="panel offer" data-offer="${esc(o.id)}">
-         <strong>${esc(o.title)}</strong>
-         <div class="note" style="margin:5px 0 8px">${esc(o.note)}</div>
-         <button class="check discover" type="button">${esc(o.action)}</button>
-         <span class="note" style="margin:0 0 0 9px;color:var(--dim)">${
-           N(o.jobs.length)} lookup${o.jobs.length === 1 ? "" : "s"}, about ${
-           o.jobs.length < 30 ? "a few seconds"
-             : Math.max(1, Math.round(o.jobs.length / 60)) + " min"
-         }. Answers are cached and shared, so nobody pays for them twice.</span>
-       </div>`).join("");
+  const offers = offerCards("issues");
 
   $("issues").innerHTML = offers + (pending ? `
     <div class="panel" style="margin-bottom:9px;display:flex;gap:11px;
@@ -2450,7 +2509,21 @@ function issues() {
    * Delegated, so it survives every re-render. Binding per button would leave
    * dead handlers behind each time the list is filtered.
    */
-  $("issues").onclick = async (ev) => {
+  /*
+   * Bound to #out, not #issues, because an offer card no longer lives in #issues.
+   *
+   * The unreleased offer renders inside the Unreleased material panel, which is a
+   * sibling of the findings list. A handler on #issues would never see its click
+   * and the button would do nothing at all, silently: the exact failure this
+   * project has already shipped once.
+   *
+   * #out is the common ancestor of both and is rewritten by render(), which also
+   * calls issues(), so this is reassigned whenever either is redrawn. Filtering
+   * the list calls issues() alone and does not touch #out, so the handler
+   * survives that too, which it would not if it lived on the element being
+   * replaced.
+   */
+  $("out").onclick = async (ev) => {
     const btn = ev.target.closest("button.check, button.check-all");
     if (!btn) return;
 

@@ -257,7 +257,39 @@ Ye's `I CAN'T WAIT` and `I CAN'T WAIT (feat. Ms. Lauryn Hill)` are both on
 two different masters. The tool looked up one title, answered "Release data:
 'BULLY' (Album, 2026-03-28)", and went on recommending the merge.
 
-It now looks up **both** titles and compares recording identifiers:
+The first fix for this looked up **both** titles and compared recording
+identifiers. It answered your Kanye card and nothing else, and the reason is the
+single most important thing to know about this data:
+
+> Last.fm scrobbles carry the feature credit **in the title**. MusicBrainz and
+> Spotify put it in the **artist credit** and leave the title bare.
+
+So `Trap Queen (feat. Azealia Banks, Quavo & Gucci Mane)` exists in neither
+database under that name. Verified live against both: empty result. One half of
+every comparison resolved and the other came back blank, and the check then quite
+correctly refused to call that a difference. Four findings in a row read
+"Not confirmed", which is honest and worthless.
+
+The working version searches the **bare title once** and matches each of your
+spellings against the recordings that come back, using the credit as evidence:
+
+| Your spelling | Matched by |
+|---|---|
+| `Love Never Felt So Good` | the recording credited to Michael Jackson alone |
+| `... (feat. Justin Timberlake)` | the recording credited to both |
+| `... (feat. Azealia Banks, Quavo & Gucci Mane)` | a recording naming them in its own title, which is how MusicBrainz files remixes |
+
+Different recording, different verdict. One call instead of two.
+
+Two traps in the matching, both found by running real payloads rather than by
+reading the code. A bare title ties between the original and every remix, since
+neither credits a guest, so exact title breaks the tie beneath the credit score.
+And a title stating no credit must still match a recording that *has* one:
+scoring those at zero made every always-collaborative song unresolvable. That is
+this codebase's oldest bug, absence of an answer read as a negative answer,
+reappearing inside the fix for it.
+
+Underneath, the comparison uses recording identifiers:
 
 | Source | Identifier | Notes |
 |---|---|---|

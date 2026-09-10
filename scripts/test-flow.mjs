@@ -150,9 +150,25 @@ const code = html
    * and if it silently stops being true the panel becomes a lie rather than
    * merely stale.
    */
-  ok("the summary states no databases were contacted",
-     /No release databases were contacted/.test(body),
-     "If the scan starts making lookups again, this sentence is false.");
+  /*
+   * The panel must not overstate the tool's own restraint.
+   *
+   * It claimed "No release databases were contacted", flatly, and that was
+   * false: verifyOfficialAlbums asks Spotify and MusicBrainz during every scan
+   * whether a handful of ambiguous album names are real releases, and it has to,
+   * because the answer decides which detectors are allowed to touch them.
+   *
+   * So the claim is now conditional on the count, and both branches must exist.
+   * A tool whose entire pitch is that it is honest about what it knows cannot
+   * afford a hardcoded sentence about what it did not do.
+   */
+  ok("the no-lookups claim is conditional on the actual count",
+     /s\.name_checks\s*\n?\s*\?/.test(body),
+     "Stated unconditionally it is false: album-name checks run every scan.");
+  ok("and both branches are present",
+     /Asked a release database about/.test(body) &&
+     /No release database was contacted/.test(body),
+     "One branch means the other case reports something untrue.");
   ok("and no stale resolve-phase reporting is left behind",
      !/resolve_error|resolve_requested|resolve_ms/.test(body),
      "Reporting on a phase that cannot run means reporting nothing, forever.");
@@ -526,9 +542,23 @@ const code = html
   // one control on the card you are meant to press.
   ok("a per-finding check button exists", /button class="check"/.test(code));
   ok("and a check-all", /button class="check-all/.test(code));
-  ok("the handler is delegated, so it survives a re-render",
-     /\$\("issues"\)\.onclick = async/.test(code),
-     "Per-button binding leaves dead handlers behind on every filter change.");
+  /*
+   * Delegated from #out, not #issues, and the element matters.
+   *
+   * The unreleased offer card renders inside the Unreleased material panel,
+   * which is a SIBLING of the findings list. A handler on #issues cannot see a
+   * click on it, so the button would do nothing at all and do it silently. That
+   * is the exact failure this project shipped once already.
+   *
+   * #out is the common ancestor. It also survives a filter change, because
+   * filtering calls issues() and rewrites #issues alone.
+   */
+  ok("the handler is delegated from the common ancestor of both",
+     /\$\("out"\)\.onclick = async/.test(code),
+     "An offer card outside #issues would never receive its own click.");
+  ok("and nothing is still bound to the findings list alone",
+     !/\$\("issues"\)\.onclick/.test(code),
+     "Two delegated handlers on nested elements double-fire on findings.");
   ok("findings are addressed by index into report.issues",
      /data-idx="\$\{report\.issues\.indexOf\(i\)\}"/.test(code),
      "Position in the filtered list changes when the filter does.");

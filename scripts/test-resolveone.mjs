@@ -332,20 +332,23 @@ console.log("\nnothing is mutated");
      "no identifiers in the answer means the question is honestly unsettled");
 
   /*
-   * BOTH titles are looked up, and this is the whole fix.
+   * ONE lookup, on the BARE title.
    *
-   * The question a two-variant finding asks is "are these one recording", and the
-   * old code looked up ONE title and reported which album it sits on. On Ye's
-   * revised BULLY both titles are on the same album, so the answer was identical
-   * either way and settled nothing, while the headline went on recommending a
-   * merge that would have destroyed a real distinction.
+   * This asserted two lookups, one per spelling, which was the design and was
+   * wrong. No database has a track called `Trap Queen (feat. Azealia Banks,
+   * Quavo & Gucci Mane)`: the guests are an artist credit, not part of the
+   * title. Asking for it verbatim returns nothing from Spotify AND MusicBrainz,
+   * verified live, so one side of every comparison was always empty.
+   *
+   * Searching the bare title returns every recording of the song, credits
+   * included, and the matching happens locally. Correct and half the calls.
    */
   const asked = [];
   resolveOne(variant, (artist, track) => { asked.push([artist, track]); return found; });
-  eq(asked.length, 2, "both variants are looked up, not just the first");
+  eq(asked.length, 1, "a two-variant finding costs ONE lookup, not two");
   eq(asked[0][0], "Fetty Wap", "the artist is passed through");
-  eq(new Set(asked.map((a) => a[1])).size, 2,
-     "and they are two DIFFERENT titles, not one asked twice");
+  eq(asked[0][1], "Trap Queen",
+     "and the bare title is what gets looked up, not the decorated one");
 
   /*
    * Proof of two recordings, arriving from two different sources, must NOT be
@@ -371,6 +374,112 @@ console.log("\nnothing is mutated");
   const b = resolveOne(bare, () => ({ groups: [] }));
   ok(b.resolved === true && b.unresolved === true,
      "no track to look up still counts as checked, so the button does not linger");
+}
+
+/* ---------------------------------------------------------------------------
+ * The four cards that all said "Not confirmed", and why they had to.
+ *
+ * Last.fm scrobbles carry the feature credit in the TITLE. MusicBrainz and
+ * Spotify put it in the ARTIST CREDIT and title the track bare, so looking up
+ * `Love Never Felt So Good (feat. Justin Timberlake)` verbatim returns nothing
+ * from either. Verified live against both upstreams. One half of every
+ * comparison resolved, the other came back empty, and the check correctly
+ * refused to call that a difference: honest, and useless on every single card.
+ *
+ * The fix searches the BARE title once and matches each spelling against the
+ * recordings that come back, using the credit as the evidence.
+ *
+ * Payloads below are the real shapes from the live Worker, trimmed.
+ * ------------------------------------------------------------------------- */
+{
+  const uts = (d) => Math.floor(new Date(d).getTime() / 1000);
+  const issueFor = (artist, a, b) => ({
+    detector: "D8", class: "split", confidence: 0.8, artist, track: a,
+    suggest: `standardise on '${a}'.`,
+    members: [
+      { track: a, plays: 8, first: uts("2026-03-01"), last: uts("2026-06-01") },
+      { track: b, plays: 5, first: uts("2026-06-20"), last: uts("2026-08-30") },
+    ],
+  });
+  const verdictOf = (artist, a, b, answer) =>
+    resolveOne(issueFor(artist, a, b), () => answer);
+
+  // Michael Jackson: the Justin Timberlake duet is a separate recording, and
+  // MusicBrainz distinguishes them only by the artist credit. Both titles are
+  // the identical string.
+  const mj = verdictOf("Michael Jackson", "Love Never Felt So Good",
+    "Love Never Felt So Good (feat. Justin Timberlake)", { recordings: [
+      { id: "bd744206", title: "Love Never Felt So Good",
+        artists: ["Michael Jackson"] },
+      { id: "91f73ec4", title: "Love Never Felt So Good",
+        artists: ["Michael Jackson", "Justin Timberlake"] },
+      { id: "dedb4931", title: "Love Never Felt So Good (Fedde Le Grand Remix)",
+        artists: ["Michael Jackson"] },
+    ]});
+  eq(mj.verdict?.state, "different",
+     "a duet credited to a guest is told apart from the solo version");
+
+  /*
+   * Fetty Wap: MusicBrainz writes the remixers into the recording TITLE rather
+   * than the credit, so the bare spelling ties with the remix on credit alone.
+   * Both score identically on "nobody is credited"; only exact title separates
+   * them. That tie returned null and broke the two cases this was built for,
+   * found by running the real payloads rather than by reading the code.
+   */
+  const fetty = verdictOf("Fetty Wap", "Trap Queen",
+    "Trap Queen (feat. Azealia Banks, Quavo & Gucci Mane)", { recordings: [
+      { id: "39fc36c2", title: "Trap Queen", artists: ["Fetty Wap"] },
+      { id: "01333ea2",
+        title: "Trap Queen (Azealia Banks, Quavo & Gucci Mane remix)",
+        artists: ["Fetty Wap"] },
+    ]});
+  eq(fetty.verdict?.state, "different",
+     "a remix named in the title is told apart from the original");
+
+  // Kanye, from Spotify, where the guests are artists and the ISRCs differ.
+  const ye = verdictOf("Kanye West", "I CAN’T WAIT",
+    "I CAN’T WAIT (feat. Ms. Lauryn Hill)", { candidates: [
+      { id: "163l4", name: "I CAN’T WAIT", artists: ["Kanye West"],
+        isrc: "QZQAY2662999" },
+      { id: "6ImNh", name: "I CAN’T WAIT",
+        artists: ["Kanye West", "Ms. Lauryn Hill"], isrc: "QZTLA2629712" },
+    ]});
+  eq(ye.verdict?.state, "different", "and Spotify ISRCs settle it the same way");
+
+  /*
+   * ONE recording, two spellings: the genuine D8 this detector exists for.
+   *
+   * The song has always been a collaboration, so the only recording carries a
+   * guest credit and the BARE spelling has to match it anyway. An earlier
+   * version scored a credited candidate at zero for a title stating no credit,
+   * which made a bare spelling unmatchable here and reported the pair as
+   * unresolvable. Absence of a stated credit is not evidence the recording has
+   * none: this codebase's oldest bug, reappearing inside the fix for it.
+   */
+  const same = verdictOf("Kanye West", "Runaway", "Runaway (feat. Pusha T)",
+    { recordings: [{ id: "r1", title: "Runaway",
+                     artists: ["Kanye West", "Pusha T"] }] });
+  eq(same.verdict?.state, "same",
+     "one recording under two spellings is confirmed mergeable");
+  eq(same.confidence, 0.97, "with real confidence, because it is proven");
+
+  /*
+   * A credit no release has ever carried. Not silence, and not a merge
+   * instruction either: the likeliest reading is that the tag is wrong.
+   */
+  const orphan = verdictOf("Adele", "Hello", "Hello (feat. Nobody)",
+    { recordings: [{ id: "x1", title: "Hello", artists: ["Adele"] }] });
+  eq(orphan.verdict?.state, "unclear", "an unknown credit is not called a version");
+  ok(/No release of this song credits/.test(orphan.verdict.text),
+     "and says what it actually found, rather than 'could not confirm'");
+  ok(orphan.confidence > 0.3 && orphan.confidence < 0.6,
+     `held at a middling confidence  (${orphan.confidence})`);
+
+  // Nothing at all still has to stay distinguishable from all of the above.
+  const silent = verdictOf("X", "A", "A (feat. B)", { recordings: [] });
+  eq(silent.verdict?.state, "unclear", "an empty answer is still unclear");
+  ok(!/No release of this song credits/.test(silent.verdict.text),
+     "but must not claim a credit was missing when nothing was returned");
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

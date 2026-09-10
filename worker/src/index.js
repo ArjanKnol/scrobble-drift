@@ -58,7 +58,7 @@
  *
  * Bump this in the same commit as any Worker change. /api/health reports it.
  */
-const BUILD = "2026-09-10-18-retire-stale-recording-cache";
+const BUILD = "2026-09-10-19-recordings-with-artist-credits";
 
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";
@@ -1023,7 +1023,7 @@ async function mbRecording(url, env, request, cors) {
   await chargeMb(env, clientId(request));
   const { body, shared } = await mbShared(
     /*
-     * `rec2:`, not `rec:`. The cached SHAPE changed when the release-date
+     * `rec3:`. The cached SHAPE keeps changing, most recently to carry the
      * fallback was added, so every existing row holds `first_release: null`.
      *
      * Verified live rather than assumed: after deploying the fix, a fresh track
@@ -1038,7 +1038,7 @@ async function mbRecording(url, env, request, cors) {
      * key by reflex whenever the value shape moves, rather than deciding case by
      * case whether it matters.
      */
-    env, `rec2:${spNorm(artist)}\u241f${spNorm(track)}`, async () => {
+    env, `rec3:${spNorm(artist)}\u241f${spNorm(track)}`, async () => {
   const esc = (s) => s.replace(/[\\+\-!(){}\[\]^"~*?:/&|]/g, (c) => "\\" + c);
   const query = `artist:"${esc(artist)}" AND recording:"${esc(track)}"`;
   const res = await mbFetch(
@@ -1090,7 +1090,50 @@ async function mbRecording(url, env, request, cors) {
   const groups = [...best.values()].sort(
     (a, b) => (a.first_release || "9999").localeCompare(b.first_release || "9999"),
   );
-  return { groups };
+
+  /*
+   * The RECORDINGS themselves, with their titles and who they are credited to.
+   *
+   * Both fields were being parsed and thrown away, and their absence is why the
+   * "are these one recording or two" check could not answer for the case it was
+   * built for.
+   *
+   * Last.fm scrobbles carry the feature credit IN THE TITLE:
+   *
+   *     Love Never Felt So Good (feat. Justin Timberlake)
+   *
+   * MusicBrainz and Spotify both put it in the ARTIST CREDIT and leave the title
+   * bare. So looking that string up verbatim returns nothing, verified live on
+   * both upstreams, and the client saw one half of a comparison resolve and the
+   * other come back empty. It then correctly refused to call that a difference,
+   * which is honest and completely useless: every finding of this shape said
+   * "not confirmed".
+   *
+   * Searching the BASE title instead returns every recording of it, including
+   * the separately-credited and remixed ones, each with its own ID. Matching a
+   * library title to one of them needs the recording's own title and its credited
+   * artists, so both now travel with the answer.
+   *
+   * Deduplicated by recording ID because the search returns one entry per
+   * release, and a hit single appears on dozens of compilations.
+   */
+  const recs = new Map();
+  for (const rec of data.recordings || []) {
+    if (!rec?.id || recs.has(rec.id)) continue;
+    recs.set(rec.id, {
+      id: rec.id,
+      title: rec.title || null,
+      // `c.name` is the credited form ("Ms. Lauryn Hill"), which can differ from
+      // the artist's canonical name. The credit is what the release says, so it
+      // is what a library title is likeliest to echo.
+      artists: (rec["artist-credit"] || [])
+        .map((c) => c?.name || c?.artist?.name)
+        .filter(Boolean),
+      length: rec.length || null,
+    });
+  }
+
+  return { groups, recordings: [...recs.values()] };
   });
   return json({ ...body, shared }, 200,
               { ...cors, "Cache-Control": "public, max-age=86400" });
@@ -1356,12 +1399,12 @@ async function spTrack(url, env, cors) {
   }
 
   const { body, shared } = await spShared(
-    // `one2:`, not `one:`. The cached shape changed when ISRC was added, and a
+    // `one3:`. The shape changed again to carry unfiltered candidates, and a
     // stale entry is indistinguishable from a track Spotify has no ISRC for, so
     // reusing the key would have made every previously-cached track answer
     // "cannot confirm" for the whole seven-day TTL. Changing the prefix retires
     // the old entries rather than serving them in the wrong shape.
-    env, `one2:${spNorm(artist)}\u241f${spNorm(track)}`, async () => {
+    env, `one3:${spNorm(artist)}\u241f${spNorm(track)}`, async () => {
     // No `limit`: Spotify refuses an explicit one above 10 on these endpoints and
     // its default is adequate. See SP_PAGE.
     const q = `track:${JSON.stringify(track)} artist:${JSON.stringify(artist)}`;
@@ -1407,7 +1450,41 @@ async function spTrack(url, env, cors) {
     }
     const groups = [...best.values()].sort(
       (a, b) => (a.first_release || "9999").localeCompare(b.first_release || "9999"));
-    return { groups };
+
+    /*
+     * Every candidate Spotify returned, WITHOUT the exact-name filter above.
+     *
+     * `groups` stays strictly filtered because four detectors consume it and all
+     * of them mean "the release this exact track is on". Loosening that would
+     * have D0 consolidate a library onto a remix.
+     *
+     * But the strictness is precisely what broke the same-or-different check.
+     * A scrobble titled `Trap Queen (feat. Azealia Banks, Quavo & Gucci Mane)`
+     * matches no Spotify track name, because Spotify credits the guests as
+     * ARTISTS and titles the track `Trap Queen`. Verified live: that search
+     * returns an empty `groups` while Spotify plainly knows the record.
+     *
+     * So the unfiltered candidates ride alongside, with the two fields that
+     * identify which is which: who it is credited to, and its ISRC. The caller
+     * searches the bare title once and decides for itself which candidate each of
+     * the user's spellings refers to.
+     */
+    const seen = new Set();
+    const candidates = [];
+    for (const t of data.tracks?.items || []) {
+      if (!t?.id || seen.has(t.id)) continue;
+      seen.add(t.id);
+      candidates.push({
+        id: t.id,
+        name: t.name || null,
+        artists: (t.artists || []).map((a) => a?.name).filter(Boolean),
+        isrc: t.external_ids?.isrc || null,
+        album: t.album?.name || null,
+        release_date: t.album?.release_date || null,
+      });
+    }
+
+    return { groups, candidates };
   });
   return json({ ...body, shared }, 200,
               { ...cors, "Cache-Control": "public, max-age=86400" });

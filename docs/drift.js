@@ -2299,6 +2299,15 @@ export function discoveryOffers(scrobbles) {
     offers.push({
       id: "era_released",
       detector: "D14e",
+      /*
+       * Rendered inside the Unreleased material section, not above the findings.
+       *
+       * An offer is a question about a CATEGORY, so it belongs beside the numbers
+       * that describe that category. At the top of the findings list it reads as
+       * a finding, which is the one thing it is not: nothing is wrong yet, and
+       * pressing it may well confirm that nothing is.
+       */
+      section: "era",
       title: `${jobs.length} track${jobs.length === 1 ? " is" : "s are"} filed ` +
              `as unreleased or leaked`,
       note: "Some may have had an official release since you tagged them, which " +
@@ -2318,6 +2327,9 @@ export function discoveryOffers(scrobbles) {
     offers.push({
       id: "stranded_singles",
       detector: "D16",
+      // No section of its own to sit in: this is about ordinary singles and
+      // albums, which is the whole report. It stays above the findings.
+      section: "issues",
       title: `${cands.length} track${cands.length === 1 ? "" : "s"} ` +
              `${cands.length === 1 ? "is" : "are"} only filed under a single or EP`,
       note: "If a track later appeared on an album and you never played it " +
@@ -3141,6 +3153,137 @@ export function hygieneScore(totalPlays, issues, albumStrings = 0, weights = nul
  * treating silence as a negative answer is the single most repeated bug in this
  * codebase.
  */
+/**
+ * Flatten either upstream's answer into one list of candidate recordings.
+ *
+ * MusicBrainz returns `recordings: [{id, title, artists}]`, Spotify returns
+ * `candidates: [{id, name, artists, isrc}]`. Same idea, different field names,
+ * and the detectors should not have to know which source answered.
+ *
+ * `key` prefers the ISRC, because it identifies the MASTER and is comparable
+ * across sources; a MusicBrainz ID is only comparable with another MusicBrainz
+ * ID. Prefixed so the two namespaces can never be accidentally equated.
+ */
+export function candidateRecordings(answer) {
+  const out = [];
+  for (const r of answer?.recordings || []) {
+    if (!r?.id) continue;
+    out.push({ key: `mb:${r.id}`, title: r.title || "",
+               artists: (r.artists || []).map(norm).filter(Boolean) });
+  }
+  for (const c of answer?.candidates || []) {
+    if (!c?.id && !c?.isrc) continue;
+    out.push({ key: c.isrc ? `isrc:${String(c.isrc).toUpperCase()}` : `sp:${c.id}`,
+               title: c.name || "",
+               artists: (c.artists || []).map(norm).filter(Boolean) });
+  }
+  return out;
+}
+
+/**
+ * Which database recording is this library title actually referring to?
+ *
+ * The problem this solves, and it is the reason the whole check was useless.
+ * Last.fm scrobbles carry the feature credit in the TITLE:
+ *
+ *     Love Never Felt So Good (feat. Justin Timberlake)
+ *
+ * MusicBrainz and Spotify both put it in the ARTIST CREDIT and title the track
+ * bare. Verified live on both: that exact string returns nothing at all. So the
+ * old approach of looking up each spelling verbatim resolved the plain half,
+ * drew a blank on the credited half, and had to report "not confirmed" every
+ * single time. Four cards in a row said it.
+ *
+ * Searching the BARE title returns both recordings. Telling them apart is then a
+ * matching problem rather than a lookup problem, and the credit is the evidence:
+ * the user wrote down who features, and one of the candidates is credited to
+ * exactly those people.
+ *
+ * `wanted` empty means the user's title states no credit, which is a positive
+ * signal in its own right: it should match the recording credited to the primary
+ * artist ALONE, not merely any recording.
+ *
+ * Returns the single best candidate, or null. Null on a tie is deliberate. A
+ * wrong match here does not produce a wrong detail, it produces a confident
+ * "these are different recordings, do not merge" about two things that may be
+ * identical, and the report has no finding whose errors cost more.
+ */
+export function matchRecording(candidates, title, primaryArtist) {
+  const want = featCredits(title);
+  const base = norm(baseTitle(title));
+  const primary = norm(primaryArtist || "");
+  if (!base || !(candidates || []).length) return null;
+
+  const scored = [];
+  for (const c of candidates) {
+    const cTitle = norm(c.title);
+    const cBase = norm(baseTitle(c.title));
+    // The title has to be about the same song at all. A remix candidate is often
+    // titled "X (Someone remix)", so the bare base is compared, not the full one.
+    if (cBase !== base && cTitle !== base && !cTitle.startsWith(base)) continue;
+
+    // Everyone credited who is not the primary artist. That set is what a
+    // "(feat. ...)" clause in a library title is describing.
+    const guests = new Set(c.artists.filter((a) => a && a !== primary));
+    // Names the candidate states in its own title instead, which is how
+    // MusicBrainz files most remixes: "Trap Queen (Azealia Banks ... remix)".
+    for (const n of want) if (cTitle.includes(n)) guests.add(n);
+
+    let score;
+    if (!want.size) {
+      /*
+       * No credit stated, which is NOT evidence that the recording has none.
+       *
+       * An earlier version scored a credited candidate at zero here, so a bare
+       * library title could only ever match a recording credited to the primary
+       * artist alone. Where the only recording carries a guest credit, which is
+       * the normal case for a song that has always been a collaboration, the
+       * bare spelling matched nothing and the pair was reported as unresolvable.
+       *
+       * That is this codebase's oldest mistake, absence of an answer read as a
+       * negative answer, reappearing inside the fix for it. A plain candidate is
+       * preferred, a credited one is still accepted.
+       */
+      score = guests.size === 0 ? 3 : 2;
+    } else if ([...want].every((n) => guests.has(n))) {
+      // Every named guest is credited. Exactly right beats merely sufficient.
+      score = guests.size === want.size ? 3 : 2;
+    } else if ([...want].some((n) => guests.has(n))) {
+      score = 1;
+    } else {
+      score = 0;
+    }
+    if (score === 0) continue;
+
+    /*
+     * Exact title beats prefix, as a tiebreak below the credit score.
+     *
+     * Without this the bare spelling ties between the original and every remix,
+     * because a remix carries no guest credit either: `Trap Queen` and `Trap
+     * Queen (Azealia Banks, Quavo & Gucci Mane remix)` both score 3 for a title
+     * that names nobody. A tie returns null, so the bare half matched nothing and
+     * the whole comparison collapsed to "not confirmed" on the two cases this was
+     * built to answer. Found by running the real MusicBrainz payloads through it
+     * rather than by reading the code.
+     *
+     * Below the credit score, not above it, because a credit is stated evidence
+     * and a title shape is an inference.
+     */
+    scored.push({ c, score, exact: cTitle === base ? 1 : 0, guests: guests.size });
+  }
+  if (!scored.length) return null;
+
+  // Credit match, then exact title, then the least decorated line-up.
+  scored.sort((x, y) =>
+    (y.score - x.score) || (y.exact - x.exact) || (x.guests - y.guests));
+  // A tie between two DIFFERENT recordings is not a match. Ties between entries
+  // for the same recording are fine and common: one release each.
+  const top = scored.filter((s) => s.score === scored[0].score &&
+    s.exact === scored[0].exact && s.guests === scored[0].guests);
+  const keys = new Set(top.map((s) => s.c.key));
+  return keys.size === 1 ? top[0].c : null;
+}
+
 export function sameRecording(a, b) {
   const ids = (r) => {
     const mb = new Set(), isrc = new Set();
@@ -3234,8 +3377,9 @@ function hasCredit(title) {
  * merely lower confidence: it makes the suggestion WRONG, so the finding must
  * stop recommending a merge and say what it actually found instead.
  */
-export function applyRecordingVerdict(issue, verdict, timing = null) {
+export function applyRecordingVerdict(issue, verdict, timing = null, opts = {}) {
   if (!issue) return issue;
+  const { orphan = null, artist = "" } = opts;
 
   /*
    * The verdict is attached as its own FIELD, not appended to the suggestion.
@@ -3297,6 +3441,39 @@ export function applyRecordingVerdict(issue, verdict, timing = null) {
               "guest verse added to a later edition of the album." + timed +
               " Do not merge them. It cannot be undone, and it would destroy a " +
               "real distinction.",
+      },
+    };
+  }
+
+  /*
+   * One spelling matched a real recording and the other matched nothing, from a
+   * candidate list that was not empty.
+   *
+   * Reported before the plain unknown, because it is a much better answer than
+   * "could not confirm" and would otherwise be flattened into it. No release of
+   * this song credits the people the title names, which usually means the credit
+   * itself is wrong rather than that there are two versions.
+   */
+  if (orphan) {
+    const guests = [...featCredits(orphan)];
+    return {
+      ...issue,
+      class: "review",
+      confidence: 0.45,
+      evidence: "credit not found on any release",
+      resolved: true,
+      no_auto_action: true,
+      verdict: {
+        state: "unclear",
+        text: `No release of this song credits ` +
+          (guests.length
+            ? `the ${guests.length === 1 ? "artist" : "artists"} named in ` +
+              `'${orphan}'`
+            : `it that way`) +
+          `, though ${artist ? `${artist}'s` : "the"} other version is in the ` +
+          `databases. Usually that means the credit is wrong rather than that ` +
+          `there are two versions, but the databases are incomplete, so this is ` +
+          `not proof. Worth a listen before merging.`,
       },
     };
   }
@@ -3494,16 +3671,49 @@ export function resolveOne(
    */
   const variants = (issue.members || []).filter((m) => m?.track);
   if (variants.length === 2 && variants[0].track !== variants[1].track) {
-    const a = lookup?.(issue.artist, variants[0].track);
-    const b = lookup?.(issue.artist, variants[1].track);
+    /*
+     * ONE lookup, on the BARE title, and then a matching problem.
+     *
+     * This used to look each spelling up verbatim, which cannot work: the
+     * databases do not have a track called `Trap Queen (feat. Azealia Banks,
+     * Quavo & Gucci Mane)`. They have `Trap Queen`, credited to four people. So
+     * one half always resolved, the other always came back empty, and the check
+     * reported "not confirmed" on every finding of this shape.
+     *
+     * Cheaper as well as correct: one call rather than two.
+     */
+    const base = baseTitle(variants[0].track) || variants[0].track;
+    const answer = lookup?.(issue.artist, base);
+    const cands = candidateRecordings(answer);
+    const ma = matchRecording(cands, variants[0].track, issue.artist);
+    const mb = matchRecording(cands, variants[1].track, issue.artist);
+
+    const verdict = (ma && mb)
+      ? (ma.key === mb.key ? "same" : "different")
+      : "unknown";
+
+    /*
+     * One side matched and the other did not, with a real candidate list in
+     * hand. That is not silence, and reporting it as silence throws away the
+     * most useful thing the lookup found.
+     *
+     * It means no release of this track credits the artists the title names. The
+     * likeliest explanation is that the credit is wrong: a scrobble picked up
+     * from a player that invented it, or a guest who is on a different song. It
+     * is not proof, because the databases are incomplete, so it does not become
+     * a merge instruction. It is still worth saying out loud.
+     */
+    const orphan = cands.length && (Boolean(ma) !== Boolean(mb))
+      ? (ma ? variants[1] : variants[0]).track : null;
+
     const out = applyRecordingVerdict(
-      issue, sameRecording(a, b), variantTiming(issue));
-    const best = (a?.groups || [])[0] || (b?.groups || [])[0] || null;
+      issue, verdict, variantTiming(issue), { orphan, artist: issue.artist });
+    const best = (answer?.groups || [])[0] || null;
     return {
       ...out,
       resolved: true,
       external: out.external || best,
-      candidates: (a?.groups || []).slice(0, 5),
+      candidates: (answer?.groups || []).slice(0, 5),
     };
   }
 

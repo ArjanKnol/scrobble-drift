@@ -562,8 +562,23 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
   // ---- the per-track endpoint is a DROP-IN for the MusicBrainz one ------- //
   const trackAt = src.indexOf("async function spTrack(");
   const trackBody = src.slice(trackAt, src.indexOf("\n}", trackAt));
-  ok(/return \{ groups \}/.test(trackBody),
-     "spTrack returns { groups }, the same shape as /api/mb/recording");
+  /*
+   * `groups` is still the shared contract, and four detectors depend on it
+   * meaning "releases carrying this exact track". Both endpoints now also carry
+   * an identity payload alongside it, and those are deliberately NOT merged into
+   * groups: they are unfiltered, so folding them in would let D0 consolidate a
+   * library onto a remix.
+   */
+  ok(/return \{ groups, candidates \}/.test(trackBody),
+     "spTrack still returns groups, now with unfiltered candidates alongside");
+  const recAt = src.indexOf("async function mbRecording(");
+  const recBody = src.slice(recAt, src.indexOf("\n}", recAt));
+  ok(/recordings: \[\.\.\.recs\.values\(\)\]/.test(recBody),
+     "and mbRecording returns the recordings, with titles and artist credits");
+  ok(/artists: \(rec\["artist-credit"\]/.test(recBody),
+     "the artist credit specifically, which is where the feature lives",
+     "Last.fm puts the feature in the title; the databases put it in the " +
+     "credit. Without this field a decorated title can never be matched.");
   ok(/spNorm\(t\.name\) === wantTrack/.test(trackBody) &&
      /spNorm\(a\.name\) === wantArtist/.test(trackBody),
      "and requires an exact normalised match on BOTH track and artist");
