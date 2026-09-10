@@ -24,6 +24,11 @@ import { dirname, join } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const html = readFileSync(join(root, "docs/index.html"), "utf8");
+// Some invariants span both files: the page delegates a ruling to drift.js, and
+// asserting only on the call site would pass with the callee deleted.
+const driftCode = readFileSync(join(root, "docs/drift.js"), "utf8")
+  .replace(/\/\*[\s\S]*?\*\//g, "")
+  .replace(/^\s*\/\/.*$/gm, "");
 
 let pass = 0;
 const fails = [];
@@ -35,22 +40,36 @@ const code = html
   .replace(/\/\*[\s\S]*?\*\//g, "")
   .replace(/^\s*\/\/.*$/gm, "");
 
-/* ---- 1. step 2 may fail without failing the scan ------------------------ */
+/* ---- 1. discovery may fail without destroying the findings -------------- */
 {
-  // The await must sit inside a try whose catch records the error, rather than
-  // inside the scan-wide try whose catch calls fail().
-  const i = code.indexOf("await resolvePhase(");
-  ok("resolvePhase is called", i > 0);
+  /*
+   * This used to assert that `await resolvePhase(...)` sat inside its own try.
+   * The scan no longer has a second step at all: lookups run from the report,
+   * when a card is pressed, so there is nothing left inside the scan to protect
+   * the findings from.
+   *
+   * The invariant survives the move, because the danger did. `runDiscovery`
+   * mutates `report.issues` and calls `render()`, and if a throw from it escaped
+   * to the scan-wide catch it would still reach fail() and still overwrite the
+   * output element. Same bug, new call site.
+   */
+  ok("the scan itself no longer runs lookups",
+     !/await resolvePhase\(/.test(code),
+     "Step 2 was removed; a call to it means the rewrite is half-applied.");
+
+  const i = code.indexOf("await runDiscovery(");
+  ok("discovery is called from the report", i > 0);
 
   const before = code.slice(Math.max(0, i - 400), i);
-  ok("resolvePhase is wrapped in its own try",
+  ok("runDiscovery is wrapped in its own try",
      /try\s*\{\s*$/.test(before.trimEnd()) || /try\s*\{[^}]*$/.test(before),
-     "A throw here reaches fail(), which overwrites #out and deletes step 1.");
+     "A throw here would reach fail(), which overwrites #out and deletes " +
+     "every finding the user is reading.");
 
-  const after = code.slice(i, i + 400);
-  ok("and its catch records the failure instead of rethrowing",
-     /catch\s*\([^)]*\)\s*\{[^}]*resolve_error/.test(after),
-     "stats.resolve_error is what lets the summary say which part is missing.");
+  const after = code.slice(i, i + 500);
+  ok("and its catch reports without rethrowing",
+     /catch\s*\([^)]*\)\s*\{[^}]*status/.test(after),
+     "The user must be told the check failed, and told their findings stand.");
 }
 
 /* ---- 2. fail() never destroys results already on screen ----------------- */
@@ -117,27 +136,45 @@ const code = html
   const body = m ? m[1] : "";
 
   ok("'Scan complete' is conditional",
-     /\?[^:]*"Scan complete"|"Scan complete"\s*}/.test(body) ||
-     /resolve_error[\s\S]*?"Scan complete"/.test(body),
+     /\?[^:]*"Scan complete"|"Scan complete"\s*}/.test(body),
      "A partial run must not be described as complete.");
-  ok("a step 2 failure changes the headline, not only a footnote",
-     /resolve_error\s*\?/.test(body),
+  ok("a stopped scan changes the headline, not only a footnote",
+     /aborted \? "Stopped"/.test(body),
      "Twelve lines down is where a caveat goes unread.");
-  ok("and the failure is reported to the user at all",
-     /resolve_error/.test(body),
-     "Swallowing it leaves missing release dates unexplained.");
-  ok("the error text is escaped",
-     /esc\(s\.resolve_error\)/.test(body),
-     "It can carry a server message, so it is untrusted string data.");
+  /*
+   * The step-2 error assertions are gone with step 2. A lookup failure is now
+   * reported on the card that launched it, which is assertion 1.
+   *
+   * What replaces them is the opposite claim: the scan panel must state that it
+   * contacted nothing. That is the user-visible fact this whole rewrite turns on,
+   * and if it silently stops being true the panel becomes a lie rather than
+   * merely stale.
+   */
+  ok("the summary states no databases were contacted",
+     /No release databases were contacted/.test(body),
+     "If the scan starts making lookups again, this sentence is false.");
+  ok("and no stale resolve-phase reporting is left behind",
+     !/resolve_error|resolve_requested|resolve_ms/.test(body),
+     "Reporting on a phase that cannot run means reporting nothing, forever.");
 }
 
-/* ---- 5. the promise made in the step 2 banner --------------------------- */
+/* ---- 5. a discovery offer must survive its own failure ------------------ */
 {
-  // The banner tells the user the findings below are already readable. That is
-  // only true if a step 2 failure leaves them alone, which is assertion 1 and 2.
-  ok("the step 2 banner still promises readable results",
-     /already below/.test(html),
-     "If this wording changes, re-check that a step 2 error preserves them.");
+  /*
+   * This replaced an assertion on the step 2 banner's wording, which promised the
+   * findings below were already readable. There is no banner now because there is
+   * no second step: the report is complete the moment the scan ends.
+   *
+   * The equivalent promise is the offer card. It says a check costs a minute and
+   * adds findings, and the honest version of that is that pressing it can never
+   * cost you anything you already have.
+   */
+  ok("a failed discovery says the findings are unaffected",
+     /below are unaffected/.test(html),
+     "If this wording goes, re-check that a discovery error preserves results.");
+  ok("and the offer is told what happened rather than silently reset",
+     /done: true, found: found\.length/.test(code),
+     "A card that reappears unchanged cannot be told from one never pressed.");
 }
 
 /* ---- 6. both steps estimate the time remaining ------------------------- */
@@ -338,16 +375,21 @@ const code = html
      /if \(out\?\.shared\) mbPace\.refund\(\)/.test(code));
 
   /*
-   * The era phase ran one job at a time. On a library with thousands of
-   * unreleased plays that is hundreds of sequential round trips, each waiting out
-   * a full pacer interval, which was a large part of why step 2 dragged.
+   * The era-NAME phase is gone: those findings are already on screen after a
+   * scan, so they are enrichment and now resolve from their own button. What
+   * remains is the residual MusicBrainz work, which must still be pooled. A plain
+   * for-loop there serialises every lookup and wastes the pacer's whole point,
+   * which is that send rate and completion rate are different things.
    */
-  ok("the era phase is pooled rather than serial",
-     /await pool\(eraJobs, \d+, async \(job\) => \{/.test(code),
-     "A plain for-loop here serialises every era lookup.");
-  ok("and it is closed as a callback",
-     /tick\("Checking era names"\);\s*\}\);/.test(code),
-     "A pooled body ends with `});`, not `}`.");
+  ok("the residual MusicBrainz phase is pooled rather than serial",
+     /await pool\(split\.perTrack, \d+, async \(job\) => \{/.test(code),
+     "A plain for-loop here serialises every remaining lookup.");
+  ok("the era-name batch is gone from the scan",
+     !/pool\(eraJobs,/.test(code),
+     "Era names are enrichment; batching them was the old step 2.");
+  ok("and resolveOne rules on them instead",
+     /verifyEraNames\(\[issue\]/.test(driftCode),
+     "Same ruling, on demand. Reusing it stops the two paths disagreeing.");
 
   // `continue` and `break` are loop statements and are illegal in a callback.
   // Converting a loop to a pool without converting these is a silent syntax trap.
@@ -456,13 +498,28 @@ const code = html
   /*
    * The scan resolved everything up front: 312 lookups and twenty minutes on a
    * 2,000-scrobble library, to attach detail to findings nobody had opened.
-   * Enrichment moved to a button; discovery stayed in the scan, capped.
+   * Enrichment moved to a button, and then discovery moved to an offer card, so
+   * a scan now makes no release lookups at all.
+   *
+   * The cap went with it, deliberately. It existed to keep down a bill the user
+   * had not agreed to; once they have pressed a button that states the cost,
+   * silently truncating their library is the same disrespect in the other
+   * direction.
    */
-  ok("step 2 is discovery only", /j\.kind === "era"/.test(code) &&
-     /DISCOVERY_CAP/.test(code),
-     "Splits and blank albums are enrichment and belong on a button.");
-  ok("and it is capped", /slice\(0, DISCOVERY_CAP\)/.test(code),
-     "Uncapped, a leak-heavy library is back to twenty minutes.");
+  ok("the scan makes no discovery lookups", !/DISCOVERY_CAP/.test(code),
+     "Any cap here means discovery is still running unasked.");
+  ok("discovery is offered by category instead",
+     /discoveryOffers\(scrobbles\)/.test(code),
+     "A category is knowable locally, so it can carry the button a " +
+     "not-yet-existing finding cannot.");
+  ok("and the offer card renders a button",
+     /button class="check discover"/.test(code));
+  ok("both discovery detectors are offered",
+     /era_released/.test(driftCode) && /stranded_singles/.test(driftCode),
+     "D16 was built, tested and never wired; the offer card is its route in.");
+  ok("and D16 is actually called",
+     /d16StrandedSingles\(offer\.jobs/.test(code),
+     "An offer that runs nothing is worse than no offer.");
 
   // Class list, not an exact string: `.ghost` was dropped because it rendered a
   // large low-contrast outline that read as disabled decoration rather than the

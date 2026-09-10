@@ -334,6 +334,14 @@ for (const [label, lib] of [
     "isEraTagged", "isUndifferentiated", "isStructuralTitle", "featCredits",
     "officialKey", "d5Resolve", "digitsOnlyDiffer", "caseOnly",
     "singleShaped",
+    /*
+     * Not string parsers, but they satisfy the probe below: handed a bare string
+     * they each return a primitive rather than throwing. Listed rather than
+     * excused, because the probe is the honest half of this test. Weakening it to
+     * wave through three functions that happen to be cheap would leave the next
+     * genuine regex export unfuzzed, which is the failure mode it exists to catch.
+     */
+    "isResolvable", "resolveOne", "sameRecording",
   ];
   const unary = STRING_FNS.map((n) => [n, drift[n]]).filter(([, v]) => typeof v === "function");
   ok(unary.length === STRING_FNS.length,

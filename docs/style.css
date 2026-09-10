@@ -317,3 +317,84 @@ button.check:disabled, button.check-all:disabled {
   border-color: var(--line);
   color: var(--dim);
 }
+
+/* ------------------------------------------------------------------ offers */
+/*
+ * A lookup being offered rather than performed.
+ *
+ * Marked with the era colour and a dashed edge so it does not read as a finding.
+ * It is a question the tool can answer, not a problem it has found, and the two
+ * must not look alike: the report's whole claim is that everything listed is
+ * something real about your library.
+ */
+.panel.offer {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--era) 45%, var(--line));
+  margin-bottom: 9px;
+}
+.panel.offer.done {
+  border-style: solid;
+  border-color: var(--line);
+  opacity: .72;
+}
+
+/* ---------------------------------------------------------------- verdicts */
+/*
+ * The result of a lookup, which has to look unmistakably different from the
+ * guess it replaces.
+ *
+ * Previously the answer was appended to the end of the suggestion paragraph, so
+ * a fetched fact and an inferred guess rendered identically. People pressed the
+ * button and reported that nothing happened. A left border and a label fix that
+ * at a glance, and the colour carries the meaning before the text is read:
+ * green for proven, red for do-not-merge, amber for unconfirmed, neutral grey
+ * for plain release data.
+ */
+.verdict {
+  margin: 9px 0 0;
+  padding: 9px 12px;
+  border-left: 3px solid var(--line);
+  background: rgba(255, 255, 255, .03);
+  border-radius: 0 5px 5px 0;
+  font-size: 14px;
+}
+.verdict .v-label {
+  display: inline-block;
+  margin-right: 8px;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  vertical-align: 1px;
+}
+.v-same      { border-left-color: var(--good); }
+.v-same      .v-label { color: var(--good); }
+.v-different { border-left-color: var(--bad); }
+.v-different .v-label { color: var(--bad); }
+.v-unclear   { border-left-color: var(--warn); }
+.v-unclear   .v-label { color: var(--warn); }
+.v-info      { border-left-color: var(--dim); }
+.v-info      .v-label { color: var(--dim); }
+
+/*
+ * A suggestion the lookup has disproved. Kept because seeing what the tool
+ * believed beforehand is informative, struck through because it is no longer
+ * advice and must not be mistaken for any.
+ */
+.superseded {
+  margin: 7px 0 0;
+  color: var(--dim);
+  font-size: 13px;
+  text-decoration: line-through;
+  text-decoration-color: rgba(153, 153, 153, .45);
+}
+.superseded .v-label {
+  display: inline-block;
+  margin-right: 8px;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--dim);
+  text-decoration: none;
+}

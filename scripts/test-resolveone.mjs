@@ -15,7 +15,7 @@
  *     node scripts/test-resolveone.mjs
  */
 import { resolveOne, isResolvable, RESOLVABLE, sameRecording,
-         applyRecordingVerdict } from "../docs/drift.js";
+         applyRecordingVerdict, variantTiming } from "../docs/drift.js";
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log(`  ok   ${m}`); }
@@ -175,8 +175,17 @@ console.log("\nnothing is mutated");
 
   const same = applyRecordingVerdict(issue, "same");
   eq(same.confidence, 0.97, "proof of one recording justifies real confidence");
-  eq(same.evidence, "same MusicBrainz recording", "and names the evidence");
-  ok(/provably correct/.test(same.suggest), "and says the merge is proven");
+  eq(same.evidence, "same recording", "and names the evidence");
+  /*
+   * The answer lives in `verdict`, not appended to `suggest`.
+   *
+   * It used to be concatenated onto the end of the suggestion, which is why a
+   * working lookup was reported as "nothing happens when I press the button": a
+   * fetched fact arrived as a third sentence in the same paragraph and the same
+   * colour as the guess it had just settled.
+   */
+  eq(same.verdict?.state, "same", "the answer is a field, not trailing text");
+  ok(/provably correct/.test(same.verdict.text), "and says the merge is proven");
 
   /*
    * Asymmetric on purpose. Two recordings does not merely lower confidence: it
@@ -185,17 +194,72 @@ console.log("\nnothing is mutated");
   const diff = applyRecordingVerdict(issue, "different");
   eq(diff.class, "review", "proof of two recordings stops it being an error");
   ok(diff.confidence < 0.2, `and drops confidence hard  (${diff.confidence})`);
-  ok(/likely a remix or a rework/.test(diff.suggest),
-     "the suggestion explains what it actually found");
-  ok(/Nothing to fix here/.test(diff.suggest),
+  eq(diff.verdict?.state, "different", "and the verdict says so plainly");
+  ok(/remix, a re-cut, or a guest verse/.test(diff.verdict.text),
+     "the verdict explains what it actually found");
+  ok(/Do not merge/.test(diff.verdict.text),
      "and withdraws the recommendation rather than softening it");
-  ok(!/Merge them/.test(diff.suggest),
-     "the original merge advice is REPLACED, not appended to");
+  ok(diff.suggest === null && diff.superseded === "Merge them.",
+     "the original merge advice is RETIRED, not left printed above the verdict");
   ok(diff.resolved === true, "and it is marked checked, so no button reappears");
 
-  ok(applyRecordingVerdict(issue, "unknown") === issue,
-     "an unknown verdict returns the very same object, unchanged");
+  /*
+   * Unknown is an ANSWER and has to look like one.
+   *
+   * This used to return the issue untouched, so "checked, nobody knows" and
+   * "never checked" were the same object. That is this codebase's most repeated
+   * bug wearing a new hat: absence of an answer treated as no answer at all.
+   */
+  const unk = applyRecordingVerdict(issue, "unknown");
+  ok(unk !== issue, "an unknown verdict still marks the finding as checked");
+  eq(unk.verdict?.state, "unclear", "and says the databases could not settle it");
+  eq(unk.class, issue.class, "without inventing a downgrade it cannot justify");
+  eq(unk.confidence, issue.confidence, "or moving the confidence");
   ok(applyRecordingVerdict(null, "same") === null, "and nothing stays nothing");
+
+  /*
+   * The case that prompted all of this: Ye's 'I CAN'T WAIT'.
+   *
+   * The plain title ran March to June, the version credited to Ms. Lauryn Hill
+   * June to August, both on the album BULLY. The album was revised after release
+   * and the track was replaced, so these are two masters and merging them would
+   * be wrong. The report looked up one title, said "Release data: 'BULLY'
+   * (Album)", and went on recommending the merge.
+   *
+   * Sequential non-overlapping plays are the signal, and on their own they are
+   * suggestive rather than conclusive: a change of music player produces the same
+   * shape and IS an ordinary tagging inconsistency. So this must lower
+   * confidence and explain itself, never assert.
+   */
+  const ye = {
+    class: "split", confidence: 0.8, artist: "Kanye West",
+    suggest: "standardise on 'I CAN'T WAIT'.",
+    members: [
+      { track: "I CAN'T WAIT", plays: 8, first: 1000, last: 2000 },
+      { track: "I CAN'T WAIT (feat. Ms. Lauryn Hill)", plays: 5,
+        first: 3000, last: 4000 },
+    ],
+  };
+  const timing = variantTiming(ye);
+  ok(timing, "non-overlapping variant plays are recognised");
+  eq(timing.later, "I CAN'T WAIT (feat. Ms. Lauryn Hill)",
+     "and the credited version is identified as the later one");
+  ok(timing.gained_credit === true,
+     "which is the direction a revised release produces");
+
+  const revised = applyRecordingVerdict(ye, "unknown", timing);
+  eq(revised.class, "review", "unconfirmed plus sequential is not an error");
+  ok(revised.confidence < 0.5, `and confidence drops  (${revised.confidence})`);
+  ok(/revised release/.test(revised.verdict.text),
+     "the verdict names what this pattern usually is");
+  ok(revised.suggest === null,
+     "and stops telling the user to merge two probable masters");
+
+  // Overlapping plays are concurrent, which is ordinary tagging drift.
+  ok(variantTiming({ members: [
+       { track: "a", first: 1000, last: 3000 },
+       { track: "b", first: 2000, last: 4000 }] }) === null,
+     "overlapping plays are not a revision signal");
 }
 
 /* ---------------------------------------------------------------------------
@@ -219,11 +283,11 @@ console.log("\nnothing is mutated");
   ok(out.resolved === true, "a generic finding is marked resolved");
   eq(out.external?.title, "Rodeo", "the best match is attached for the UI");
   eq(out.candidates?.length, 2, "with the alternatives kept");
-  ok(/Release data: 'Rodeo' \(Album, 2015-09-04\)/.test(out.suggest),
-     "and the suggestion states what was found, with type and date");
+  ok(/Release data: 'Rodeo' \(Album, 2015-09-04\)/.test(out.verdict?.text || ""),
+     "and the verdict states what was found, with type and date");
   ok(/Two spellings\./.test(out.suggest),
-     "appended to the original wording rather than replacing it");
-  ok(/1 other release\./.test(out.suggest), "and counts the alternatives");
+     "leaving the original wording intact rather than appending to it");
+  ok(/1 other release\./.test(out.verdict.text), "and counts the alternatives");
 
   // The distinction that must survive: asked and got nothing.
   const nothing = resolveOne({ detector: "D11", artist: "A", track: "B" },
@@ -264,19 +328,37 @@ console.log("\nnothing is mutated");
   ok(out.resolved === true,
      "a title variant comes back marked resolved, so the button clears");
   ok(!out.unresolved, "and not as unresolved, since data was found");
-  ok(/Release data: 'Trap Queen' \(Single, 2014-04-21\)/.test(out.suggest),
-     "with what the databases actually hold");
+  eq(out.verdict?.state, "unclear",
+     "no identifiers in the answer means the question is honestly unsettled");
 
   /*
-   * The track to look up. A title-variant finding has no single `track` field:
-   * having two is the entire point. Without this fallback the lookup was called
-   * with undefined and could never return anything.
+   * BOTH titles are looked up, and this is the whole fix.
+   *
+   * The question a two-variant finding asks is "are these one recording", and the
+   * old code looked up ONE title and reported which album it sits on. On Ye's
+   * revised BULLY both titles are on the same album, so the answer was identical
+   * either way and settled nothing, while the headline went on recommending a
+   * merge that would have destroyed a real distinction.
    */
-  let asked = null;
-  resolveOne(variant, (artist, track) => { asked = [artist, track]; return found; });
-  eq(asked?.[0], "Fetty Wap", "the artist is passed through");
-  ok(asked?.[1]?.startsWith("Trap Queen"),
-     `a member track is looked up, not undefined  (${asked?.[1]})`);
+  const asked = [];
+  resolveOne(variant, (artist, track) => { asked.push([artist, track]); return found; });
+  eq(asked.length, 2, "both variants are looked up, not just the first");
+  eq(asked[0][0], "Fetty Wap", "the artist is passed through");
+  eq(new Set(asked.map((a) => a[1])).size, 2,
+     "and they are two DIFFERENT titles, not one asked twice");
+
+  /*
+   * Proof of two recordings, arriving from two different sources, must NOT be
+   * read as proof. Spotify answers with an ISRC and MusicBrainz with a recording
+   * ID, and the client falls back from one to the other, so a naive comparison
+   * finds two disjoint sets and declares "different" on no evidence at all.
+   */
+  const byIsrc = { groups: [{ title: "T", isrc: "USUM71418036" }] };
+  const byMbid = { groups: [{ title: "T", recording_id: "abc-123" }] };
+  eq(sameRecording(byIsrc, byMbid), "unknown",
+     "two identifier systems that never overlap cannot prove a difference");
+  eq(sameRecording(byIsrc, { groups: [{ isrc: "usum71418036" }] }), "same",
+     "and an ISRC match is case-insensitive");
 
   // A joint credit must still take its own branch.
   const joint = { detector: "D8", class: "review", confidence: 0.6,

@@ -46,22 +46,17 @@
       <button id="stop" class="ghost hide" type="button">Stop</button>
     </form>
 
-    <label class="chk" style="margin-top:11px;display:flex;gap:7px;
-           align-items:baseline;color:var(--dim);font-size:12.5px">
-      <input type="checkbox" id="resolve" checked
-             style="min-width:auto;width:auto;position:relative;top:2px">
-      <span>Check for leaks that have since been released
-        <button type="button" class="i" data-tip="Looks up your most-played
-          unreleased tracks to see whether any has since had an official release.
-          This is the only check that cannot be done on demand, because the
-          finding exists only once the lookup has run: you cannot click something
-          that is not on screen yet. Everything else, like which album a split
-          should consolidate into, now has a Check button on the finding itself,
-          so it costs a lookup only when you actually want the answer. Results
-          appear before this runs and update
-          as it finishes.">i</button>
-      </span>
-    </label>
+    <!--
+      The "check for leaks that have since been released" checkbox used to live
+      here, and it is gone along with the scan phase behind it.
+
+      A scan is now your scrobbles plus local analysis: no network calls beyond
+      Last.fm itself, and no waiting. Every lookup is offered inside the report,
+      where you can see what it would tell you before deciding to spend it. An
+      opt-out checkbox above a Scan button asks you to make that call before you
+      have seen a single finding, which is the wrong moment and the wrong
+      question.
+    -->
 
     <div id="prog" class="hide">
       <div id="phase" class="phase"></div>
@@ -84,6 +79,16 @@
           nowhere for it to be uploaded to. Your API key is never stored.">i</button>
         <a href="#" id="clear-data">clear</a><span id="usage"></span>
       </span>
+      <span>Lookups on demand
+        <button type="button" class="i" data-tip="A scan reads your scrobbles and
+          analyses them in your browser. It contacts no release database at all,
+          which is why it takes seconds rather than twenty minutes. Anything that
+          needs an outside answer, such as which album a split belongs to or
+          whether two spellings are really the same recording, has a Check button
+          on the finding itself. Whole categories that can only be found by
+          looking, like leaks that have since been released, are offered as a card
+          at the top of the report with the cost stated before you press
+          it.">i</button></span>
       <span>Shared API key, rate limited
         <button type="button" class="i" data-tip="Everyone uses one Last.fm API
           key, so deep scans are paced to keep it alive for everybody. Supplying
@@ -136,11 +141,19 @@
 
 <script type="module">
 import {
-  analyse, partitionEra, resolutionPlan, d0Resolve, d14eReleasedSince,
-  eraVerificationPlan, verifyEraNames, hygieneScore, chartImpact,
-  weakEraCandidates, officialKey, d5Resolve, byImportance, d8VerifyJointCredits,
-  resolveOne, isResolvable,
+  analyse, partitionEra, d14eReleasedSince, d16StrandedSingles,
+  hygieneScore, weakEraCandidates, officialKey, byImportance,
+  resolveOne, isResolvable, discoveryOffers,
 } from "./drift.js";
+/*
+ * Six imports left with the resolve phase: d0Resolve, d5Resolve, verifyEraNames,
+ * d8VerifyJointCredits, chartImpact and eraVerificationPlan.
+ *
+ * They are not gone, they moved inside resolveOne, which is the point of that
+ * function: the page now says "resolve this finding" and drift.js decides which
+ * resolver that means. The page used to branch on detector itself, in a copy of
+ * logic that already existed, and the two drifted apart at least twice.
+ */
 
 import { apiBase, isConfigured, activeLinks } from "./config.js";
 import * as store from "./store.js";
@@ -258,6 +271,16 @@ function issueLinks(issue, user) {
 const col = (v) => v >= 85 ? "var(--good)" : v >= 60 ? "var(--warn)" : "var(--bad)";
 
 let abort = false, report = null, fDet = "", fCls = "";
+
+/*
+ * The scrobbles the current report was built from.
+ *
+ * Held because discovery now runs from the report rather than from the scan, and
+ * d14eReleasedSince and d16StrandedSingles both need the raw plays, not the
+ * findings. Re-fetching would mean asking Last.fm for a library we already have
+ * in memory, which is exactly the kind of waste this rewrite is removing.
+ */
+let lastScrobbles = null;
 
 // Pages per request. Kept small on purpose: each page is 200 scrobbles, and a
 // Worker on the free plan gets 10ms CPU per request. Parsing 8 pages (1,600
@@ -422,19 +445,19 @@ let stats = null;
 const freshStats = () => ({
   started: Date.now(),
   // scanSummary() must not claim "Scan complete" while work is still running.
-  // resolvePhase calls render() deliberately, so findings appear before the
-  // lookups finish, and the summary panel was drawing itself on every one of
-  // those intermediate renders.
+  // runDiscovery calls render() deliberately, so findings appear as its lookups
+  // land, and the summary panel was drawing itself on every one of those
+  // intermediate renders.
   running: true,
   phase: "fetching",
   ingest_ms: 0,
   analyse_ms: 0,
-  resolve_ms: 0,
   scrobbles: 0,
   pages: 0,
   resumed: false,
-  resolve_requested: false,
-  spotify_available: false,
+  // `resolve_ms`, `resolve_requested`, `resolve_error` and `spotify_available`
+  // are gone with the scan phase they measured. A counter for work that can no
+  // longer happen reads, to the next person, as work that is silently failing.
   spotify_gave_up: false,
   spotify_resolved: 0,
   spotify_artists: 0,
@@ -536,40 +559,23 @@ $("f").onsubmit = async (e) => {
     report = analyse(scrobbles, { official, topAlbums });
     stats.analyse_ms = Date.now() - t1;
     stats.phase = "analysing";
-    setPhase(1, 2, "Analysing in your browser",
+    setPhase(2, 2, "Analysing in your browser",
              "Finding splits, variants and duplicates. No network needed.");
     report.user = user;
-    render();                         // show local findings immediately
 
-    stats.resolve_requested = $("resolve").checked;
-    if ($("resolve").checked && !abort) {
-      const t2 = Date.now();
-      stats.phase = "resolving";
-      setPhase(2, 2, "Checking for leaks that have since been released",
-               "Your findings are already complete and readable below. This step " +
-               "only looks for unreleased tracks that have since had an official " +
-               "release, which is the one thing that cannot be checked on demand. " +
-               "Everything else has a Check button on the finding itself.");
-      /*
-       * Step 2 has its OWN catch, because a failure here is not a failed scan.
-       *
-       * The banner directly above promises "your results are already below and
-       * are complete except for release dates". That promise was false: this
-       * await sat inside the scan-wide try, so one network blip hours into the
-       * MusicBrainz phase reached `fail()`, which overwrites #out and therefore
-       * DELETED every finding the user had been invited to read.
-       *
-       * Step 1 is self-contained and needs no network. Whatever happens here,
-       * those findings stand, so the scan still completes and the summary says
-       * plainly which part did not finish.
-       */
-      try {
-        await resolvePhase(scrobbles, apiKey);
-      } catch (err) {
-        stats.resolve_error = err.message || String(err);
-      }
-      stats.resolve_ms = Date.now() - t2;
-    }
+    /*
+     * Kept so the report can run a lookup later without re-fetching anything.
+     *
+     * Discovery used to happen here, in a second scan phase, and it was the
+     * single worst thing about this tool: twenty minutes on a 2,000-scrobble
+     * library, spent on findings the reader had not seen yet and might never open.
+     * It is now offered inside the report instead, one card per category, which
+     * needs the scrobbles to still be in hand when the button is pressed.
+     */
+    lastScrobbles = scrobbles;
+    report.offers = discoveryOffers(scrobbles);
+    render();
+
     stats.aborted = abort;
     stats.phase = "done";
     /*
@@ -621,7 +627,7 @@ const dur = (ms) => {
 function scanSummary() {
   if (!stats || stats.running) return "";
   const s = stats;
-  const total = s.ingest_ms + s.analyse_ms + s.resolve_ms;
+  const total = s.ingest_ms + s.analyse_ms;
 
   const lines = [];
   lines.push(`Read <strong>${N(s.scrobbles)}</strong> scrobbles` +
@@ -629,37 +635,23 @@ function scanSummary() {
              ` in ${dur(s.ingest_ms)}` +
              (s.resumed ? ", resuming a saved scan" : "") + ".");
   lines.push(`Analysed them in your browser in ${dur(s.analyse_ms)}.`);
-
-  if (!s.resolve_requested) {
-    lines.push(`Release lookups were switched off, so no consolidation targets
-                and no "released since" checks. Everything above comes from
-                your own listening data alone.`);
-  } else if (s.spotify_resolved || s.mb_resolved || s.from_cache) {
-    const parts = [];
-    if (s.spotify_resolved) {
-      parts.push(`<strong>${N(s.spotify_resolved)}</strong> from Spotify` +
-                 (s.spotify_artists
-                   ? ` (${N(s.spotify_artists)} artist catalogues)` : ""));
-    }
-    if (s.mb_resolved) parts.push(`<strong>${N(s.mb_resolved)}</strong> from MusicBrainz`);
-    if (s.from_cache) parts.push(`<strong>${N(s.from_cache)}</strong> from this device`);
-    lines.push(`Resolved ${parts.join(", ")} in ${dur(s.resolve_ms)}.`);
-
-    if (s.lookups_failed) {
-      lines.push(`${N(s.lookups_failed)} lookups found nothing. That is normal:
-                  genuinely unreleased material is in no database.`);
-    }
-  } else if (s.resolve_ms) {
-    lines.push(`Release lookups ran but resolved nothing.`);
-  }
+  /*
+   * Says what the scan did NOT do, which is the part that changed.
+   *
+   * Everything below this panel now comes from the user's own data and nothing
+   * else. That is worth stating rather than leaving to be inferred, because it
+   * tells the reader why it was fast, and it sets up the offer cards further
+   * down as the deliberate, priced alternative rather than as leftovers.
+   */
+  lines.push(`No release databases were contacted. Every finding below comes
+              from your own listening data, which is why this took seconds.
+              Anything that needs an outside answer has a button on it.`);
 
   const warn = [];
   if (s.spotify_gave_up) {
-    warn.push(`Spotify stopped responding partway through, so the rest went to
-               MusicBrainz. The findings are the same, it just took longer.`);
-  } else if (s.resolve_requested && !s.spotify_available) {
-    warn.push(`Spotify was not configured on the server, so everything went to
-               MusicBrainz at one lookup per second. Same findings, slower.`);
+    warn.push(`Spotify stopped responding partway through a lookup, so the rest
+               went to MusicBrainz. The findings are the same, it just took
+               longer.`);
   }
   if (s.aborted) {
     warn.push(`<strong>You stopped this scan.</strong> The results below are
@@ -676,32 +668,21 @@ function scanSummary() {
       one stopped, so nothing was lost. Their scrobbles are included.`);
   }
   /*
-   * Step 2 failing is stated, not swallowed.
-   *
-   * Everything below still holds: step 1 needs no network and had already
-   * finished. What is missing is exactly the detail step 2 adds, so say which
-   * part is absent rather than either hiding the error or implying the findings
-   * are suspect.
+   * The "release lookups stopped early" warning is gone with the phase it
+   * described. A failed lookup is now reported on the card that started it,
+   * which is where the person who chose to run it is looking. Reporting it up
+   * here would put it in a panel about the scan, which did not do it.
    */
-  if (s.resolve_error) {
-    warn.push(`<strong>Release lookups stopped early.</strong>
-               ${esc(s.resolve_error)}. Everything above comes from your own
-               listening data and is unaffected; what is missing is release dates
-               and consolidation targets. Run the scan again to retry just that
-               part, since the lookups already done are cached on this device.`);
-  }
 
   // "Scan complete" only when it is. A partial run says so in the headline, not
   // twelve lines further down where it can be missed.
-  const part = s.aborted || s.resolve_error;
+  const part = s.aborted;
   return `
     <div class="panel done">
       <div class="done-head">
         <span class="done-mark ${part ? "part" : "ok"}"
               aria-hidden="true">${part ? "!" : "✓"}</span>
-        <strong>${s.aborted ? "Stopped"
-                  : s.resolve_error ? "Scan finished, lookups incomplete"
-                  : "Scan complete"}</strong>
+        <strong>${s.aborted ? "Stopped" : "Scan complete"}</strong>
         <span class="v" style="color:var(--dim)">${dur(total)} total</span>
       </div>
       ${lines.map((l) => `<p class="note">${l}</p>`).join("")}
@@ -732,10 +713,18 @@ const failure = (msg, detail = "", opts = {}) =>
  * reported. Naming the step and its total costs one line and removes the whole
  * confusion.
  */
+/*
+ * `of === 0` means "not part of the scan", and prints no step counter.
+ *
+ * Discovery lookups reuse this progress bar but are no longer a step of anything:
+ * they run from the report, minutes or days after the scan finished. Labelling
+ * one "Step 2 of 2" while the user is reading their completed results would say
+ * the scan had restarted.
+ */
 function setPhase(n, of, label, detail = "") {
   $("phase").innerHTML =
-    `<span class="step">Step ${n} of ${of}</span>
-     <strong>${esc(label)}</strong>` +
+    (of ? `<span class="step">Step ${n} of ${of}</span>` : "") +
+    `<strong>${esc(label)}</strong>` +
     (detail ? `<span class="phase-detail">${esc(detail)}</span>` : "");
 }
 
@@ -1232,52 +1221,50 @@ async function fetchAll(user, cap, apiKey) {
 }
 
 /**
- * MusicBrainz resolution phase.
+ * Run ONE discovery offer: the batch lookups behind a card the user pressed.
  *
- * Runs AFTER the local findings are already on screen, so the page is useful
- * immediately and improves as this completes. Sequential by necessity:
- * MusicBrainz allows one request per second and blocks IPs that ignore it.
+ * This was the scan's second step, and it ran on every scan whether or not
+ * anybody wanted it. Measured on a 2,000-scrobble library: 312 lookups, roughly
+ * twenty minutes, spent attaching detail to findings the reader had not opened
+ * and might never open. The scan now makes no external calls at all, and this
+ * runs only when a card is clicked.
  *
- * Pacing comes mostly from the round trip itself rather than a timer, which
- * matters because Chrome clamps timers to once per minute in tabs hidden for
- * over five minutes. Network latency is not throttled, so a backgrounded tab
- * slows down instead of stalling. It still warns, because slow is confusing.
+ * Everything that could move to a per-finding button already has. What is left
+ * here is genuine discovery: findings that do not exist until a lookup creates
+ * them, so they cannot carry their own button. They are offered by CATEGORY
+ * instead, which is knowable from local data and therefore free to show.
+ *
+ * Sequential by necessity where MusicBrainz is involved: one request per second,
+ * and they block IPs that ignore it. Pacing comes mostly from the round trip
+ * rather than a timer, which matters because Chrome clamps timers to once per
+ * minute in tabs hidden for over five minutes. Network latency is not throttled,
+ * so a backgrounded tab slows down instead of stalling. It still warns, because
+ * slow is confusing.
  */
-async function resolvePhase(scrobbles, apiKey) {
+async function runDiscovery(offer) {
   const base = apiBase().replace(/\/+$/, "");
+  const scrobbles = lastScrobbles || [];
+
   /*
-   * Step 2 is DISCOVERY ONLY now, and capped.
+   * No cap.
    *
-   * It used to resolve everything: splits, blank albums and unreleased tracks
-   * alike. Measured on a 2,000-scrobble library that was 312 lookups and about
-   * twenty minutes, to attach detail to findings nobody had opened yet.
-   *
-   * Splits and blank albums are ENRICHMENT: the finding is already on screen and
-   * already correct, and the lookup only adds a consolidation target. Those moved
-   * to a button on the finding itself, so they cost a call only when someone
-   * actually wants the answer.
-   *
-   * What cannot move is DISCOVERY. D14e reports that a leak has since had an
-   * official release, and that finding exists only because a lookup ran. Nobody
-   * can click a finding that is not there. So era tracks stay in the scan, capped
-   * at the most-played DISCOVERY_CAP, which keeps this to about a minute instead
-   * of twenty while leaving the detector alive.
+   * The old code took the 60 most-played era tracks and silently dropped the
+   * rest, because it was spending the user's time without asking and had to keep
+   * the bill down. Now that the user has asked, and has been told what it will
+   * cost, truncating their library behind their back would be the wrong trade in
+   * the opposite direction. The Stop button and the abort flag are the escape
+   * hatch, and they are honoured on every job.
    */
-  const DISCOVERY_CAP = 60;
-  const plan = resolutionPlan(scrobbles)
-    .filter((j) => j.kind === "era")
-    .slice(0, DISCOVERY_CAP);
+  const plan = (offer.jobs || []).map(
+    (j) => ({ ...j, kind: offer.id === "era_released" ? "era" : "single" }));
   if (!plan.length) return;
 
-  // Era names awaiting a sequel-vs-typo ruling are looked up too, so those
-  // findings get settled by evidence rather than dropped as guesses.
-  const eraJobs = eraVerificationPlan(report.issues);
-
   const recCache = new Map();
-  const rgCache = new Map();
+  // `rgCache` went with the era-NAME phase. It held release-group answers for
+  // the sequel-versus-typo ruling, which resolveOne now does per finding.
   const key = (a, t) => `${a}␟${t}`.toLowerCase();
   let done = 0, failed = 0, cacheHits = 0;
-  let total = plan.length + eraJobs.length;
+  let total = plan.length;
   const started = Date.now();
 
   /*
@@ -1539,8 +1526,6 @@ async function resolvePhase(scrobbles, apiKey) {
   let mbPlan = plan;
   let spHits = 0;
 
-  if (stats) stats.spotify_available = spotifyOn;
-
   if (spotifyOn) {
     /*
      * Per TRACK, not per artist. The catalogue approach cannot work any more.
@@ -1667,61 +1652,16 @@ async function resolvePhase(scrobbles, apiKey) {
     if (stats) stats.spotify_resolved = spHits;
   }
 
-  /* ----------------------------------- Phase B: era names, Spotify then MB */
   /*
-   * Pooled, not serial.
+   * The era-NAME phase used to sit here, looking up every "'Rodeo' versus 'Rodeo
+   * 2', which is real?" question in one batch.
    *
-   * This was a plain `for` loop, so era jobs went one at a time regardless of how
-   * much rate budget was available. On a library with thousands of unreleased
-   * plays that is hundreds of sequential round trips, each waiting out the full
-   * pacer interval, and it was a large part of why step 2 dragged.
-   *
-   * Four workers, which is the same shape the split phase uses. The pacers still
-   * govern the actual send rate, so this changes how many requests can be in
-   * flight, not how fast we hit either upstream.
+   * It has moved onto the findings themselves. Those findings are already on
+   * screen after a scan, so they are enrichment, not discovery, and there was
+   * never a reason for them to be resolved in bulk before anyone had read one.
+   * resolveOne now calls the same verifyEraNames with the same three-state
+   * `exists`, so the ruling is identical; only the moment it happens changed.
    */
-  await pool(eraJobs, 4, async (job) => {
-    if (abort) return;
-    let r = null;
-
-    // Era names are album titles, so Spotify's album search answers the same
-    // question. Only a positive is usable: an era name absent from Spotify is
-    // the overwhelmingly common case for unreleased projects, and MusicBrainz
-    // is the one that catalogues those.
-    if (spotifyOn) {
-      // Cached under its own kind so a rescan skips it. Only positives are
-      // cached: a negative must stay re-askable, because it is not an answer.
-      const hit = await store.getLookup("spalb", job.artist, job.title);
-      if (hit) { r = hit; cacheHits++; }
-      else {
-        const sp = await spPaced("/api/spotify/album?" + new URLSearchParams(
-          { artist: job.artist, title: job.title }));
-        if (sp?.exists) {
-          r = sp;
-          await store.putLookup("spalb", job.artist, job.title, sp);
-        }
-      }
-    }
-    if (!r) {
-      r = await paced("/api/mb/release-group",
-                      { artist: job.artist, title: job.title }, 3, "rg");
-    }
-    if (r) rgCache.set(key(job.artist, job.title), r);
-    tick("Checking era names");
-  });
-
-  // Apply the era ruling straight away: it can only remove or sharpen findings,
-  // so the list gets more honest before the slower phase even finishes.
-  if (rgCache.size) {
-    report.issues = verifyEraNames(report.issues, (artist, title) => {
-      // THREE-STATE. A cache miss means the lookup failed or never ran, which
-      // is not the same as the database saying no. Returning false here made
-      // the tool claim 'Rolling Papers 2' was not a real release.
-      const r = rgCache.get(key(artist, title));
-      return r ? Boolean(r.exists) : null;
-    });
-    render();
-  }
 
   /* --------------------------------- Phase C: MusicBrainz on the residual */
   /*
@@ -1751,7 +1691,7 @@ async function resolvePhase(scrobbles, apiKey) {
   }
 
   if (split.catalogue.length) {
-    setPhase(2, 2, "Looking up real release data",
+    setPhase(0, 0, "Looking up real release data",
       `${N(mbEst.catalogue_tracks)} tracks belong to ${N(mbEst.artists)} ` +
       `artists, so their catalogues are fetched once each instead of one lookup ` +
       `per track. About ${mbEst.seconds}s for the rest.`);
@@ -1799,67 +1739,29 @@ async function resolvePhase(scrobbles, apiKey) {
     stats.lookups_failed = failed;
   }
 
-  const cache = recCache;
-  if (!cache.size && !rgCache.size) return;
-
-  // Merge the resolved findings back in, then recompute the parts that depend
-  // on them. D4 splits are replaced by their resolved D0 equivalents.
-  const lookup = (a, t) => cache.get(key(a, t));
-  const { era, rest } = partitionEra(scrobbles);
-  const splits = report.issues.filter((i) => i.detector === "D4");
-  const resolved = d0Resolve(splits, lookup);
-  const released = d14eReleasedSince(era, lookup);
-
-  const resolvedIds = new Set(resolved.map((i) => i.title));
-  report.issues = [
-    ...report.issues.filter((i) => !(i.detector === "D4" && resolvedIds.has(i.title))),
-    ...resolved, ...released,
-  ].sort(byImportance);
-
-  // Name the album each blank-album track should carry. Uses the same cache as
-  // the split resolver, so it costs no extra lookups.
-  report.issues = report.issues.map((i) =>
-    i.detector === "D5" ? d5Resolve(i, lookup) : i);
-
   /*
-   * Settle joint artist credits by asking whether the name is a real act.
+   * Turn the answers into findings.
    *
-   * "Tobi & Manny" and "Qlas & Blacka" are duos with their own artist pages, and
-   * in Tobi's case BOTH members release solo, so every signal available from play
-   * counts reads as a collaboration. "Future & Young Thug" looks identical as a
-   * string and genuinely is one. Nothing in the library distinguishes them; only
-   * asking does.
-   *
-   * One lookup per joint credit, of which a library has a handful, and the answers
-   * are cached on this device and shared in D1. `found === false` is cached too:
-   * unlike an era name, "no artist page under this name" is a real answer here.
+   * The offer is marked done EITHER WAY, including when the lookups produced
+   * nothing. "Not checked" and "checked, found nothing" must stay distinguishable,
+   * and a card that quietly reappears unchanged after a minute of work is the
+   * worst of both: it looks broken and it invites the user to spend the minute
+   * again. This is the same conflation that has caused four separate bugs in this
+   * project, so it gets handled explicitly rather than by falling out of a return.
    */
-  const jointJobs = report.issues.filter((i) => i.verify_artist);
-  if (jointJobs.length && spotifyOn && !abort) {
-    const known = new Map();
-    for (const job of jointJobs) {
-      if (abort) break;
-      const name = job.verify_artist;
-      if (known.has(name)) continue;
+  const lookup = (a, t) => recCache.get(key(a, t));
+  const { era } = partitionEra(scrobbles);
 
-      let hit = await store.getLookup("spart", name, "*");
-      if (hit) cacheHits++;
-      else {
-        const r = await spPaced("/api/spotify/artist-albums?" +
-                                new URLSearchParams({ artist: name }));
-        // null is a failed call, not an answer. Left unknown so the finding is
-        // neither dropped nor promoted, which is the whole point of the third
-        // state in d8VerifyJointCredits.
-        if (r) {
-          hit = { found: Boolean(r.found) };
-          await store.putLookup("spart", name, "*", hit);
-        }
-      }
-      known.set(name, hit ? hit.found : null);
-    }
-    report.issues = d8VerifyJointCredits(report.issues,
-                                         (name) => known.get(name) ?? null);
+  let found = [];
+  if (offer.id === "era_released") {
+    found = d14eReleasedSince(era, lookup);
+  } else if (offer.id === "stranded_singles") {
+    found = d16StrandedSingles(offer.jobs, lookup, { owned: offer.owned });
   }
+
+  report.issues = [...report.issues, ...found].sort(byImportance);
+  report.offers = (report.offers || []).map((o) => o.id === offer.id
+    ? { ...o, done: true, found: found.length, checked: plan.length } : o);
 
   report.summary_by_detector = {};
   for (const i of report.issues) {
@@ -1870,11 +1772,11 @@ async function resolvePhase(scrobbles, apiKey) {
   report.issues_total = report.issues.length;
   report.hygiene = hygieneScore(report.profile.scrobbles_ingested, report.issues,
                                 report.profile.distinct_albums);
-  report.impact = chartImpact(rest, resolved.length ? resolved : splits);
-  report.resolved = true;
-  report.lookups = done;
-  report.spotify_resolved = spHits;
-  report.musicbrainz_lookups = mbPlan.length;
+  report.lookups = (report.lookups || 0) + done;
+  if (stats) {
+    stats.from_cache = cacheHits;
+    stats.lookups_failed = failed;
+  }
   render();
 }
 
@@ -2024,6 +1926,36 @@ async function resolveIssue(idx) {
     return await call("/api/mb/recording", { artist, track });
   };
 
+  /*
+   * A stricter lookup for the two-variant question, which needs IDENTIFIERS
+   * rather than merely an answer.
+   *
+   * `lookup` stops at the first source that returns anything, which is right when
+   * the question is "which album is this on". It is wrong here. Comparing two
+   * titles only works when both were answered by a source that speaks the same
+   * identifier system, and stopping early can easily leave one title holding an
+   * ISRC and the other a MusicBrainz ID, which is not a comparison at all.
+   *
+   * So: take Spotify's answer if it carries an ISRC, and otherwise ask
+   * MusicBrainz as well and merge. Merging rather than replacing matters because
+   * Spotify's release dates are better and MusicBrainz's identifiers are more
+   * complete, and the caller wants both.
+   *
+   * Costs at most one extra call per title, on the one finding in the report
+   * whose advice can destroy something irreversibly.
+   */
+  const identifyingLookup = async (artist, track) => {
+    const sp = issue.kind === "era"
+      ? null : await call("/api/spotify/track", { artist, track });
+    if ((sp?.groups || []).some((g) => g?.isrc)) return sp;
+
+    const mb = await call("/api/mb/recording", { artist, track });
+    if (mb?.groups?.length && sp?.groups?.length) {
+      return { groups: [...mb.groups, ...sp.groups] };
+    }
+    return mb || sp;
+  };
+
   let resolved;
   // Only a joint credit has an artist name to verify. A title variant is a
   // different D8 finding entirely and goes down the track-lookup path.
@@ -2032,13 +1964,59 @@ async function resolveIssue(idx) {
     // null is a failed call, not an answer: leave the finding untouched.
     resolved = resolveOne(issue, null,
       { artistExists: () => (r ? Boolean(r.found) : null) });
+  } else if (issue.verify) {
+    /*
+     * An era-name ruling: are both of these real releases, or is one a typo?
+     *
+     * Two album lookups, Spotify first because it is faster and a positive from
+     * it is conclusive. Only a positive, though. An era name absent from Spotify
+     * is the ordinary case for unreleased projects, so its silence is not a
+     * negative and MusicBrainz has to be asked before anything is claimed.
+     */
+    const { artist, a, b } = issue.verify;
+    const seen = new Map();
+    await Promise.all([a, b].map(async (title) => {
+      let r = null;
+      const sp = await call("/api/spotify/album", { artist, title });
+      if (sp?.exists) r = sp;
+      if (!r) r = await call("/api/mb/release-group", { artist, title });
+      // null stays null. A failed call must not become "does not exist": that
+      // exact coercion is what once had the tool insist 'Rolling Papers 2' was
+      // not a real release.
+      seen.set(String(title).toLowerCase(), r ? Boolean(r.exists) : null);
+    }));
+    resolved = resolveOne(issue, null, {
+      releaseExists: (_artist, title) =>
+        seen.get(String(title).toLowerCase()) ?? null,
+    });
+
   } else {
-    // Same fallback as resolveOne: a title-variant finding has two tracks, not one.
-    const track = issue.track ||
-      issue.members?.find((m) => m.track)?.track ||
-      issue.members?.[0]?.track;
-    const answer = track ? await lookup(issue.artist, track) : null;
-    resolved = resolveOne(issue, () => answer);
+    /*
+     * Every track the finding names is looked up, not just the first.
+     *
+     * resolveOne needs BOTH titles of a two-variant finding, because the question
+     * it answers is whether they are one recording. Handing it a single
+     * pre-fetched answer, as this did, meant it compared a title against itself
+     * and could only ever conclude "same". The two calls run in parallel: the
+     * pacer serialises them anyway, and the wall-clock cost is one round trip.
+     */
+    const variants = (issue.members || []).map((m) => m?.track).filter(Boolean);
+    const twoVariants = new Set(variants).size === 2;
+
+    const tracks = [...new Set(
+      [issue.track, ...variants].filter(Boolean))].slice(0, 3);
+
+    const ask = twoVariants ? identifyingLookup : lookup;
+    const answers = new Map();
+    await Promise.all(tracks.map(async (t) => {
+      answers.set(t.toLowerCase(), await ask(issue.artist, t));
+    }));
+
+    // Keyed by track, so resolveOne gets a real per-track lookup rather than one
+    // answer pretending to serve every question.
+    resolved = tracks.length
+      ? resolveOne(issue, (_artist, t) => answers.get(String(t).toLowerCase()))
+      : { ...issue, resolved: true, unresolved: true };
   }
 
   if (resolved?.dropped) report.issues.splice(idx, 1);
@@ -2298,7 +2276,40 @@ function issues() {
   const pending = report.issues.filter(
     (i) => isResolvable(i) && !i.resolved && !i.dropped).length;
 
-  $("issues").innerHTML = (pending ? `
+  /*
+   * Offers sit ABOVE the findings, and they are not findings themselves.
+   *
+   * Each one describes work that can only be done by looking: nothing in your own
+   * scrobbles can reveal that a leak came out, so there is no card to attach a
+   * button to until a lookup has run. Naming the category is enough to make the
+   * choice clickable, and it costs nothing to display.
+   *
+   * A completed offer stays visible and says what it found, including when it
+   * found nothing. Removing it would leave the reader unable to tell a check they
+   * never ran from a check that came back empty.
+   */
+  const offers = (report.offers || []).map((o) => o.done
+    ? `<div class="panel offer done">
+         <strong>${esc(o.title)}</strong>
+         <div class="note" style="margin:5px 0 0">Checked ${N(o.checked)}.
+           ${o.found
+             ? `${N(o.found)} added to the findings below.`
+             : "Nothing came back, so none of these has a release the databases " +
+               "know about. That is the normal answer for genuinely unreleased " +
+               "material."}</div>
+       </div>`
+    : `<div class="panel offer" data-offer="${esc(o.id)}">
+         <strong>${esc(o.title)}</strong>
+         <div class="note" style="margin:5px 0 8px">${esc(o.note)}</div>
+         <button class="check discover" type="button">${esc(o.action)}</button>
+         <span class="note" style="margin:0 0 0 9px;color:var(--dim)">${
+           N(o.jobs.length)} lookup${o.jobs.length === 1 ? "" : "s"}, about ${
+           o.jobs.length < 30 ? "a few seconds"
+             : Math.max(1, Math.round(o.jobs.length / 60)) + " min"
+         }. Answers are cached and shared, so nobody pays for them twice.</span>
+       </div>`).join("");
+
+  $("issues").innerHTML = offers + (pending ? `
     <div class="panel" style="margin-bottom:9px;display:flex;gap:11px;
          align-items:center;flex-wrap:wrap">
       <button class="check-all ghost" type="button">Check all ${N(pending)}</button>
@@ -2338,6 +2349,29 @@ function issues() {
         <span class="tag">confidence ${Math.round((i.confidence || 0) * 100)}%</span>
       </div>
       ${i.suggest ? `<p>${esc(i.suggest)}</p>` : ""}
+      ${/*
+         * The answer from a lookup, given its own block.
+         *
+         * This used to be appended to the end of `suggest`: same paragraph, same
+         * colour, third sentence in. Users pressed the button, the tool fetched a
+         * correct answer, and they reported that nothing had happened, which was
+         * a fair reading. A result that cost a network call and can reverse the
+         * card's advice cannot arrive as trailing text.
+         *
+         * Four states, colour-coded, each with a label saying what kind of answer
+         * this is. "Not confirmed" is deliberately as visible as the other three:
+         * it is the honest outcome for a track no database has settled, and
+         * hiding it would push the reader back onto a guess without telling them.
+         */
+        !i.verdict ? "" : (() => {
+          const label = { same: "Confirmed", different: "Do not merge",
+                          unclear: "Not confirmed", info: "Release data" };
+          return `<div class="verdict v-${i.verdict.state}">
+            <span class="v-label">${esc(label[i.verdict.state] || "Checked")}</span>
+            ${esc(i.verdict.text)}</div>`;
+        })()}
+      ${i.superseded ? `<p class="superseded"><span class="v-label">no longer
+        applies</span>${esc(i.superseded)}</p>` : ""}
       ${i.temporal ? `<p style="color:var(--warn)">${esc(i.temporal.note)}</p>` : ""}
       ${(i.members || []).length ? (() => {
         const mem = i.members.slice(0, 12);
@@ -2419,6 +2453,38 @@ function issues() {
   $("issues").onclick = async (ev) => {
     const btn = ev.target.closest("button.check, button.check-all");
     if (!btn) return;
+
+    if (btn.classList.contains("discover")) {
+      const id = btn.closest("[data-offer]")?.dataset.offer;
+      const offer = (report.offers || []).find((o) => o.id === id);
+      if (!offer || offer.done) return;
+      btn.disabled = true;
+      btn.textContent = "Checking…";
+      /*
+       * Its own try/catch, and the reason is a bug that used to destroy results.
+       *
+       * These lookups once ran inside the scan-wide try, so a single dropped
+       * request part-way through reached fail(), which overwrites the output
+       * element and therefore deleted every finding the user had been reading.
+       * Nothing here can invalidate the local findings, so nothing here may be
+       * allowed to remove them.
+       */
+      abort = false;
+      $("prog").classList.remove("hide");
+      $("stop").classList.remove("hide");
+      try {
+        await runDiscovery(offer);
+      } catch (err) {
+        $("status").textContent =
+          `That check did not finish: ${err.message || err}. Your findings ` +
+          `below are unaffected.`;
+      } finally {
+        $("prog").classList.add("hide");
+        $("stop").classList.add("hide");
+      }
+      return;
+    }
+
     if (btn.classList.contains("check-all")) return checkAll(btn);
     const card = btn.closest(".issue");
     const idx = Number(card?.dataset.idx);
