@@ -196,10 +196,27 @@ console.log("\nnothing is mutated");
   eq(diff.class, "review", "proof of two recordings stops it being an error");
   ok(diff.confidence < 0.2, `and drops confidence hard  (${diff.confidence})`);
   eq(diff.verdict?.state, "different", "and the verdict says so plainly");
-  ok(/remix, a re-cut, or a guest verse/.test(diff.verdict.text),
-     "the verdict explains what it actually found");
-  ok(/Do not merge/.test(diff.verdict.text),
-     "and withdraws the recommendation rather than softening it");
+  /*
+   * States the EVIDENCE, and leaves the decision with the user.
+   *
+   * This asserted the old wording, which opened "Two different recordings, not
+   * one track under two names" and closed "Do not merge them". Both overreach.
+   * The lookup establishes that the databases list two versions; it does not
+   * establish that the user's two scrobbles ARE those two versions. They may have
+   * played one and had a player label it inconsistently, which is an ordinary
+   * tagging split and exactly what this detector exists to find.
+   *
+   * The user can settle that and the tool cannot, so the card presents both
+   * readings rather than issuing an instruction.
+   */
+  ok(/databases list two separate recordings/.test(diff.verdict.text),
+     "the verdict reports what the databases hold");
+  ok(/depends on what you actually played/.test(diff.verdict.text),
+     "and hands the decision back rather than instructing");
+  ok(/merging is fine/.test(diff.verdict.text),
+     "explicitly allowing the tagging-inconsistency reading");
+  ok(!/Do not merge them/.test(diff.verdict.text),
+     "no instruction is issued on evidence that cannot support one");
   ok(diff.suggest === null && diff.superseded === "Merge them.",
      "the original merge advice is RETIRED, not left printed above the verdict");
   ok(diff.resolved === true, "and it is marked checked, so no button reappears");
@@ -540,6 +557,33 @@ console.log("\nnothing is mutated");
      "azealia banks", "artistCredits reads an unbracketed artist-field credit");
   eq([...artistCredits("Macklemore & Ryan Lewis")].length, 0,
      "and an ampersand is a band name, never a feature marker");
+
+  /* ---- a failed request is not an answer, and must stay retryable ------- */
+  /*
+   * `call()` returns null for a 429, a 500 and a dropped connection alike. Caught
+   * live: probing the API by hand tripped the burst limiter, every Spotify lookup
+   * came back rate-limited, and a card announced that no release credited the
+   * artists in the title. A claim about the world, made from a rate limit.
+   *
+   * The retry half was a second bug on top. applyRecordingVerdict deliberately
+   * omits `resolved` here so the button survives, and resolveOne then set it
+   * unconditionally one line later, leaving a card that said "try again in a
+   * minute" with nothing left to press. Reported as: "no retry option".
+   */
+  const down = verdictOf("Adele", "Hello", "Hello (feat. Someone)",
+    { recordings: [], failed: true });
+  eq(down.verdict?.state, "unclear", "a failed lookup is reported, not guessed at");
+  ok(/Could not reach the release databases/.test(down.verdict.text),
+     "and named as a network problem rather than a fact about the library");
+  ok(!down.resolved,
+     "it stays unresolved, so the Check button comes back and retry is possible");
+  eq(down.confidence, 0.8, "with the finding's own confidence untouched");
+
+  // The orphan claim in particular must never be made from a failed request.
+  const downOrphan = verdictOf("Adele", "Hello", "Hello (feat. Nobody)",
+    { recordings: [{ id: "x1", title: "Hello", artists: ["Adele"] }], failed: true });
+  ok(!/No release of this song credits/.test(downOrphan.verdict.text),
+     "a rate limit never becomes 'no release credits these artists'");
 
   // Nothing at all still has to stay distinguishable from all of the above.
   const silent = verdictOf("X", "A", "A (feat. B)", { recordings: [] });

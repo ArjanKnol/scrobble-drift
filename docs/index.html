@@ -2438,7 +2438,12 @@ function issues() {
          * hiding it would push the reader back onto a guess without telling them.
          */
         !i.verdict ? "" : (() => {
-          const label = { same: "Confirmed", different: "Do not merge",
+          /*
+           * "Two versions exist", not "Do not merge". The lookup establishes
+           * what the databases hold, not what the user played, and an
+           * instruction overstates a finding they are better placed to settle.
+           */
+          const label = { same: "Confirmed", different: "Two versions exist",
                           unclear: "Not confirmed", info: "Release data" };
           return `<div class="verdict v-${i.verdict.state}">
             <span class="v-label">${esc(label[i.verdict.state] || "Checked")}</span>
