@@ -3198,13 +3198,18 @@ export function candidateRecordings(answer) {
   for (const r of answer?.recordings || []) {
     if (!r?.id) continue;
     out.push({ key: `mb:${r.id}`, title: r.title || "",
-               artists: (r.artists || []).map(norm).filter(Boolean) });
+               // Normalised for matching, original for display. The verdict names
+               // the credited artists back to the reader, and "justin timberlake"
+               // in a sentence reads like a bug.
+               artists: (r.artists || []).map(norm).filter(Boolean),
+               names: (r.artists || []).filter(Boolean) });
   }
   for (const c of answer?.candidates || []) {
     if (!c?.id && !c?.isrc) continue;
     out.push({ key: c.isrc ? `isrc:${String(c.isrc).toUpperCase()}` : `sp:${c.id}`,
                title: c.name || "",
-               artists: (c.artists || []).map(norm).filter(Boolean) });
+               artists: (c.artists || []).map(norm).filter(Boolean),
+               names: (c.artists || []).filter(Boolean) });
   }
   return out;
 }
@@ -3362,6 +3367,18 @@ export function matchRecording(candidates, title, primaryArtist) {
   return buckets.size === 1 ? { ...top[0].c, bucket: top[0].bucket } : null;
 }
 
+/** Who is credited on a matched recording, excluding the primary artist. */
+function guestsOf(match, primaryArtist) {
+  const primary = norm(String(primaryArtist || "").split(ARTIST_FEAT_STRONG)[0]);
+  const names = match?.names || [];
+  // Filtered on the normalised form, returned in the original. Comparing raw
+  // names would miss "Ms. Lauryn Hill" against "ms lauryn hill".
+  return (match?.artists || [])
+    .map((a, i) => [a, names[i] ?? a])
+    .filter(([a]) => a && a !== primary)
+    .map(([, display]) => display);
+}
+
 export function sameRecording(a, b) {
   const ids = (r) => {
     const mb = new Set(), isrc = new Set();
@@ -3457,7 +3474,7 @@ function hasCredit(title) {
  */
 export function applyRecordingVerdict(issue, verdict, timing = null, opts = {}) {
   if (!issue) return issue;
-  const { orphan = null, artist = "", failed = false } = opts;
+  const { orphan = null, artist = "", failed = false, versions = null } = opts;
 
   /*
    * The lookup did not happen. Say that, and leave the finding alone.
@@ -3516,11 +3533,33 @@ export function applyRecordingVerdict(issue, verdict, timing = null, opts = {}) 
   }
 
   if (verdict === "different") {
+    /*
+     * Evidence, then the decision, and the decision is NOT the tool's to make.
+     *
+     * This used to open "Two different recordings, not one track under two
+     * names" and close "Do not merge them", stated as fact and as instruction.
+     * Both overreach. What the lookup establishes is that the DATABASES list two
+     * versions. It does not establish that the user's two scrobbles are those two
+     * versions: they may well have played one version and had it labelled
+     * inconsistently by a player, which is an ordinary tagging split and exactly
+     * what this detector is for.
+     *
+     * The user can settle that and the tool cannot. They know what they listened
+     * to. So the finding presents what was found, spells out both readings, and
+     * leaves the call to them.
+     */
+    const name = (list) => (list || []).length
+      ? list.join(" and ") : `${artist || "the artist"} alone`;
+    const twoCredits = versions?.a && versions?.b
+      ? ` One is credited to ${name(versions.a)}, the other to ` +
+        `${name(versions.b)}.`
+      : "";
+
     return {
       ...issue,
       class: "review",
       confidence: 0.1,
-      evidence: "different recordings",
+      evidence: "two versions exist",
       resolved: true,
       no_auto_action: true,
       /*
@@ -3537,11 +3576,13 @@ export function applyRecordingVerdict(issue, verdict, timing = null, opts = {}) 
       superseded: issue.suggest || null,
       verdict: {
         state: "different",
-        text: "Two different recordings, not one track under two names. The " +
-              "credited version is a separate master: a remix, a re-cut, or a " +
-              "guest verse added to a later edition of the album." + timed +
-              " Do not merge them. It cannot be undone, and it would destroy a " +
-              "real distinction.",
+        text: `The release databases list two separate recordings under this ` +
+              `title.${twoCredits}${timed}` +
+              ` So it depends on what you actually played. If your plays really ` +
+              `are the two versions, merging them would lose that distinction ` +
+              `and cannot be undone. If you only ever played one and a player ` +
+              `labelled it inconsistently, this is an ordinary tagging split and ` +
+              `merging is fine. You are far better placed to know which.`,
       },
     };
   }
@@ -3826,11 +3867,27 @@ export function resolveOne(
 
     const out = applyRecordingVerdict(
       issue, verdict, variantTiming(issue),
-      { orphan, artist: issue.artist, failed: Boolean(answer?.failed) });
+      { orphan, artist: issue.artist, failed: Boolean(answer?.failed),
+        // The credited line-ups behind each match, so the verdict can name them
+        // instead of asserting "two different recordings" and leaving the reader
+        // to take that on trust.
+        versions: (ma && mb) ? { a: guestsOf(ma, issue.artist),
+                                 b: guestsOf(mb, issue.artist) } : null });
     const best = (answer?.groups || [])[0] || null;
     return {
       ...out,
-      resolved: true,
+      /*
+       * A FAILED lookup must not be marked resolved, or the button disappears.
+       *
+       * applyRecordingVerdict deliberately omits `resolved` when the request
+       * never reached the databases, precisely so the question stays open. This
+       * line then set it unconditionally and undid that, producing a card that
+       * said "try again in a minute" with nothing left to press.
+       *
+       * The spread order is what made it invisible: the correct value was
+       * computed and then overwritten one line later.
+       */
+      ...(answer?.failed ? {} : { resolved: true }),
       external: out.external || best,
       candidates: (answer?.groups || []).slice(0, 5),
     };
