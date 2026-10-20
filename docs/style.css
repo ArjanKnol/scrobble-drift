@@ -497,6 +497,29 @@ button.check:disabled, button.check-all:disabled {
   color: var(--dim);
 }
 
+/* ---------------------------------------------------------------- fix list */
+/*
+ * Two columns, because a fix is a short line and a full-width row wastes most
+ * of it. Twenty full-width rows is a page of scrolling for what is really a
+ * glanceable list; two columns puts the whole thing in one screen, which is the
+ * point of calling it "Start here".
+ *
+ * auto-fit with a 330px floor rather than a fixed two, so it collapses to one
+ * column on a narrow window instead of squeezing the before/after strings into
+ * something unreadable. Those strings are the actionable part and must not wrap
+ * to three lines.
+ */
+.fixgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));
+  gap:0 22px}
+/* The bottom border is the row separator, and in a grid the last row of each
+   column needs it suppressed, not just the last child overall. */
+.fixgrid .row:nth-last-child(-n+2){border-bottom:0}
+@media (max-width:760px){
+  .fixgrid .row:nth-last-child(-n+2){border-bottom:1px solid var(--line)}
+  .fixgrid .row:last-child{border-bottom:0}
+}
+.fixgrid .row code{font-size:11.5px}
+
 /* ---------------------------------------------------------------- sections */
 /*
  * The report is two lists, and they must not look like one.

@@ -2173,6 +2173,7 @@ function render() {
                  ${N(d.wrongness.affected)} in the wrong place` : ""},
             most first. Each is a manual edit on Last.fm.</span>
         </div>
+        <div class="fixgrid">
         ${rows.map(({ issue, recovers }) => {
           const mem = [...(issue.members || [])].sort((a, b) => b.plays - a.plays);
           const to = mem[0];
@@ -2190,6 +2191,7 @@ function render() {
                 ).join(" &middot; ")}</span></span>
             <span class="v">+${N(recovers)}</span></div>`;
         }).join("")}
+        </div>
         <div style="margin-top:11px">
           <button class="check" type="button" id="copy-fixes">Copy as a worklist</button>
           <span class="note" style="margin:0 0 0 9px;color:var(--dim)">Plain text
