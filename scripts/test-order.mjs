@@ -15,7 +15,7 @@
  * Run: node scripts/test-order.mjs
  */
 import {
-  d14aFormatVariants, analyse, byImportance, DETECTOR_ORDER,
+  d14aFormatVariants, analyse, byImportance, DETECTOR_ORDER, d4AlbumSplits,
 } from "../docs/drift.js";
 
 let pass = 0, fail = 0;
@@ -202,6 +202,65 @@ console.log("\nactionable findings outrank informational ones");
   const missing = [...emitted].filter((d) => !ranked.has(d));
   eq(missing.length, 0,
      `every emitted detector has an explicit rank${missing.length ? ": " + missing : ""}`);
+}
+
+/* ---- an edition variant is not a single being absorbed ------------------ */
+/*
+ * Measured on a real 10,000-scrobble library: 32 findings claimed a "Classic
+ * single-absorbed-into-album migration" and 17 of them were nothing of the kind.
+ *
+ *   BULLY                                   -> BULLY - DELUXE
+ *   Band on the Run                         -> Band On The Run (Standard)
+ *   Songs From The Big Chair (Super Deluxe) -> Songs from the Big Chair
+ *   Con Funk Shun - 7                       -> 7
+ *
+ * plausiblePreRelease had four branches and only two meant "pre-album release".
+ * The other two detect one album written two ways, and the caller described
+ * every true the same way, at 90% confidence, with a month attached.
+ *
+ * The advice was wrong too: a single really is absorbed INTO the later album, so
+ * the later string is the target, but two spellings have no such direction and
+ * users were being told to consolidate a 12-play string into a 1-play one.
+ */
+{
+  const uts = (d) => Math.floor(new Date(d).getTime() / 1000);
+  const lib = [];
+  const add = (album, track, n, from) => {
+    for (let i = 0; i < n; i++)
+      lib.push({ artist: "Paul McCartney", track, album, uts: uts(from) + i * 3600 });
+  };
+  // The real shape: 12 plays of the plain title, then 1 of the edition label.
+  add("Band on the Run", "Band On The Run - 2010 Remaster", 12, "2026-06-01");
+  add("Band On The Run (Standard)", "Band On The Run - 2010 Remaster", 1, "2026-08-01");
+
+  const [issue] = d4AlbumSplits(lib);
+  ok(Boolean(issue), "the split is still found");
+  eq(issue.temporal?.kind, "edition",
+     "an edition label is classified as an edition, not a pre-release");
+  ok(!/single-absorbed-into-album/.test(issue.temporal.note),
+     "and is never described as a single being absorbed into an album");
+  ok(/two editions or two spellings/.test(issue.temporal.note),
+     "the note says what actually happened: the tagging changed");
+  ok(!/pre-album release/.test(issue.suggest),
+     "the suggestion makes no pre-release claim either");
+  ok(/Band on the Run/.test(issue.suggest) &&
+     !/consolidate to 'Band On The Run \(Standard\)'/.test(issue.suggest),
+     "and it consolidates to the spelling with the plays, not the later one");
+
+  // A genuine single absorbed into an album must keep its old behaviour.
+  const lib2 = [];
+  for (let i = 0; i < 6; i++)
+    lib2.push({ artist: "X", track: "Hit", album: "Hit - Single",
+                uts: uts("2026-01-01") + i * 3600 });
+  for (let i = 0; i < 6; i++)
+    lib2.push({ artist: "X", track: "Hit", album: "The Album",
+                uts: uts("2026-05-01") + i * 3600 });
+  const [real] = d4AlbumSplits(lib2);
+  eq(real?.temporal?.kind, "prerelease", "a named single is still a pre-release");
+  ok(/single-absorbed-into-album/.test(real.temporal.note),
+     "and keeps the migration wording it earned");
+  ok(/consolidate to 'The Album'/.test(real.suggest),
+     "consolidating forward into the album, which is the real direction");
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

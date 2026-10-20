@@ -2241,13 +2241,34 @@ function render() {
             "era named Rodeo. A plain 'Unreleased' bucket has no era name, so " +
             "it is not counted here.", "tip-below")}
         </div>
-        <div>${era.top_albums.slice(0, 12).map((a) =>
-          `<div class="row"><span>${KEY(a.key)}</span>
-           <span class="v">${N(a.plays)}</span></div>`).join("")}</div>
+        ${/*
+           * Mark the pooled buckets HERE, next to their play counts.
+           *
+           * D14f already finds these and explains the chart distortion, but it
+           * is one card among hundreds, far below the panel where the thought
+           * actually occurs to you. A reader looking at this list sees
+           * "Lil Peep - Unreleased 126" sitting beside five properly named
+           * Juice WRLD eras and wonders what the difference is; the answer was
+           * fifty cards away.
+           *
+           * Pure presentation: the finding and its wording are unchanged, this
+           * only puts a pointer where the question gets asked.
+           */""}
+        <div>${era.top_albums.slice(0, 12).map((a) => {
+          const pooled = report.issues.some(
+            (i) => i.detector === "D14f" && KEY(a.key).includes(i.album));
+          return `<div class="row"><span>${KEY(a.key)}${pooled
+            ? ` <span class="tag t-anomaly" style="margin:0 0 0 6px">pooled</span>`
+            : ""}</span>
+           <span class="v">${N(a.plays)}</span></div>`;
+        }).join("")}</div>
       </div>
       <p class="note">Unreleased material is protected. No detector will ever
       suggest merging it into an official release, whichever convention you
-      use.</p>
+      use.${report.issues.some((i) => i.detector === "D14f") ? ` Entries marked
+      <span class="tag t-anomaly">pooled</span> hold many different tracks under
+      one album name, so they compete with real albums in your chart as a single
+      enormous record. There is a finding below for each.` : ""}</p>
       ${offerCards("era")}` : ""}
 
     ${im.biggest_movers.length ? (() => {
@@ -2446,8 +2467,13 @@ function offerCards(section) {
 }
 
 function issues() {
-  const list = report.issues.filter((i) =>
-    (!fDet || i.detector === fDet) && (!fCls || i.class === fCls)).slice(0, 200);
+  const all = report.issues.filter((i) =>
+    (!fDet || i.detector === fDet) && (!fCls || i.class === fCls));
+  // Counted BEFORE the cap, so the notice at the bottom can say how many are
+  // being withheld rather than leaving the reader to wonder.
+  const matching = all.length;
+  const list = all.slice(0, 200);
+  const shown = list.length;
 
   /*
    * Findings are addressed by index into report.issues, not by position in the
@@ -2599,7 +2625,25 @@ function issues() {
               <span class="note" style="margin:0 0 0 9px;color:var(--dim)">
                 Looks up what the release databases hold for this one finding.</span>
             </div>`}
-    </div>`).join("") : `<div class="panel">Nothing matches that filter.</div>`);
+    </div>`).join("") : `<div class="panel">Nothing matches that filter.</div>`) +
+    /*
+     * Say when the list is cut off.
+     *
+     * It renders at most 200 findings and said nothing about it. One real
+     * library produced 338, the jump button offered "See the 338 findings", and
+     * clicking it showed 200 with no explanation and no way to reach the rest.
+     *
+     * A tool whose whole claim is that it is honest about what it knows cannot
+     * quietly show two thirds of an answer. The filters are named because they
+     * are the way through: narrowing by class or detector re-slices from the
+     * full set, so the hidden findings are reachable, just not all at once.
+     */
+    (shown < matching ? `<div class="panel" style="margin-top:9px">
+      <strong>Showing ${N(shown)} of ${N(matching)} findings.</strong>
+      <div class="note" style="margin:5px 0 0">The list is capped so a large
+        library stays readable. Use the class and detector filters above to
+        narrow it: each one re-slices from all ${N(matching)}, so nothing is
+        out of reach.</div></div>` : "");
 
   /*
    * Delegated, so it survives every re-render. Binding per button would leave

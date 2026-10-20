@@ -794,5 +794,46 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
      "and so is the per-track Spotify key, which gained an ISRC field");
 }
 
+/* ---- MusicBrainz search is fuzzy and must be verified ------------------- */
+{
+  /*
+   * Three false positives a user found in their own report, all from trusting
+   * whatever the search returned:
+   *
+   *   artist=MØ track=Drum            -> "Took Away the Drum" by Mighty Mo
+   *                                      Rodgers, on a 1999 blues album. The
+   *                                      query also matched Mo Kolours and
+   *                                      Mo' Horizons.
+   *   artist=French Montana track=Hold Up
+   *                                   -> "Big Bad...", a GIGGS album. French
+   *                                      Montana is a guest on the recording,
+   *                                      so the record is not his.
+   *
+   * Groups are sorted oldest first, so the wrong answer outranked the right one:
+   * a 1999 album beat MØ's actual 2016 single, and D16 told the user that was
+   * where the track really lived.
+   *
+   * Shape assertions, because the parser is inline in a fetch handler. What they
+   * pin is that a filter exists at all and that it checks the two things that
+   * mattered: the PRIMARY credit, and the title.
+   */
+  const src = await readFile(
+    new URL("../worker/src/index.js", import.meta.url), "utf8");
+
+  ok(/const relevant = \(data\.recordings \|\| \[\]\)\.filter/.test(src),
+     "recordings are filtered before any release group is built from them");
+  ok(/names\[0\] === wantArtist/.test(src),
+     "the PRIMARY credit must be the artist asked about",
+     "A featured credit means the release belongs to somebody else: French " +
+     "Montana is a guest on a Giggs album.");
+  ok(/for \(const rec of relevant\)/.test(src),
+     "and groups are built from the filtered set, not the raw response");
+  ok(/titleMatches\(spNorm\(rec\.title\)\)/.test(src),
+     "the recording title must match the track asked about");
+  ok(/t\.startsWith\(wantTrack \+ " "\) \|\| wantTrack\.startsWith\(t \+ " "\)/.test(src),
+     "matched on a word boundary, so 'Took Away the Drum' never matches 'Drum'",
+     "A bare startsWith would also match 'Drummer Boy'.");
+}
+
 console.log(`\n${pass} passed, ${fail} failed (including MusicBrainz cache block)\n`);
 process.exit(fail ? 1 : 0);

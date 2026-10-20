@@ -58,7 +58,7 @@
  *
  * Bump this in the same commit as any Worker change. /api/health reports it.
  */
-const BUILD = "2026-09-10-19-recordings-with-artist-credits";
+const BUILD = "2026-10-20-20-verify-artist-and-title-on-mb-hits";
 
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";
@@ -1046,8 +1046,57 @@ async function mbRecording(url, env, request, cors) {
   if (!res.ok) throw new Upstream(`musicbrainz http ${res.status}`);
   const data = await res.json();
 
+  /*
+   * MusicBrainz search is FUZZY, and nothing here used to check what came back.
+   *
+   * Three real false positives, all reported by a user looking at their own
+   * library and all from this one omission:
+   *
+   *   artist=MØ track=Drum             -> "Took Away the Drum" by Mighty Mo
+   *                                       Rodgers, on a 1999 blues album. The
+   *                                       query also matched Mo Kolours and
+   *                                       Mo' Horizons.
+   *   artist=French Montana track=Hold Up
+   *                                    -> "Big Bad..." which is a GIGGS album.
+   *                                       French Montana is a guest on the
+   *                                       track, so the record is not his.
+   *
+   * Groups are sorted oldest first, so the wrong answer outranked the right one:
+   * a 1999 album beat MØ's actual 2016 single. D16 then named it to the user as
+   * the track's real home, with a date, at the top of a card.
+   *
+   * Two rules, both deliberately strict. The PRIMARY credit must be the artist
+   * asked about, because a featured credit means the release belongs to someone
+   * else. And the recording title must actually be the track asked about rather
+   * than merely contain the words.
+   *
+   * Precision over recall, as everywhere else here: a dropped match shows the
+   * user "nothing found", which is honest, while a kept wrong one shows them a
+   * confident fact that is false.
+   */
+  const wantArtist = spNorm(artist);
+  const wantTrack = spNorm(track);
+
+  const creditedNames = (rec) => (rec["artist-credit"] || [])
+    .map((c) => spNorm(c?.name || c?.artist?.name)).filter(Boolean);
+
+  const titleMatches = (t) => {
+    if (!t || !wantTrack) return false;
+    if (t === wantTrack) return true;
+    // Word-boundary containment both ways: "Drum" matches "Drum (remix)" and
+    // "Nah Nah Nah (feat. X)" matches "Nah Nah Nah". A bare startsWith would
+    // also match "Drummer Boy", and "Took Away the Drum" must never match.
+    return t.startsWith(wantTrack + " ") || wantTrack.startsWith(t + " ");
+  };
+
+  const relevant = (data.recordings || []).filter((rec) => {
+    const names = creditedNames(rec);
+    return names.length > 0 && names[0] === wantArtist &&
+           titleMatches(spNorm(rec.title));
+  });
+
   const best = new Map();
-  for (const rec of data.recordings || []) {
+  for (const rec of relevant) {
     for (const rel of rec.releases || []) {
       const rg = rel["release-group"];
       if (!rg?.id) continue;

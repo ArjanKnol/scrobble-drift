@@ -285,5 +285,58 @@ console.log("\ncombining the two sources");
      "one uncorroborated member drags the whole group down, rather than hiding");
 }
 
+
+/* ---------------------------------------------------------------------------
+ * Three real D16 false positives, each from a different defect.
+ *
+ * All three were spotted by a user reading their own report, and all three named
+ * a specific album with a release date, confidently, on a card.
+ *
+ *   MØ "Drum"                 -> "Blues Is My Wailin' Wall" (1999)
+ *                                by Mighty Mo Rodgers.
+ *   French Montana "Hold Up"  -> "Big Bad..." which is a GIGGS album.
+ *   Kanye West "Nah Nah Nah"  -> "Donda", a release group MusicBrainz
+ *                                catalogues as a BOOTLEG.
+ *
+ * The first two are fixed in the Worker, which now requires the primary artist
+ * credit and a real title match before a recording counts. This file can only
+ * test the third, which is D16's own album filter, so the payloads below are the
+ * live responses with the Worker's new filtering applied.
+ * ------------------------------------------------------------------------- */
+{
+  const cand = [{ artist: "Kanye West", track: "Nah Nah Nah",
+                  album: "Nah Nah Nah - Single", plays: 1 }];
+
+  // Verbatim from the live endpoint: the Donda entry really is a Bootleg.
+  const withBootleg = { groups: [
+    { rg_id: "339f0247", title: "Nah Nah Nah", primary: "Single", secondary: [],
+      first_release: "2020-10-16", status: "Withdrawn" },
+    { rg_id: "7f4792fe", title: "Donda", primary: "Album", secondary: [],
+      first_release: "2021", status: "Bootleg" },
+  ]};
+
+  const out = d16StrandedSingles(cand, () => withBootleg);
+  ok(!JSON.stringify(out).includes("Donda"),
+     "a bootleg release group is never named as a single's real home");
+  eq(out.length, 0, "and with no official album left there is nothing to say");
+
+  // An official album in the same shape still works, so this is a filter and
+  // not an accidental kill switch.
+  const official = { groups: [
+    { rg_id: "a", title: "Donda", primary: "Album", secondary: [],
+      first_release: "2021-08-29", status: "Official" },
+  ]};
+  ok(d16StrandedSingles(cand, () => official).length === 1,
+     "an Official album is still offered");
+
+  // Mixtape and demo secondary types are excluded for the same reason.
+  for (const sec of [["Mixtape/Street"], ["Demo"]]) {
+    const g = { groups: [{ rg_id: "b", title: "X", primary: "Album",
+      secondary: sec, first_release: "2021", status: "Official" }] };
+    eq(d16StrandedSingles(cand, () => g).length, 0,
+       `a ${sec[0]} release is not a studio album`);
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

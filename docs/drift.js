@@ -1101,13 +1101,43 @@ export const isStructuralTitle = (track) => STRUCTURAL_TITLE.test(normTitle(trac
  * Forest Hills Drive anniversary edition looked like a textbook migration and
  * is nothing of the kind.
  */
-function plausiblePreRelease(earlier, later, track) {
+/*
+ * Returns WHICH KIND of handover this is, not merely whether there was one.
+ *
+ * This used to return a boolean and the caller described every true as a
+ * "Classic single-absorbed-into-album migration". Only two of the four branches
+ * mean that. The other two detect the same album written two ways, and labelling
+ * those as a single being absorbed is a fabricated causal story stated at 90%
+ * confidence.
+ *
+ * Measured on one real library: 32 findings claimed a migration and 17 of them
+ * were this. The examples are not subtle.
+ *
+ *   BULLY                              -> BULLY - DELUXE
+ *   Band on the Run                    -> Band On The Run (Standard)
+ *   Songs From The Big Chair (Super Deluxe) -> Songs from the Big Chair
+ *   Con Funk Shun - 7                  -> 7
+ *
+ * None of those is a single. Three are edition labels and one is the artist name
+ * prefixed onto the album title by whatever tagged it.
+ *
+ * The distinction matters for the advice as well as the wording. A single really
+ * does get absorbed INTO the later album, so the later string is the target. Two
+ * spellings of one album have no such direction, and the tool was telling people
+ * to consolidate a 12-play string into a 1-play one.
+ */
+function handoverKind(earlier, later, track) {
   const e = normTitle(earlier), l = normTitle(later), t = normTitle(track);
-  if (!e || !l) return false;
-  if (e === t || e.includes(t)) return true;              // single named for the track
-  if (/\s[-–]\s(single|ep)$/i.test(earlier)) return true; // explicitly a single or EP
-  if (e.includes(l) || l.includes(e)) return true;        // edition of the same album
-  return similar(norm(earlier), norm(later)) >= 0.6;      // near-identical titles
+  if (!e || !l) return null;
+  // A release named after the track, or explicitly marked a single or EP. These
+  // genuinely precede the album and are absorbed by it.
+  if (e === t || e.includes(t)) return "prerelease";
+  if (/\s[-–]\s(single|ep)$/i.test(earlier)) return "prerelease";
+  // One title contains the other, or they are near-identical: a deluxe, a
+  // remaster, a regional edition, or the same record typed differently.
+  if (e.includes(l) || l.includes(e)) return "edition";
+  if (similar(norm(earlier), norm(later)) >= 0.6) return "edition";
+  return null;
 }
 
 function temporalSignature(members, track) {
@@ -1115,14 +1145,34 @@ function temporalSignature(members, track) {
   const [a, b] = [...members].sort((x, y) => x.first - y.first);
   if (a.last > b.first) return null;
 
-  const migration = plausiblePreRelease(a.album, b.album, track);
+  const kind = handoverKind(a.album, b.album, track);
+  // `migration` stays true for both kinds, because both are real splits worth
+  // consolidating. Only the explanation and the target differ.
+  const migration = kind !== null;
+
+  // For an edition variant there is no "pre-release", so the target is the
+  // string the user actually played most, not whichever came later.
+  const dominant = a.plays >= b.plays ? a : b;
+
   return {
-    pattern: migration ? "clean_handover" : "sequential_unrelated",
+    pattern: kind === "prerelease" ? "clean_handover"
+      : kind === "edition" ? "edition_variant" : "sequential_unrelated",
     migration,
+    kind,
     earlier: a.album, later: b.album, boundary: b.first,
-    note: migration
+    target: kind === "prerelease" ? b.album : dominant.album,
+    note: kind === "prerelease"
       ? `every play of '${a.album}' predates every play of '${b.album}'. ` +
         `Classic single-absorbed-into-album migration around ${monthName(b.first)}.`
+      : kind === "edition"
+      // Same chronology, different cause. These are two names for one record:
+      // a deluxe, a remaster, a regional edition, or just different typing.
+      // Saying "single absorbed into album" here invents a history that did
+      // not happen, and it was being said at 90% confidence.
+      ? `every play of '${a.album}' predates every play of '${b.album}' ` +
+        `(${monthName(b.first)}). These look like two editions or two ` +
+        `spellings of the same record rather than a single and its album, so ` +
+        `nothing was released in between: your tagging changed.`
       // Same chronology, no causal claim: these look like two different
       // releases rather than one becoming the other.
       : `every play of '${a.album}' predates every play of '${b.album}' ` +
@@ -1294,8 +1344,20 @@ export function d4AlbumSplits(rest, minPlays = 2) {
           `certainly different recordings, one per album, rather than one ` +
           `track split in two. Nothing to fix unless you know otherwise.`
         : reason === "migration"
-        ? `consolidate to '${temporal.later}': the earlier string looks like ` +
-          `the pre-album release.`
+        ? (temporal.kind === "edition"
+            /*
+             * No "pre-album release" claim, and the target is the string with
+             * the plays rather than whichever came last.
+             *
+             * This previously told people to consolidate `Band on the Run`
+             * (12 plays) into `Band On The Run (Standard)` (1 play), on the
+             * stated grounds that the first was the single. Neither half was
+             * true.
+             */
+            ? `consolidate to '${temporal.target}': these are two names for ` +
+              `one record, and that is the spelling you have used most.`
+            : `consolidate to '${temporal.later}': the earlier string looks ` +
+              `like the pre-album release.`)
         : reason === "plain-albums"
         ? `Both of these look like ordinary albums, and there is no sign of one ` +
           `absorbing the other, so this is probably just a song that appears on ` +
@@ -4060,8 +4122,30 @@ export function d16StrandedSingles(
      * greatest-hits record technically contains the track, and telling someone to
      * move a single onto a compilation would be worse than saying nothing.
      */
-    const albums = (groups || []).filter((g) =>
-      g.primary === "Album" && !(g.secondary || []).includes("Compilation"));
+    /*
+     * Official studio albums only, and the status check is not optional.
+     *
+     * Without it this recommended `Donda` as the home of Kanye's "Nah Nah Nah"
+     * single. MusicBrainz does hold a `Donda` release group containing that
+     * recording, and it is catalogued with status `Bootleg`: a leaked tracklist,
+     * not the record that came out. The user's reaction was "the donda finding
+     * is just not true", which is right, and the card had stated it with a year.
+     *
+     * D14e has carried these guards for months. D16 was written against the same
+     * data and never got them, because it reused D0's album rule, and D0 runs on
+     * material the era guard has already filtered.
+     *
+     * A missing status is allowed through: Spotify groups carry no MusicBrainz
+     * status and everything Spotify lists is a commercial release.
+     */
+    const albums = (groups || []).filter((g) => {
+      if (g.primary !== "Album") return false;
+      const sec = g.secondary || [];
+      if (sec.includes("Compilation")) return false;
+      if (sec.some((t) => /bootleg|demo|mixtape|street/i.test(t))) return false;
+      if (g.status && g.status !== "Official") return false;
+      return true;
+    });
     const curated = albums[0]?.title || "";
 
     // Last.fm's own idea of the canonical album, if we asked and it knew.
