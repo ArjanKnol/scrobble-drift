@@ -306,5 +306,65 @@ for (const d of ["D15"]) {
   ok(without.issues.length >= 0, "without throwing");
 }
 
+/* ---- D15 reports one finding per ALBUM, not per pair of credits --------- */
+{
+  /*
+   * The pairwise version was quadratic in the number of credits an album
+   * carries, and a compilation is the worst case and the common case: 'Various
+   * Artists' relates to every per-track credit, so one record produced one card
+   * per track artist.
+   *
+   * Measured on a real library: 137 D15 findings in a 200-card report, 14 of
+   * them for one compilation. That is not fourteen problems, it is one album
+   * tagged two ways, and printing it fourteen times buried every other finding
+   * while making the library look far worse than it was.
+   */
+  const comp = [{ name: "50 Summer Hits", artist: { name: "Various Artists" },
+                  playcount: 151 }];
+  for (const [a, p] of [["Elvis Presley", 50], ["Alcazar", 46], ["La Bouche", 21],
+                        ["Los Del Rio", 21], ["Haddaway", 18], ["Corona", 12]])
+    comp.push({ name: "50 Summer Hits", artist: { name: a }, playcount: p });
+
+  const out = d15AlbumArtistSplits(comp);
+  eq(out.length, 1, "a compilation is ONE finding, however many credits it has");
+  eq(out[0].members.length, 7, "with every credit listed as a member");
+  eq(out[0].plays_affected, 319, "and the plays summed across all of them");
+  ok(/split across 7 album artists/.test(out[0].title),
+     "the headline says how many, rather than claiming two");
+
+  /*
+   * The distinction the pairwise version was right about, and which components
+   * must not lose: two unrelated records sharing a title are not one album.
+   */
+  eq(d15AlbumArtistSplits([
+       { name: "Greatest Hits", artist: { name: "Queen" }, playcount: 40 },
+       { name: "Greatest Hits", artist: { name: "2Pac" }, playcount: 30 },
+     ]).length, 0,
+     "unrelated artists sharing a title are still silent");
+
+  const rename = d15AlbumArtistSplits([
+    { name: "The Lost Boy", artist: { name: "Cordae" }, playcount: 30 },
+    { name: "The Lost Boy", artist: { name: "YBN Cordae" }, playcount: 12 },
+  ]);
+  eq(rename.length, 1, "a rename is one finding");
+  eq(rename[0].confidence, 0.8, "at the containment rule's confidence");
+  ok(/neither shows the full 42 plays/.test(rename[0].suggest),
+     "and reads as English for the two-credit case");
+
+  /*
+   * A component is only as certain as its WEAKEST link. Reporting it at the
+   * strength of the best pair would let one confirmed MusicBrainz match vouch
+   * for a guess about an unrelated credit in the same group.
+   */
+  const mixed = d15AlbumArtistSplits([
+    { name: "X", artist: { name: "A" }, mbid: "m1", playcount: 30 },
+    { name: "X", artist: { name: "B" }, mbid: "m1", playcount: 20 },
+    { name: "X", artist: { name: "Various Artists" }, playcount: 10 },
+  ]);
+  eq(mixed[0].confidence, 0.85,
+     "a proven pair does not raise the whole group to proven");
+  eq(mixed[0].class, "split", "nor promote it to an error");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

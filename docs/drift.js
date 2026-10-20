@@ -2701,41 +2701,116 @@ export function d15AlbumArtistSplits(albums, { minPlays = 4 } = {}) {
   };
   const isVA = (n) => VA_NAMES.has(norm(n));
 
+  /*
+   * ONE finding per album, not one per pair of credits.
+   *
+   * The pairwise version was quadratic in the number of credits an album
+   * carries, and a compilation is both the worst case and the common case:
+   * 'Various Artists' relates to every per-track credit on the record, so one
+   * album produced one card per track artist.
+   *
+   * Measured on a real library: 137 D15 findings in a 200-card report, with a
+   * single compilation accounting for 14 of them:
+   *
+   *   'Radio 538 presents HOT!' is split across 2 album artists: 'Various Artists' and 'Alex Gaudino'
+   *   'Radio 538 presents HOT!' is split across 2 album artists: 'Various Artists' and 'Guru Josh Project'
+   *   ...
+   *
+   * That is not fourteen problems. It is one album tagged two ways, and showing
+   * it fourteen times buries every other finding while making the library look
+   * far worse than it is.
+   *
+   * Connected components rather than pairs: credits are nodes, a satisfied rule
+   * is an edge, and each component is one album. Two genuinely unrelated records
+   * that merely share a title have no edge between them, so they remain separate
+   * components and are still reported separately. That distinction is the thing
+   * the pairwise version got right and this must not lose.
+   */
+  const relate = (a, b) => {
+    if (norm(a.artist) === norm(b.artist)) return null;
+    if (a.mbid && b.mbid && a.mbid === b.mbid) {
+      return { why: "MusicBrainz gives them the same release ID, so they are " +
+                    "one album", confidence: 0.95, cls: "error" };
+    }
+    if (isVA(a.artist) || isVA(b.artist)) {
+      return { why: "one is credited to Various Artists, which is how a " +
+                    "compilation re-credit usually shows up",
+               confidence: 0.85, cls: "split" };
+    }
+    if (contains(a.artist, b.artist)) {
+      return { why: "one artist credit contains the other, so this looks like " +
+                    "a credit change rather than two different records",
+               confidence: 0.8, cls: "split" };
+    }
+    // Unrelated artists sharing a title prove nothing. Silent.
+    return null;
+  };
+
   const issues = [];
   for (const group of byTitle.values()) {
     if (group.length < 2) continue;
 
-    // Compare every pair, since a title can carry three credits.
+    // Union-find over this title's credits.
+    const parent = group.map((_, i) => i);
+    const find = (i) => {
+      while (parent[i] !== i) i = parent[i] = parent[parent[i]];
+      return i;
+    };
+    const weakest = new Map();          // component root -> weakest edge in it
+
     for (let i = 0; i < group.length; i++) {
       for (let j = i + 1; j < group.length; j++) {
-        const a = group[i], b = group[j];
-        if (norm(a.artist) === norm(b.artist)) continue;
-        if (a.plays + b.plays < minPlays) continue;
+        const rel = relate(group[i], group[j]);
+        if (!rel) continue;
+        const ri = find(i), rj = find(j);
+        /*
+         * A component is only as certain as its WEAKEST link.
+         *
+         * "All of these are one album" is a chain of pairwise claims. Reporting
+         * it at the strength of the best pair would let one confirmed
+         * MusicBrainz match vouch for a guess about an unrelated credit that
+         * merely happens to sit in the same group.
+         */
+        const carried = [weakest.get(ri), weakest.get(rj), rel]
+          .filter(Boolean)
+          .sort((x, y) => x.confidence - y.confidence)[0];
+        parent[ri] = rj;
+        weakest.set(find(j), carried);
+      }
+    }
 
-        let why = null, confidence = 0, cls = "split";
-        if (a.mbid && b.mbid && a.mbid === b.mbid) {
-          why = "MusicBrainz gives both the same release ID, so they are one album";
-          confidence = 0.95; cls = "error";
-        } else if (isVA(a.artist) || isVA(b.artist)) {
-          why = "one is credited to Various Artists, which is how a compilation " +
-                "re-credit usually shows up";
-          confidence = 0.85;
-        } else if (contains(a.artist, b.artist)) {
-          why = "one artist credit contains the other, so this looks like a " +
-                "credit change rather than two different records";
-          confidence = 0.8;
-        }
-        // Rule 4: unrelated artists sharing a title prove nothing. Silent.
-        if (!why) continue;
+    const comps = new Map();
+    for (let i = 0; i < group.length; i++) {
+      const r = find(i);
+      if (!comps.has(r)) comps.set(r, []);
+      comps.get(r).push(group[i]);
+    }
 
-        const [hi, lo] = a.plays >= b.plays ? [a, b] : [b, a];
+    for (const [root, credits] of comps) {
+      if (credits.length < 2) continue;
+      const rel = weakest.get(root);
+      if (!rel) continue;
+
+      const ordered = [...credits].sort((x, y) => y.plays - x.plays);
+      const total = ordered.reduce((n, x) => n + x.plays, 0);
+      if (total < minPlays) continue;
+
+      const hi = ordered[0];
+      const others = ordered.slice(1);
+      const names = others.map((x) => `'${x.artist}'`);
+      const listed = names.length <= 2
+        ? names.join(" and ")
+        : `${names.slice(0, 2).join(", ")} and ${names.length - 2} more`;
+      const { why, confidence, cls } = rel;
+
+      {
         issues.push({
           detector: "D15", class: cls, confidence,
           artist: hi.artist,
           album: hi.title,
-          title: `'${hi.title}' is split across 2 album artists: ` +
-                 `'${hi.artist}' and '${lo.artist}'`,
-          plays_affected: a.plays + b.plays,
+          title: `'${hi.title}' is split across ${ordered.length} album ` +
+                 `artists: '${hi.artist}', ${listed}`,
+          plays_affected: total,
           /*
            * Deliberately NOT fed into chartImpact.
            *
@@ -2752,14 +2827,19 @@ export function d15AlbumArtistSplits(albums, { minPlays = 4 } = {}) {
           chart_already_correct: true,
           suggest:
             `Last.fm keys an album on the album artist as well as the title, so ` +
-            `these are two separate albums in YOUR LAST.FM chart and neither ` +
-            `shows the full ${a.plays + b.plays} plays. ${why}. ` +
-            `'${hi.artist}' has ${hi.plays}, '${lo.artist}' has ${lo.plays}. ` +
-            `Re-crediting the smaller one on Last.fm merges them. Note the ` +
-            `corrected chart above already counts all ${a.plays + b.plays}: ` +
+            `these are ${ordered.length} separate albums in YOUR LAST.FM chart ` +
+            // "neither" for two, "none of them" beyond that. Generalising from
+            // pairs to groups quietly broke the two-credit case into "none of
+            // them shows", which reads like a bad translation.
+            `and ${ordered.length === 2 ? "neither" : "none of them"} shows ` +
+            `the full ${total} plays. ${why}. ` +
+            `'${hi.artist}' has the most at ${hi.plays}; ` +
+            `${others.map((x) => `'${x.artist}' has ${x.plays}`).join(", ")}. ` +
+            `Re-crediting the smaller ones on Last.fm merges them. Note the ` +
+            `corrected chart above already counts all ${total}: ` +
             `Scrobble Drift groups on the track artist, so it never saw this ` +
             `split. Last.fm's own chart is the one to distrust here.`,
-          members: [hi, lo].map((x) => ({
+          members: ordered.map((x) => ({
             album: x.title, artist: x.artist, plays: x.plays,
             looks_like: isVA(x.artist) ? "compilation credit" : "artist credit",
           })),
