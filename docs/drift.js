@@ -3184,12 +3184,21 @@ export function chartWrongness(scrobbles, issues) {
       .filter((m) => m?.album && Number.isFinite(m.plays));
     if (mem.length < 2) continue;
 
-    // Everything outside the most-played spelling is in the wrong place. Which
-    // spelling is "right" is the user's call, but the count does not depend on
-    // that: consolidating either way moves the same number of plays.
-    const sorted = [...mem].sort((a, b) => b.plays - a.plays);
-    misplaced += sorted.slice(1).reduce((n, m) => n + m.plays, 0);
-    albums.add(norm(sorted[0].album));
+    /*
+     * Everything outside the target is in the wrong place, and the target is
+     * never "(no album)".
+     *
+     * Blank members are skipped here because every blank play is already in
+     * `blank`, counted from the scrobbles directly. Including them again would
+     * double-count the single largest component of the figure, and on one real
+     * library that would have inflated 25.5% to over 30%.
+     */
+    const to = consolidationTarget(mem);
+    if (!to || to.album === NO_ALBUM) continue;
+    misplaced += mem
+      .filter((m) => m !== to && m.album !== NO_ALBUM)
+      .reduce((n, m) => n + m.plays, 0);
+    albums.add(norm(to.album));
   }
 
   const affected = misplaced + blank;
@@ -3209,13 +3218,41 @@ export function chartWrongness(scrobbles, issues) {
  * numbers that quietly disagree, and the headline's whole claim is that it can
  * be checked.
  */
+/**
+ * Which spelling should the others be consolidated INTO?
+ *
+ * Never "(no album)", whatever the play counts say. That placeholder means the
+ * scrobbles carry no album tag at all, and when the untagged plays outnumber the
+ * tagged ones it won a plain most-played sort and became the target. The fix
+ * list then read:
+ *
+ *   Odetari - KEEP FOLLOWING    KEEP FOLLOWING -> (no album)
+ *   RAYE - Escapism.            My 21st Century Blues -> (no album)
+ *
+ * which instructs the reader to DELETE a correct album tag. That is the one
+ * direction this tool must never point: it makes the chart worse, and unlike a
+ * wrong merge it looks plausible while doing it.
+ *
+ * So the target is the most-played REAL album string, and the placeholder is
+ * only ever a source.
+ */
+export function consolidationTarget(members) {
+  const mem = (members || []).filter((m) => m?.album && Number.isFinite(m.plays));
+  if (!mem.length) return null;
+  const real = mem.filter((m) => m.album !== NO_ALBUM);
+  const pool = real.length ? real : mem;
+  return [...pool].sort((a, b) => b.plays - a.plays)[0];
+}
+
 export function recoverablePlays(issue) {
   if (!affectsChart(issue) || !CHART_DETECTORS.has(issue.detector)) return 0;
   const mem = (issue.members || [])
     .filter((m) => m?.album && Number.isFinite(m.plays));
   if (mem.length < 2) return 0;
-  const sorted = [...mem].sort((a, b) => b.plays - a.plays);
-  return sorted.slice(1).reduce((n, m) => n + m.plays, 0);
+  const to = consolidationTarget(mem);
+  if (!to || to.album === NO_ALBUM) return 0;
+  // Everything that is not already on the target has to move.
+  return mem.filter((m) => m !== to).reduce((n, m) => n + m.plays, 0);
 }
 
 /**
@@ -3307,6 +3344,44 @@ export function blankAlbumSummary(issues) {
  * edit and no write API, so nothing can consume this. It is a worklist that
  * happens to open in Excel.
  */
+/**
+ * Every blank-album track as CSV, busiest artist first.
+ *
+ * The on-page panel shows the top ten artists because that is what fits and
+ * what makes the point. The actual work is longer than that: on one real
+ * library nineteen artists covered half of 1,181 plays, and the full list ran
+ * to 619 tracks. A spreadsheet is the right home for it.
+ *
+ * `urlFor` is passed in rather than built here, because the Last.fm library URL
+ * format already has one implementation in the page and a second copy would be
+ * free to drift from it.
+ */
+export function blankAlbumCsv(issues, urlFor) {
+  const b = blankAlbumSummary(issues);
+  if (!b) return "";
+
+  const q = (v) => {
+    const s = String(v ?? "");
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+
+  const d5 = (issues || []).find((i) => i?.detector === "D5");
+  // Grouped by artist so the file opens in the order the work is done, rather
+  // than in whatever order the scrobbles happened to arrive.
+  const rank = new Map(b.artists.map((a, i) => [norm(a.artist), i]));
+  const tracks = [...(d5?.tracks || [])].sort((x, y) =>
+    (rank.get(norm(x.artist)) ?? 0) - (rank.get(norm(y.artist)) ?? 0) ||
+    y.plays - x.plays);
+
+  const rows = [["artist", "track", "plays", "library_url"]];
+  for (const t of tracks) {
+    rows.push([t.artist, t.track, t.plays,
+               urlFor ? (urlFor(t.artist, t.track) || "") : ""].map(q));
+  }
+  if (rows.length === 1) return "";
+  return rows.map((r) => r.join(",")).join("\r\n") + "\r\n";
+}
+
 export function fixListCsv(issues, user) {
   /*
    * RFC 4180 quoting. Album and track names routinely contain commas, quotes
@@ -3324,10 +3399,12 @@ export function fixListCsv(issues, user) {
     "plays_recovered", "detector", "confidence",
   ]];
 
-  for (const { issue, recovers } of fixList(issues, Infinity)) {
-    const mem = [...(issue.members || [])].sort((a, b) => b.plays - a.plays);
-    const to = mem[0];
-    for (const m of mem.slice(1)) {
+  for (const { issue } of fixList(issues, Infinity)) {
+    const mem = (issue.members || []).filter((m) => m?.album);
+    const to = consolidationTarget(mem);
+    if (!to) continue;
+    for (const m of mem.filter((x) => x !== to)
+                       .sort((x, y) => y.plays - x.plays)) {
       rows.push([
         issue.artist || "",
         issue.track || issue.album || "",

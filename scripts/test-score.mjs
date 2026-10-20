@@ -10,7 +10,7 @@
  */
 
 import { chartWrongness, fixList, fixListCsv, recoverablePlays,
-  blankAlbumSummary, NO_ALBUM, hygieneScore, SCORED_DETECTORS, UNSCORED_BY_DESIGN, analyse }
+  blankAlbumSummary, blankAlbumCsv, consolidationTarget, NO_ALBUM, hygieneScore, SCORED_DETECTORS, UNSCORED_BY_DESIGN, analyse }
   from "../docs/drift.js";
 
 let pass = 0, fail = 0;
@@ -606,6 +606,82 @@ console.log("\nbounds and degenerate input");
      "a blank source reads as an instruction, not as a string to find");
   ok(!nasty.includes("(no album)"),
      "never our internal placeholder, which exists nowhere in their library");
+}
+
+/* ---- never consolidate INTO "(no album)" -------------------------------- */
+{
+  /*
+   * Spotted in a screenshot of the live fix list:
+   *
+   *   Odetari - KEEP FOLLOWING    KEEP FOLLOWING -> (no album)
+   *   RAYE - Escapism.            My 21st Century Blues -> (no album)
+   *
+   * When the untagged plays outnumber the tagged ones, the placeholder won a
+   * plain most-played sort and became the consolidation target, so the tool was
+   * telling people to DELETE a correct album tag. That is the one direction it
+   * must never point: it makes the chart worse, and unlike a wrong merge it
+   * looks entirely plausible while doing it.
+   */
+  const issue = {
+    detector: "D4", artist: "RAYE", track: "Escapism.", confidence: 0.9,
+    members: [{ album: NO_ALBUM, plays: 9 },
+              { album: "My 21st Century Blues", plays: 2 }],
+  };
+  eq(consolidationTarget(issue.members).album, "My 21st Century Blues",
+     "the target is the real album even when the placeholder has more plays");
+  eq(recoverablePlays(issue), 9,
+     "and the untagged plays are what move, not the tagged ones");
+  ok(/,\(no album set\),My 21st Century Blues,9,/.test(fixListCsv([issue], "u")),
+     "so the CSV points from the placeholder to the album, never the reverse");
+
+  eq(consolidationTarget([{ album: NO_ALBUM, plays: 5 }]).album, NO_ALBUM,
+     "with nothing else available the placeholder is still returned");
+  eq(recoverablePlays({ detector: "D4",
+      members: [{ album: NO_ALBUM, plays: 5 }, { album: NO_ALBUM, plays: 2 }] }), 0,
+     "but an all-blank finding recovers nothing, since there is nowhere to put it");
+  eq(consolidationTarget([]), null, "and no members is no target");
+
+  /*
+   * Blank plays must be counted ONCE. They already arrive in `blank`, straight
+   * from the scrobbles, so including them again as misplaced members would
+   * double-count the largest component of the headline.
+   */
+  const sc = [...Array(9)].map(() => ({ artist: "RAYE", track: "E", album: null }))
+    .concat([...Array(2)].map(() =>
+      ({ artist: "RAYE", track: "E", album: "My 21st Century Blues" })));
+  const w = chartWrongness(sc, [issue]);
+  eq(w.blank, 9, "the untagged plays are counted as blank");
+  eq(w.misplaced, 0, "and not a second time as misplaced members");
+  eq(w.affected, 9, "so the total is nine, not eighteen");
+}
+
+/* ---- the blank-album export ------------------------------------------- */
+{
+  /*
+   * The panel shows ten artists because that is what fits and what makes the
+   * point. The work is longer: on one real library nineteen artists covered
+   * half of 1,181 plays, across 619 tracks.
+   */
+  const d5 = { detector: "D5", plays_affected: 31, tracks: [
+    { artist: "Adele", track: "Hello", plays: 5 },
+    { artist: "Don Toliver", track: "ICE AGE (FEAT. TRAVIS SCOTT)", plays: 14 },
+    { artist: "Don Toliver", track: "No Idea", plays: 9 },
+    { artist: "Jay-Z", track: `03' Bonnie & "Clyde", Pt. 2`, plays: 3 },
+  ]};
+  const url = (a, t) => `https://last.fm/${a}/${t}`;
+  const csv = blankAlbumCsv([d5], url);
+  const lines = csv.trim().split("\r\n");
+
+  eq(lines[0], "artist,track,plays,library_url", "the header names the columns");
+  eq(lines.length, 5, "one row per track, plus the header");
+  ok(lines[1].startsWith("Don Toliver"),
+     "grouped by artist, busiest first, so it opens in the order you work");
+  ok(lines[4].includes(`"03' Bonnie & ""Clyde"", Pt. 2"`),
+     "with RFC 4180 quoting, since track names carry commas and quotes");
+  ok(csv.includes("https://last.fm/Adele/Hello"),
+     "and a link to each track, which is the slow part of the job");
+  eq(blankAlbumCsv([{ detector: "D4" }], url), "",
+     "no blank-album finding means no file");
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

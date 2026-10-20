@@ -144,7 +144,7 @@ import {
   analyse, partitionEra, d14eReleasedSince, d16StrandedSingles,
   hygieneScore, weakEraCandidates, officialKey, byImportance,
   resolveOne, isResolvable, discoveryOffers, baseTitle, affectsChart,
-  fixList, fixListCsv, blankAlbumSummary, NO_ALBUM,
+  fixList, fixListCsv, blankAlbumSummary, blankAlbumCsv, NO_ALBUM, consolidationTarget,
 } from "./drift.js";
 /*
  * Six imports left with the resolve phase: d0Resolve, d5Resolve, verifyEraNames,
@@ -2175,13 +2175,28 @@ function render() {
         </div>
         <div class="fixgrid">
         ${rows.map(({ issue, recovers }) => {
-          const mem = [...(issue.members || [])].sort((a, b) => b.plays - a.plays);
-          const to = mem[0];
+          const mem = (issue.members || []).filter((m) => m?.album);
+          const to = consolidationTarget(mem);
+          /*
+           * Every row links straight to the thing it is about.
+           *
+           * These are the two panels a reader actually works from, and they were
+           * the only ones with no links: the finding cards below have had "Open
+           * in your library" all along. Naming an edit without a route to it
+           * leaves the reader to search their own library by hand, which is the
+           * slowest part of the job.
+           */
+          const href = libUrl(d.user, issue.artist,
+                              { track: issue.track, album: issue.album });
+          const label = `${esc(issue.artist || "")}${issue.track
+              ? ` &mdash; ${esc(issue.track)}` : ""}`;
           return `<div class="row">
-            <span>${esc(issue.artist || "")}${issue.track
-              ? ` &mdash; ${esc(issue.track)}` : ""}
+            <span>${href
+              ? `<a href="${href}" target="_blank" rel="noopener noreferrer"
+                   >${label}</a>` : label}
               <span class="note" style="margin:0;display:block">${
-                mem.slice(1).map((m) =>
+                mem.filter((m) => m !== to)
+                   .sort((x, y) => y.plays - x.plays).map((m) =>
                   // "(no album)" is our placeholder, not a string anyone can
                   // search for and replace. Phrase it as the action it is.
                   m.album === NO_ALBUM
@@ -2231,12 +2246,26 @@ function render() {
           concentrated: the top ${N(b.halfCoveredBy)}
           artist${b.halfCoveredBy === 1 ? "" : "s"} account for half of them.
           Fixing by artist is far quicker than by track.</p>
-        <div class="fixgrid">\n        ${b.artists.slice(0, 10).map((a) => `<div class="row">
-          <span>${esc(a.artist)}
+        <div class="fixgrid">\n        ${b.artists.slice(0, 10).map((a) => {
+          const href = libUrl(d.user, a.artist);
+          return `<div class="row">
+          <span>${href
+            ? `<a href="${href}" target="_blank" rel="noopener noreferrer"
+                 >${esc(a.artist)}</a>` : esc(a.artist)}
             <span class="note" style="margin:0;display:block">${
               esc(a.top.join(", "))}${a.tracks > a.top.length
                 ? ` and ${N(a.tracks - a.top.length)} more` : ""}</span></span>
-          <span class="v">${N(a.plays)}</span></div>`).join("")}
+          <span class="v">${N(a.plays)}</span></div>`;
+        }).join("")}
+        </div>
+        ${b.artists.length > 10 ? `<p class="note" style="margin:9px 0 0">
+          And ${N(b.artists.length - 10)} more
+          artist${b.artists.length - 10 === 1 ? "" : "s"} below the top ten.</p>` : ""}
+        <div style="margin-top:11px">
+          <button class="check" type="button" id="blank-csv">Download all
+            ${N(b.tracks)} tracks as CSV</button>
+          <span class="note" style="margin:0 0 0 9px;color:var(--dim)">Grouped by
+            artist, with a link straight to each track in your library.</span>
         </div>
       </div>`;
     })()}
@@ -2880,8 +2909,12 @@ function issues() {
      * same complaint this project has already had twice. So the failure path
      * puts the text on screen for manual selection rather than pretending.
      */
-    if (btn.id === "copy-fixes") {
-      const csv = fixListCsv(report.issues, report.user);
+    if (btn.id === "copy-fixes" || btn.id === "blank-csv") {
+      const blank = btn.id === "blank-csv";
+      const csv = blank
+        ? blankAlbumCsv(report.issues,
+            (artist, track) => libUrl(report.user, artist, { track }))
+        : fixListCsv(report.issues, report.user);
       if (!csv) return;
       /*
        * A Blob and an object URL rather than a data: URI.
@@ -2891,8 +2924,8 @@ function issues() {
        * would produce a file that opens fine and is missing its tail. The URL
        * is revoked on the next frame so the blob is not held for the session.
        */
-      const name = `scrobble-drift-${(report.user || "fixes")
-        .replace(/[^\w-]/g, "")}.csv`;
+      const name = `scrobble-drift-${blank ? "no-album-" : ""}${
+        (report.user || "fixes").replace(/[^\w-]/g, "")}.csv`;
       const url = URL.createObjectURL(
         new Blob([csv], { type: "text/csv;charset=utf-8" }));
       const a = document.createElement("a");
