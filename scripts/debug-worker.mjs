@@ -148,16 +148,12 @@ await probe("artist-albums, artist found", "/api/spotify/artist-albums?artist=Tr
 await probe("artist-albums, artist NOT found",
             "/api/spotify/artist-albums?artist=zzq", { artistItems: [] });
 await probe("album search", "/api/spotify/album?artist=Travis%20Scott&title=Rodeo");
-await probe("album-tracks", "/api/spotify/album-tracks?ids=6ByLIWiPtIYAaCiSSSbjWn");
 
 console.log("\n=== hypothesis 1: null entries in Spotify arrays ===");
 await probe("album search with a null item",
             "/api/spotify/album?artist=X&title=Y", { albumSearchItems: [null, album()] });
 await probe("artist album list with a null item",
             "/api/spotify/artist-albums?artist=Travis%20Scott", { artistAlbums: [null, album()] });
-await probe("albums?ids with a null (documented!)",
-            "/api/spotify/album-tracks?ids=6ByLIWiPtIYAaCiSSSbjWn",
-            { albumsByIds: [null, { ...album(), tracks: { items: [track()] } }] });
 
 console.log("\n=== hypothesis 2: Cache API put() throws ===");
 await probe("health (breaker match only)", "/api/health", {}, { putThrows: true });
@@ -171,9 +167,6 @@ await probe("artist-albums, token http 400",
             "/api/spotify/artist-albums?artist=Travis%20Scott", { tokenFails: true });
 
 console.log("\n=== hypothesis 4: missing tracks object ===");
-await probe("album-tracks, album with no tracks key",
-            "/api/spotify/album-tracks?ids=6ByLIWiPtIYAaCiSSSbjWn",
-            { albumsByIds: [{ ...album(), tracks: undefined }] });
 
 console.log("\n=== hypothesis 5: pagination ===");
 await probe("artist-albums with a next page",

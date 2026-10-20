@@ -58,7 +58,7 @@
  *
  * Bump this in the same commit as any Worker change. /api/health reports it.
  */
-const BUILD = "2026-10-20-22-chart-wrongness-headline";
+const BUILD = "2026-10-20-24-spotify-primary-credit-only";
 
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";
@@ -179,9 +179,12 @@ export default {
       if (url.pathname === "/api/spotify/artist-albums") {
         return await spArtistAlbums(url, env, cors);
       }
-      if (url.pathname === "/api/spotify/album-tracks") {
-        return await spAlbumTracks(url, env, cors);
-      }
+      /*
+       * `/api/spotify/album-tracks` lived here and is gone. `GET /albums?ids=`
+       * returns 403 Forbidden to a client-credentials app, so it never returned
+       * anything but an error. Re-verified against live Spotify before removing.
+       * The per-track search at /api/spotify/track is what answers these now.
+       */
       /*
        * TEMPORARY diagnostic. Remove once the Spotify 400 is settled.
        *
@@ -1458,7 +1461,7 @@ async function spTrack(url, env, cors) {
     // reusing the key would have made every previously-cached track answer
     // "cannot confirm" for the whole seven-day TTL. Changing the prefix retires
     // the old entries rather than serving them in the wrong shape.
-    env, `one3:${spNorm(artist)}\u241f${spNorm(track)}`, async () => {
+    env, `one4:${spNorm(artist)}\u241f${spNorm(track)}`, async () => {
     // No `limit`: Spotify refuses an explicit one above 10 on these endpoints and
     // its default is adequate. See SP_PAGE.
     const q = `track:${JSON.stringify(track)} artist:${JSON.stringify(artist)}`;
@@ -1470,8 +1473,22 @@ async function spTrack(url, env, cors) {
     const best = new Map();
     for (const t of data.tracks?.items || []) {
       if (!t?.album?.id) continue;
-      const exact = spNorm(t.name) === wantTrack &&
-                    (t.artists || []).some((a) => spNorm(a.name) === wantArtist);
+      /*
+       * The PRIMARY credit must be the artist asked about, not merely one of
+       * them. This said `.some(...)`, which accepts a guest credit.
+       *
+       * Reported live, twice over: `artist=French Montana track=Hold Up`
+       * returned `BIG BAD...`, which is a GIGGS album that French Montana
+       * features on. D16 then told the reader that was their track's real home.
+       *
+       * The identical rule was added to the MusicBrainz handler when the same
+       * report came in, and this endpoint was left alone, so MusicBrainz
+       * correctly returned nothing while Spotify happily returned the wrong
+       * album. Two code paths answering one question, fixed one at a time: the
+       * exact failure this file has now had three times.
+       */
+      const credited = (t.artists || []).map((a) => spNorm(a.name));
+      const exact = spNorm(t.name) === wantTrack && credited[0] === wantArtist;
       if (!exact) continue;
       /*
        * ISRC is carried through, and it is the most valuable field on this
@@ -1667,64 +1684,6 @@ async function spArtistAlbums(url, env, cors) {
     truncated: Number(first.total ?? 0) > SP_ALBUM_CAP,
     page_size: step,
   };
-  });
-  return json({ ...body, shared }, 200,
-              { ...cors, "Cache-Control": "public, max-age=86400" });
-}
-
-/**
- * Tracklists for up to 20 albums in ONE upstream call.
- *
- * This is where the throughput comes from. An artist with 40 releases needs two
- * calls to yield every title they have ever officially put out, and that single
- * answer resolves every one of that artist's tracks in the library at once. The
- * per-track search approach would have cost one call per track.
- */
-async function spAlbumTracks(url, env, cors) {
-  const ids = (url.searchParams.get("ids") || "")
-    .split(",").map((s) => s.trim()).filter((s) => /^[A-Za-z0-9]{10,30}$/.test(s));
-  if (!ids.length) return json({ error: "ids required" }, 400, cors);
-  if (ids.length > SP_BATCH) {
-    return json({ error: `max ${SP_BATCH} ids` }, 400, cors);
-  }
-
-  /*
-   * Keyed on the SORTED id list, so batch composition does not fragment the cache.
-   *
-   * Caching per individual album would give a better hit rate in theory, but the
-   * ids here are generated from the artist catalogue, which is itself now cached
-   * and therefore returns albums in a stable order. So the same artist produces
-   * the same batches, and batch-level keys hit in practice while keeping this to
-   * one row and one round trip instead of twenty lookups and a re-assembly step.
-   */
-  const { body, shared } = await spShared(
-    env, `trk:${[...ids].sort().join(",")}`, async () => {
-  const data = await spFetch(
-    `/albums?ids=${ids.join(",")}&market=${SP_MARKET}`, env);
-
-  const out = [];
-  for (const al of data.albums || []) {
-    if (!al) continue;                       // Spotify returns null for bad ids
-    const group = spAlbumToGroup(al);
-    for (const t of al.tracks?.items || []) {
-      out.push({
-        title: t.name,
-        // Carried so the caller can tell "Drake feat. 21 Savage" apart from a
-        // Drake solo cut without a second lookup. D8 needs exactly this.
-        artists: (t.artists || []).map((a) => a.name),
-        disc: t.disc_number || 1,
-        n: t.track_number || null,
-        album: group,
-      });
-    }
-  }
-  // The album endpoint caps embedded tracklists at 50 per album. Beyond that a
-  // separate paginated call would be needed; flagged rather than silently
-  // truncating, because a missing track would read as "never released".
-  const partial = (data.albums || []).some(
-    (al) => al && Number(al.total_tracks || 0) > (al.tracks?.items?.length || 0));
-
-  return { tracks: out, partial };
   });
   return json({ ...body, shared }, 200,
               { ...cors, "Cache-Control": "public, max-age=86400" });

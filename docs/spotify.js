@@ -40,127 +40,24 @@
 
 import { norm, normTitle, baseTitle } from "./drift.js";
 
-/**
- * Build one artist's complete official title index.
+/*
+ * `fetchCatalogue`, `byArtist` and `estimate` lived here and are gone.
  *
- * Two phases because the Worker splits them: album list first, then tracklists
- * batched 20 at a time. Splitting keeps each Worker request inside the free
- * plan's 10ms CPU budget, which a prolific artist would otherwise blow on JSON
- * parsing alone.
+ * They batched Spotify lookups by ARTIST: one album list plus one tracklist
+ * call answered every track by that artist, instead of one search per track.
+ * The win was real and large, and it is unreachable: `GET /albums?ids=` returns
+ * 403 Forbidden to a client-credentials app, and it was the only source of
+ * tracklists. Re-verified against the live Worker before deleting this.
  *
- * `api` is an async (path) => json function supplied by the caller, so pacing,
- * retry and progress reporting all stay outside this module.
- */
-export async function fetchCatalogue(artist, api) {
-  const found = await api(
-    `/api/spotify/artist-albums?artist=${encodeURIComponent(artist)}`);
-
-  const empty = { artist, found: false, albums: [], titles: new Map(), releases: 0 };
-
-  // CRITICAL distinction. A null response means the CALL failed; a response with
-  // found:false means Spotify genuinely has no such artist. Both leave us with
-  // no catalogue, but only the second is an answer.
-  //
-  // Conflating them poisons the cache: a transient Spotify outage would write
-  // "this artist does not exist" to disk permanently, and every later scan would
-  // read that back and skip the lookup forever. So `error` is flagged, and the
-  // caller must not persist a result carrying it.
-  if (found == null) return { ...empty, error: true };
-  if (!found.found) return empty;
-
-  const ids = (found.albums || []).map((a) => a.id);
-
-  // Albums are stored ONCE in a flat list and referenced by index from the
-  // title map. The obvious alternative, copying the album object onto every
-  // track, costs about 20x more: a prolific artist has ~1,500 tracks and ~50
-  // releases, and this index is persisted to IndexedDB for every artist in the
-  // library. Inlining measured out near 150MB total, which competes with the
-  // scrobble data itself for the same quota and would fail a large scan.
-  const albums = [];
-  const seen = new Map();     // rg_id -> index into albums
-  const titles = new Map();   // match key -> [album index]
-  let partial = false;
-  let failed = 0;
-
-  /*
-   * Must match SP_BATCH in the Worker, which rejects anything larger.
-   *
-   * Back to 20, Spotify's documented maximum. It was 10 as a workaround for the
-   * `available_markets` CPU blowup, which was actually fixed by pinning a market
-   * on that call, so the halved batch was costing twice the requests for nothing.
-   */
-  const BATCH = 20;
-  for (let i = 0; i < ids.length; i += BATCH) {
-    const batch = ids.slice(i, i + BATCH);
-    const res = await api(`/api/spotify/album-tracks?ids=${batch.join(",")}`);
-
-    // A failed batch is missing evidence, not an empty catalogue. Counted so the
-    // caller can refuse to cache a half-built index: the artist resolved, so
-    // `found` is true, and without this flag a transient failure would be stored
-    // as "this artist has no tracks" and every future scan would trust it.
-    if (res == null) { failed++; continue; }
-    if (res.partial) partial = true;
-
-    for (const t of res?.tracks || []) {
-      const al = t.album;
-      if (!al?.rg_id) continue;
-      let idx = seen.get(al.rg_id);
-      if (idx === undefined) {
-        idx = albums.length;
-        // Only the fields the detectors read. url and total_tracks were used to
-        // classify the release inside the Worker and are dead weight here.
-        albums.push({
-          rg_id: al.rg_id, title: al.title, primary: al.primary,
-          secondary: al.secondary || [], first_release: al.first_release,
-          status: al.status, source: "spotify",
-        });
-        seen.set(al.rg_id, idx);
-      }
-      // Index under BOTH the literal title and the feature-stripped base
-      // title. A leak scrobbled as "Sicko Mode (feat. Drake)" must find the
-      // official "SICKO MODE", and D8's whole premise is that those two
-      // spellings coexist in the same library.
-      for (const k of keysFor(t.title)) {
-        const list = titles.get(k);
-        if (list) { if (!list.includes(idx)) list.push(idx); }
-        else titles.set(k, [idx]);
-      }
-    }
-  }
-
-  return {
-    artist,
-    found: true,
-    artist_name: found.artist_name,
-    albums,
-    titles,
-    releases: ids.length,
-    truncated: Boolean(found.truncated),
-    partial,
-    // Any failed batch makes this index incomplete and therefore uncacheable.
-    error: failed > 0,
-    failed_batches: failed,
-  };
-}
-
-/**
- * Match keys for a title, most precise first.
+ * It cannot be rebuilt a different way. `/artists/{id}/albums` works and gives
+ * names, types and track counts, but not tracklists, and the question these
+ * answered is "which album contains this track" -- the album name is the thing
+ * being looked for, so matching on it is circular.
  *
- * Diacritics are PRESERVED in the primary key. This is not pedantry: the
- * library genuinely contains "Back Home" and "Back Homë" as two different Yeat
- * tracks, and folding them together would produce a confidently wrong answer
- * about which one was released. The diacritic-folded key is offered as a
- * separate, clearly-marked fallback tier rather than mixed into the first.
- */
-/**
- * Edition qualifiers, for collapsing pressings of one album into one candidate.
- *
- * Only stripped when they appear as a trailing qualifier, in brackets or after a
- * dash. A bare word match would destroy real titles: Deluxe is a Chief Keef
- * mixtape, and there are albums literally called Remastered and Anniversary.
- * The list is deliberately conservative for the same reason. False merges here
- * would produce wrong consolidation advice, which is worse than a slightly
- * longer candidate list.
+ * What survives: `matchTrack`, which is a generic matcher over a catalogue
+ * index and is still used, because the MUSICBRAINZ browse DOES return
+ * tracklists via `inc=recordings`. And `fetchTrack`, the per-track search that
+ * replaced all of this.
  */
 const EDITION = new RegExp(
   "[\\s]*(?:[\\(\\[][^\\)\\]]*\\b(?:deluxe|expanded|extended|remaster(?:ed)?|" +
@@ -243,49 +140,6 @@ export function matchTrack(cat, track) {
   return { groups, source: "spotify", tier };
 }
 
-/**
- * Group a resolution plan by artist, busiest artist first.
- *
- * Ordering matters when a budget is capped: one catalogue fetch for an artist
- * with 300 era tracks buys 300 answers, so spending the early budget on the
- * biggest artists maximises coverage per call. This is the batching win, and it
- * is why the plan is reshaped from per-track to per-artist before any network
- * traffic happens.
- */
-export function byArtist(plan) {
-  const groups = new Map();
-  for (const job of plan) {
-    const k = norm(job.artist);
-    const cur = groups.get(k);
-    if (cur) { cur.jobs.push(job); cur.plays += job.plays || 0; }
-    else groups.set(k, { artist: job.artist, jobs: [job], plays: job.plays || 0 });
-  }
-  return [...groups.values()].sort((a, b) => b.plays - a.plays);
-}
-
-/**
- * Estimate the call count before spending anything.
- *
- * Shown in the dry run so the cost is visible up front rather than discovered
- * 40 minutes in. Per artist: one album-list call, plus one album-tracks call
- * per 20 releases. Twelve releases is the observed median once compilations and
- * singles are included.
- */
-export function estimate(artistGroups, { albumsPerArtist = 12 } = {}) {
-  const perArtist = 1 + Math.ceil(albumsPerArtist / 20);
-  const calls = artistGroups.length * perArtist;
-  return {
-    artists: artistGroups.length,
-    tracks: artistGroups.reduce((n, g) => n + g.jobs.length, 0),
-    calls,
-    // 3/s. Spotify publishes no number and measures over a rolling 30-second
-    // window; client credentials sits near 180/minute. 6/s produced constant
-    // 429s, and the retry stalls made it slower than pacing correctly.
-    seconds: Math.ceil(calls / 3),
-  };
-}
-
-/* ------------------------------------------------- per-track resolution ----- */
 /**
  * Which releases contain one track, asked of Spotify directly.
  *

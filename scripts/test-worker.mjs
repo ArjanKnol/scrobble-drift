@@ -537,16 +537,17 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
   const src = await readFile(
     new URL("../worker/src/index.js", import.meta.url), "utf8");
 
-  // ---- the batch size ---------------------------------------------------- //
-  ok(/const SP_BATCH = 20;/.test(src),
-     "SP_BATCH is back to Spotify's documented maximum of 20");
-  const tracksFn = src.slice(src.indexOf("async function spAlbumTracks"));
-  const tracksBody = tracksFn.slice(0, tracksFn.indexOf("\n}"));
-  ok(/market=\$\{SP_MARKET\}/.test(tracksBody),
-     "and the tracklist call still pins a market, which is what makes 20 safe");
+  /*
+   * SP_BATCH and the spAlbumTracks assertions went with the endpoint.
+   *
+   * `GET /albums?ids=` returns 403 Forbidden to a client-credentials app, so
+   * the tracklist call never worked and the batch size it governed had nothing
+   * to batch. Re-verified against live Spotify before removing it rather than
+   * taken on trust from the comment that recorded the original failure.
+   */
 
   // ---- every Spotify endpoint is cached ---------------------------------- //
-  for (const fn of ["spTrack", "spArtistAlbums", "spAlbumTracks", "spAlbum"]) {
+  for (const fn of ["spTrack", "spArtistAlbums", "spAlbum"]) {
     const at = src.indexOf(`async function ${fn}(`);
     ok(at > 0, `${fn} exists`);
     const body = src.slice(at, src.indexOf("\n}", at));
@@ -580,8 +581,10 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
      "Last.fm puts the feature in the title; the databases put it in the " +
      "credit. Without this field a decorated title can never be matched.");
   ok(/spNorm\(t\.name\) === wantTrack/.test(trackBody) &&
-     /spNorm\(a\.name\) === wantArtist/.test(trackBody),
-     "and requires an exact normalised match on BOTH track and artist");
+     /credited\[0\] === wantArtist/.test(trackBody),
+     "and requires an exact match on the track AND the primary artist credit",
+     "It used to accept any credited artist, so a Giggs album answered a " +
+     "French Montana query.");
   ok(!/limit=/.test(trackBody),
      "it sends no explicit limit, which Spotify refuses above 10");
   ok(/first_release \|\| "9999"/.test(trackBody),
@@ -845,6 +848,63 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
   ok(/t\.startsWith\(wantTrack \+ " "\) \|\| wantTrack\.startsWith\(t \+ " "\)/.test(src),
      "matched on a word boundary, so 'Took Away the Drum' never matches 'Drum'",
      "A bare startsWith would also match 'Drummer Boy'.");
+}
+
+/* ---- BOTH upstreams must require the primary credit --------------------- */
+{
+  /*
+   * `artist=French Montana track=Hold Up` returned `BIG BAD...`, a GIGGS album
+   * that French Montana features on, and D16 named it as the track's real home.
+   *
+   * Reported, fixed in the MusicBrainz handler, and reported AGAIN a day later
+   * because the Spotify handler was never touched. MusicBrainz correctly
+   * returned nothing while Spotify happily returned the wrong album, so the
+   * finding survived a fix that looked complete.
+   *
+   * Asserted as a PAIR for exactly that reason. Two code paths answer one
+   * question here, and this file has now been bitten three times by fixing one
+   * of them: artist verification, release dates, and now the guest credit.
+   */
+  const src = await readFile(
+    new URL("../worker/src/index.js", import.meta.url), "utf8");
+
+  ok(/names\[0\] === wantArtist/.test(src),
+     "MusicBrainz requires the primary credit");
+  ok(/credited\[0\] === wantArtist/.test(src),
+     "and so does Spotify",
+     "A featured credit means the release belongs to somebody else.");
+  ok(!/\(t\.artists \|\| \[\]\)\.some\(\(a\) => spNorm\(a\.name\) === wantArtist\)/.test(src),
+     "the permissive .some() check is gone from the Spotify path",
+     "That is what let a Giggs album answer a French Montana query.");
+
+  /*
+   * And the cached shape has to retire with it. The filter changes what the
+   * endpoint RETURNS, so rows written before it would keep serving the wrong
+   * album for the full TTL, with the bug fixed and the symptom unchanged.
+   */
+  ok(/env, `one\d+:/.test(src),
+     "the Spotify per-track cache key is versioned so the filter takes effect");
+}
+
+/* ---- the forbidden tracklist endpoint stays gone ----------------------- */
+{
+  /*
+   * `/api/spotify/album-tracks` returned 403 Forbidden on every call for its
+   * entire life, because `GET /albums?ids=` is not available to a
+   * client-credentials app. The batching design it existed to serve is
+   * unreachable by any route: `/artists/{id}/albums` works but carries no
+   * tracklists, and the question being asked is which album contains a track,
+   * so matching on the album name is circular.
+   *
+   * Asserted so it cannot be reintroduced by someone reading the old comments
+   * and assuming it was merely unfinished.
+   */
+  const src = await readFile(
+    new URL("../worker/src/index.js", import.meta.url), "utf8");
+  ok(!/async function spAlbumTracks/.test(src),
+     "the album-tracks handler is gone");
+  ok(!/"\/api\/spotify\/album-tracks"/.test(src),
+     "and so is its route");
 }
 
 console.log(`\n${pass} passed, ${fail} failed (including MusicBrainz cache block)\n`);
