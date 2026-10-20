@@ -144,6 +144,7 @@ import {
   analyse, partitionEra, d14eReleasedSince, d16StrandedSingles,
   hygieneScore, weakEraCandidates, officialKey, byImportance,
   resolveOne, isResolvable, discoveryOffers, baseTitle, affectsChart,
+  fixList, fixListText,
 } from "./drift.js";
 /*
  * Six imports left with the resolve phase: d0Resolve, d5Resolve, verifyEraNames,
@@ -2139,6 +2140,47 @@ function render() {
           tagging choice rather than a defect.</p>
       </div>`;
     })()}
+    ${/*
+       * The finishable list.
+       *
+       * A report of 895 findings is a to-do list nobody can complete: Last.fm
+       * has no bulk edit and no write API, so each one is a manual edit on
+       * their site. At thirty seconds each that is seven hours of clicking.
+       *
+       * Ranked by plays recovered, not by confidence, because that is the only
+       * ordering that answers "what should I do with the next twenty minutes".
+       * The full list stays below for anyone who wants it.
+       */""}
+    ${(() => {
+      const rows = fixList(d.issues, 20);
+      if (rows.length < 3) return "";
+      const total = rows.reduce((n, r) => n + r.recovers, 0);
+      return `<div class="panel" style="margin-bottom:14px">
+        <div class="sec-head" style="margin-top:0">
+          <strong>Start here</strong><span class="tag">${N(rows.length)}</span>
+          <span class="note">These recover <strong>${N(total)}</strong> plays
+            between them, most first. Each is a manual edit on Last.fm.</span>
+        </div>
+        ${rows.map(({ issue, recovers }) => {
+          const mem = [...(issue.members || [])].sort((a, b) => b.plays - a.plays);
+          const to = mem[0];
+          return `<div class="row">
+            <span>${esc(issue.artist || "")}${issue.track
+              ? ` &mdash; ${esc(issue.track)}` : ""}
+              <span class="note" style="margin:0;display:block">${
+                mem.slice(1).map((m) =>
+                  `<code>${esc(m.album)}</code> &rarr; <code>${esc(to.album)}</code>`
+                ).join(" &middot; ")}</span></span>
+            <span class="v">+${N(recovers)}</span></div>`;
+        }).join("")}
+        <div style="margin-top:11px">
+          <button class="check" type="button" id="copy-fixes">Copy as a worklist</button>
+          <span class="note" style="margin:0 0 0 9px;color:var(--dim)">Plain text
+            to work through by hand. Last.fm has no bulk edit and no write API,
+            so there is nothing to import this into.</span>
+        </div>
+      </div>`;
+    })()}
     <div class="grid g2">
       <div class="panel">
         <div class="score" style="color:${col(h.score)}"><span id="score-n"
@@ -2769,6 +2811,33 @@ function issues() {
   $("out").onclick = async (ev) => {
     const btn = ev.target.closest("button.check, button.check-all");
     if (!btn) return;
+
+    /*
+     * Handled before the lookup branches, because this button carries .check for
+     * its styling and would otherwise be treated as a finding to resolve.
+     *
+     * Clipboard access can be refused (permissions, insecure context, a browser
+     * that simply says no), and a copy button that silently does nothing is the
+     * same complaint this project has already had twice. So the failure path
+     * puts the text on screen for manual selection rather than pretending.
+     */
+    if (btn.id === "copy-fixes") {
+      const text = fixListText(report.issues, report.user, 20);
+      try {
+        await navigator.clipboard.writeText(text);
+        btn.textContent = "Copied";
+        setTimeout(() => { btn.textContent = "Copy as a worklist"; }, 2000);
+      } catch {
+        const box = document.createElement("textarea");
+        box.value = text;
+        box.rows = 14;
+        box.style.cssText = "width:100%;margin-top:9px";
+        btn.closest(".panel").appendChild(box);
+        box.select();
+        btn.textContent = "Select and copy";
+      }
+      return;
+    }
 
     if (btn.classList.contains("discover")) {
       const id = btn.closest("[data-offer]")?.dataset.offer;

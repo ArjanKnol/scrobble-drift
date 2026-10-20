@@ -3200,6 +3200,81 @@ export function chartWrongness(scrobbles, issues) {
   };
 }
 
+/**
+ * How many plays would move if you fixed this one finding?
+ *
+ * The same arithmetic chartWrongness does in aggregate, exposed per finding so
+ * the fix list can rank by it. Shared rather than reimplemented: a list that
+ * ranked by one definition while the headline counted by another would be two
+ * numbers that quietly disagree, and the headline's whole claim is that it can
+ * be checked.
+ */
+export function recoverablePlays(issue) {
+  if (!affectsChart(issue) || !CHART_DETECTORS.has(issue.detector)) return 0;
+  const mem = (issue.members || [])
+    .filter((m) => m?.album && Number.isFinite(m.plays));
+  if (mem.length < 2) return 0;
+  const sorted = [...mem].sort((a, b) => b.plays - a.plays);
+  return sorted.slice(1).reduce((n, m) => n + m.plays, 0);
+}
+
+/**
+ * The fixes worth doing first, ranked by what they actually recover.
+ *
+ * A report of 895 findings is a to-do list nobody can finish: Last.fm has no
+ * bulk edit and no write API, so every one is a manual edit on their website.
+ * At thirty seconds each that is seven hours of clicking, and the honest
+ * response is not to hide the rest but to say which ones pay.
+ *
+ * Ranked by plays recovered rather than by confidence or severity, because that
+ * is the only ordering that answers "what do I do with my next twenty minutes".
+ * A 97%-confident finding worth two plays belongs below a 70%-confident one
+ * worth four hundred.
+ */
+export function fixList(issues, limit = 20) {
+  return (issues || [])
+    .map((i) => ({ issue: i, recovers: recoverablePlays(i) }))
+    .filter((x) => x.recovers > 0)
+    .sort((a, b) => b.recovers - a.recovers)
+    .slice(0, limit);
+}
+
+/**
+ * The fix list as plain text, for working through by hand.
+ *
+ * Deliberately NOT an import file, and labelled as such in the header. Last.fm
+ * offers no bulk edit and no write API, so there is nothing this could be fed
+ * to. Producing something that looks like a machine format would promise a
+ * workflow that does not exist, which is a worse failure than producing nothing.
+ */
+export function fixListText(issues, user, limit = 20) {
+  const rows = fixList(issues, limit);
+  if (!rows.length) return "";
+  const total = rows.reduce((n, r) => n + r.recovers, 0);
+
+  const lines = [
+    `Scrobble Drift: ${rows.length} fixes for ${user || "this library"}`,
+    `Recovers ${total} plays in total.`,
+    "",
+    "Work through these by hand on last.fm. There is no bulk edit and no write",
+    "API, so this is a worklist, not something you can import anywhere.",
+    "",
+  ];
+
+  for (const [n, { issue, recovers }] of rows.entries()) {
+    const mem = [...(issue.members || [])].sort((a, b) => b.plays - a.plays);
+    const to = mem[0];
+    lines.push(`${n + 1}. ${issue.artist || ""} - ${issue.track || issue.album || ""}`
+      .replace(/\s+-\s+$/, ""));
+    lines.push(`   recovers ${recovers} plays`);
+    for (const m of mem.slice(1)) {
+      lines.push(`   change "${m.album}" (${m.plays}) -> "${to.album}"`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
 export function hygieneScore(totalPlays, issues, albumStrings = 0, weights = null) {
   const subscores = {};
   const counts = {};

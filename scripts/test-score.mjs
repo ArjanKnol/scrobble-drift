@@ -9,7 +9,7 @@
  * Run: node scripts/test-score.mjs
  */
 
-import { chartWrongness, hygieneScore, SCORED_DETECTORS, UNSCORED_BY_DESIGN, analyse }
+import { chartWrongness, fixList, fixListText, recoverablePlays, hygieneScore, SCORED_DETECTORS, UNSCORED_BY_DESIGN, analyse }
   from "../docs/drift.js";
 
 let pass = 0, fail = 0;
@@ -491,6 +491,56 @@ console.log("\nbounds and degenerate input");
     ok(Number.isFinite(out.share), "an empty or null input still returns a number");
   }
   eq(chartWrongness([], []).share, 0, "and no plays is zero, not NaN");
+}
+
+/* ---- the finishable list, and its honest export ------------------------ */
+{
+  /*
+   * A report of 895 findings is a to-do list nobody can complete. Last.fm has no
+   * bulk edit and no write API, so each finding is a manual edit on their site:
+   * at thirty seconds each, seven hours of clicking.
+   *
+   * Ranked by plays RECOVERED rather than by confidence or severity, because
+   * that is the only ordering that answers "what should I do with the next
+   * twenty minutes". A 97%-confident finding worth two plays belongs below a
+   * 70%-confident one worth four hundred.
+   */
+  const mk = (artist, track, a, pa, b, pb) => ({
+    detector: "D4", artist, track, confidence: 0.9,
+    members: [{ album: a, plays: pa }, { album: b, plays: pb }],
+  });
+  const issues = [
+    mk("Travis Scott", "Antidote", "Rodeo", 400, "Rodeo (Deluxe)", 120),
+    mk("Drake", "Forever", "Thank Me Later", 8, "More Life", 2),
+    mk("Ye", "BULLY", "BULLY", 50, "BULLY - DELUXE", 40),
+    { detector: "D15", chart_already_correct: true, artist: "V", album: "X",
+      members: [{ album: "X", plays: 900 }, { album: "X", plays: 800 }] },
+  ];
+
+  eq(recoverablePlays(issues[0]), 120, "everything outside the dominant spelling");
+  eq(recoverablePlays(issues[3]), 0,
+     "a finding our chart already counts correctly recovers nothing");
+
+  const ranked = fixList(issues, 20);
+  eq(ranked.length, 3, "only findings that move plays make the list");
+  eq(ranked.map((r) => r.recovers).join(","), "120,40,2",
+     "ordered by plays recovered, biggest first");
+  ok(ranked[0].issue.track === "Antidote",
+     "so the 400-play album outranks the 8-play one regardless of confidence");
+  eq(fixList(issues, 2).length, 2, "and the limit is honoured");
+
+  /*
+   * The export is a WORKLIST, not an import file, and says so. There is nothing
+   * to feed it to, so producing something that looked like a machine format
+   * would promise a workflow that does not exist.
+   */
+  const txt = fixListText(issues, "ArjanKnol", 2);
+  ok(/no bulk edit and no write/.test(txt),
+     "the export states plainly that nothing can import it");
+  ok(/Recovers 160 plays in total/.test(txt), "and totals what it recovers");
+  ok(/change "Rodeo \(Deluxe\)" \(120\) -> "Rodeo"/.test(txt),
+     "with the exact before and after strings, which is the whole point");
+  eq(fixListText([], "x"), "", "no fixes means no file, not an empty template");
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
