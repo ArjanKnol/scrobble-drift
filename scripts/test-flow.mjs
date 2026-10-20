@@ -38,6 +38,7 @@ const lf = (s) => s.replace(/\r\n/g, "\n");
 const html = lf(readFileSync(join(root, "docs/index.html"), "utf8"));
 // Some invariants span both files: the page delegates a ruling to drift.js, and
 // asserting only on the call site would pass with the callee deleted.
+const configCode = readFileSync(join(root, "docs/config.js"), "utf8");
 const driftCode = readFileSync(join(root, "docs/drift.js"), "utf8")
   .replace(/\/\*[\s\S]*?\*\//g, "")
   .replace(/^\s*\/\/.*$/gm, "");
@@ -605,4 +606,40 @@ if (fails.length) {
   for (const f of fails) console.log("   x " + f);
   process.exit(1);
 }
+/* ---- every API call must carry the version ----------------------------- */
+{
+  /*
+   * Three rounds of "fixed, deployed, still broken" came from this.
+   *
+   * Every data endpoint answers with `Cache-Control: public, max-age=86400`, so
+   * Cloudflare's edge caches the whole HTTP RESPONSE under its URL for a day.
+   * Deploying new Worker code does not touch that: the URL is unchanged, so the
+   * edge keeps serving yesterday's body. Versioning the D1 cache key does not
+   * help either, because D1 sits behind the edge and a cached response never
+   * reaches the Worker at all.
+   *
+   * The only lever the client has is the URL. Caught when
+   * `artist=French Montana track=Hold Up` kept returning a Giggs album after
+   * the filter excluding it was verified working on a different query: the fix
+   * was correct, deployed, and being served around.
+   *
+   * So every fetch at the Worker must carry `v`. One that does not is a request
+   * that can be answered from a stale edge entry for 24 hours after a fix.
+   */
+  const calls = code.match(/fetch\(`\$\{base\}[^`]*`/g) || [];
+  ok(calls.length >= 5, `found ${calls.length} direct Worker fetches to check`);
+  const unversioned = calls.filter((c) => !/v=\$\{API_V\}/.test(c));
+  ok(unversioned.length === 0,
+     "every direct Worker fetch carries the API version",
+     unversioned.join("\n      "));
+
+  // The helper is the preferred route, and it sets the version itself.
+  ok(/export const apiUrl/.test(configCode),
+     "config.js exposes apiUrl, which appends the version");
+  ok(/qs\.set\("v", API_V\)/.test(configCode),
+     "and apiUrl sets it rather than trusting each call site to remember");
+  ok(/export const API_V = "\d+"/.test(configCode),
+     "with the version itself a named constant, so bumping it is one edit");
+}
+
 console.log("  The scan flow cannot claim to be finished when it is not.\n");

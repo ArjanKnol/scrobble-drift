@@ -28,6 +28,33 @@ export const isConfigured = () =>
  *
  *     localStorage.setItem("drift_api", "http://127.0.0.1:8787")
  */
+/**
+ * Bump this whenever a Worker change alters what an endpoint RETURNS.
+ *
+ * The problem it solves, which cost three rounds of "fixed, deployed, still
+ * broken". Every data endpoint answers with `Cache-Control: public,
+ * max-age=86400`, so Cloudflare's edge caches the whole HTTP response under its
+ * URL for a day. Deploying new Worker code does not touch that: the URL is
+ * unchanged, so the edge keeps serving yesterday's body.
+ *
+ * Versioning the D1 cache key is not enough, because D1 sits BEHIND the edge and
+ * a cached response never reaches the Worker at all. The only lever the client
+ * has is the URL, so every API request carries this and a bump makes every URL
+ * new.
+ *
+ * Caught when `artist=French Montana track=Hold Up` kept returning a Giggs album
+ * after the filter that excludes it was verified live on a different query. The
+ * fix was correct and deployed; the reader was being served a day-old answer.
+ */
+export const API_V = "24";
+
+/** Append the API version, preserving any query string already present. */
+export const apiUrl = (base, path, params) => {
+  const qs = new URLSearchParams(params || {});
+  qs.set("v", API_V);
+  return `${base}${path}?${qs}`;
+};
+
 export const apiBase = () => {
   try {
     return localStorage.getItem("drift_api") || API_BASE;

@@ -156,7 +156,7 @@ import {
  * logic that already existed, and the two drifted apart at least twice.
  */
 
-import { apiBase, isConfigured, activeLinks } from "./config.js";
+import { apiBase, apiUrl, API_V, isConfigured, activeLinks } from "./config.js";
 import * as store from "./store.js";
 /*
  * `matchTrack` stays; `fetchCatalogue`, `byArtist` and `estimate` go.
@@ -865,7 +865,7 @@ async function verifyOfficialAlbums(scrobbles, apiKey) {
 
     let exists = null;
     if (spotifyOn) {
-      const sp = await fetch(`${base}/api/spotify/album?` + new URLSearchParams(
+      const sp = await fetch(apiUrl(base, "/api/spotify/album",
         { artist: c.artist, title: c.album })).then((r) => r.ok ? r.json() : null)
         .catch(() => null);
       if (sp) exists = Boolean(sp.exists);
@@ -874,7 +874,7 @@ async function verifyOfficialAlbums(scrobbles, apiKey) {
     // not proof of absence, and MusicBrainz catalogues far more.
     if (exists !== true) {
       await sleep(1000);              // MusicBrainz: one request per second
-      const mb = await fetch(`${base}/api/mb/release-group?` + new URLSearchParams(
+      const mb = await fetch(apiUrl(base, "/api/mb/release-group",
         { artist: c.artist, title: c.album })).then((r) => r.ok ? r.json() : null)
         .catch(() => null);
       if (mb) exists = Boolean(mb.exists) || exists === true;
@@ -909,7 +909,7 @@ async function fetchTopAlbums(user, apiKey, { maxPages = 6 } = {}) {
     });
     if (apiKey) qs.set("key", apiKey);
 
-    const data = await fetch(`${base}/api/lastfm?${qs}`)
+    const data = await fetch(`${base}/api/lastfm?${qs}&v=${API_V}`)
       .then((r) => (r.ok ? r.json() : null)).catch(() => null);
     let list = data?.topalbums?.album;
     if (!list) break;
@@ -1029,7 +1029,7 @@ async function fetchAll(user, cap, apiKey) {
 
     let res;
     try {
-      res = await fetch(`${base}/api/scrobbles?${qs}`);
+      res = await fetch(`${base}/api/scrobbles?${qs}&v=${API_V}`);
     } catch {
       // A thrown fetch means no readable response. Usually the Worker itself
       // failed: an exception or a resource-limit error page, neither of which
@@ -1354,7 +1354,7 @@ async function runDiscovery(offer) {
       let retryIn = 0;
       await mbPace.slot();
       try {
-        const res = await fetch(`${base}${path}?` + new URLSearchParams(params));
+        const res = await fetch(apiUrl(base, path, params));
         if (res.status === 429) {
           retryIn = Number(res.headers.get("Retry-After") || 30);
           // Push the shared timeline out, not just this caller. Otherwise the
@@ -1437,7 +1437,7 @@ async function runDiscovery(offer) {
       let retryIn = 0;
       await spPace.slot();
       try {
-        const res = await fetch(`${base}${path}`);
+        const res = await fetch(`${base}${path}${path.includes("?") ? "&" : "?"}v=${API_V}`);
         if (res.status === 429) {
           const b = await res.json().catch(() => ({}));
           retryIn = Number(res.headers.get("Retry-After") || b.retry_after || 5);
@@ -1485,7 +1485,7 @@ async function runDiscovery(offer) {
       let retryIn = 0;
       await mbPace.slot();
       try {
-        const res = await fetch(`${base}${path}`);
+        const res = await fetch(`${base}${path}${path.includes("?") ? "&" : "?"}v=${API_V}`);
         if (res.status === 429) {
           const b = await res.json().catch(() => ({}));
           retryIn = Number(res.headers.get("Retry-After") || b.retry_after || 5);
@@ -1928,7 +1928,7 @@ async function resolveIssue(idx) {
     const qs = new URLSearchParams(params);
     await one.slot();
     try {
-      const res = await fetch(`${base}${path}?${qs}`);
+      const res = await fetch(`${base}${path}?${qs}&v=${API_V}`);
       if (!res.ok) return null;
       return await res.json();
     } catch { return null; } finally { one.release(); }

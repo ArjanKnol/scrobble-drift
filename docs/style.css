@@ -537,9 +537,13 @@ button.check:disabled, button.check-all:disabled {
 details.choices{margin-top:4px}
 details.choices > summary{list-style:none;cursor:pointer}
 details.choices > summary::-webkit-details-marker{display:none}
+/* Literal ▸ and ▾ rather than CSS escapes. `\25B8` written through a
+   tool that doubles backslashes becomes `\\25B8`, which CSS reads as an
+   escaped backslash followed by the text 25B8, and the summary rendered
+   "TAGGING CHOICES \25B8". The file is UTF-8; the character needs no escape. */
 details.choices > summary .sec-head strong::after{
-  content:" \\25B8";color:var(--dim);font-size:11px}
-details.choices[open] > summary .sec-head strong::after{content:" \\25BE"}
+  content:" ▸";color:var(--dim);font-size:11px}
+details.choices[open] > summary .sec-head strong::after{content:" ▾"}
 details.choices > summary:hover .sec-head strong{color:var(--accent)}
 /* Dimmed while closed is wrong: it is the OPEN cards that should read as
    secondary, because nothing in them changes a number. */
