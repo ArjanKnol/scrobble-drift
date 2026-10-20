@@ -141,7 +141,7 @@
 
 <script type="module">
 import {
-  analyse, partitionEra, d14eReleasedSince, d16StrandedSingles,
+  analyse, partitionEra, d14eReleasedSince, d16StrandedSingles, d16Verify,
   hygieneScore, weakEraCandidates, officialKey, byImportance,
   resolveOne, isResolvable, discoveryOffers, baseTitle, affectsChart,
   fixList, fixListCsv, blankAlbumSummary, blankAlbumCsv, NO_ALBUM, consolidationTarget,
@@ -1300,6 +1300,8 @@ async function runDiscovery(offer) {
   if (!plan.length) return;
 
   const recCache = new Map();
+  // MusicBrainz verdicts for the albums D16 is about to name. See d16Verify.
+  const mbVerdicts = new Map();
   // `rgCache` went with the era-NAME phase. It held release-group answers for
   // the sequel-versus-typo ruling, which resolveOne now does per finding.
   const key = (a, t) => `${a}␟${t}`.toLowerCase();
@@ -1797,6 +1799,30 @@ async function runDiscovery(offer) {
     found = d14eReleasedSince(era, lookup);
   } else if (offer.id === "stranded_singles") {
     found = d16StrandedSingles(offer.jobs, lookup, { owned: offer.owned });
+    /*
+     * Ask MusicBrainz about the handful of albums D16 is about to NAME.
+     *
+     * Spotify answers first and carries no editorial metadata: `album_type` is
+     * album/single/compilation and nothing else, so a bootleg compilation is
+     * indistinguishable from a real record there. MusicBrainz classifies them
+     * correctly and was simply never consulted, because Spotify had already
+     * replied.
+     *
+     * Only the findings, never the candidates. A large library checks hundreds
+     * of tracks here and produces a handful of findings; verifying the handful
+     * costs a handful of calls, while verifying everything would double the
+     * cost of the offer to re-confirm silence.
+     */
+    for (const f of found) {
+      const probe = f.members?.find((m) => m?.track) || f.members?.[0];
+      if (!probe?.track) continue;
+      const mb = await paced("/api/mb/recording",
+                             { artist: f.artist || probe.artist, track: probe.track },
+                             2, "rec");
+      if (mb) mbVerdicts.set(`${f.artist || probe.artist}\u241f${probe.track}`, mb);
+    }
+    found = d16Verify(found, (artist, track) =>
+      mbVerdicts.get(`${artist}\u241f${track}`) || null);
   }
 
   report.issues = [...report.issues, ...found].sort(byImportance);

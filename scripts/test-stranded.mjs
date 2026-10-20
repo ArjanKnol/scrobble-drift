@@ -15,7 +15,8 @@
  *
  *     node scripts/test-stranded.mjs
  */
-import { singleShaped, d16Candidates, d16StrandedSingles } from "../docs/drift.js";
+import { singleShaped, d16Candidates, d16StrandedSingles, d16Verify }
+  from "../docs/drift.js";
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log(`  ok   ${m}`); }
@@ -336,6 +337,60 @@ console.log("\ncombining the two sources");
     eq(d16StrandedSingles(cand, () => g).length, 0,
        `a ${sec[0]} release is not a studio album`);
   }
+}
+
+/* ---- Spotify cannot tell a bootleg from an album; MusicBrainz can ------- */
+{
+  /*
+   * Two reported in one sitting, both naming a fake record as a track's home:
+   *
+   *   Quavo - Trapstar     -> 'ATL' (2017)
+   *   SoFaygo - Lil Mama   -> 'PenSoFaygo'
+   *
+   * Spotify carries no editorial metadata about what a release IS. `album_type`
+   * is album/single/compilation and nothing more, so spAlbumToGroup has to
+   * hardcode `status: "Official"` and can only ever report `secondary: []`.
+   * Bootleg compilations are uploaded to streaming constantly, and from there
+   * they are indistinguishable from real albums.
+   *
+   * MusicBrainz already classifies ATL as a Compilation and isStudioAlbum
+   * already rejects it. The failure was purely one of sequencing: Spotify
+   * answered first, so MusicBrainz was never asked.
+   *
+   * The payload below is verbatim from the live Worker.
+   */
+  const mbATL = { groups: [
+    { rg_id: "21e0235b", title: "ATL", primary: "Album",
+      secondary: ["Compilation"], first_release: "2016-12-27", status: "Official" },
+    { rg_id: "d573a625", title: "Glocks & Kilos 25", primary: "Album",
+      secondary: [], first_release: null, status: "Official" },
+  ]};
+  const finding = { detector: "D16", artist: "Quavo", album: "ATL",
+                    members: [{ artist: "Quavo", track: "Trapstar", plays: 1 }] };
+
+  eq(d16Verify([finding], () => mbATL).length, 0,
+     "a release MusicBrainz calls a Compilation is not a track's home");
+
+  eq(d16Verify([finding], () => ({ groups: [
+       { title: "ATL", primary: "Album", secondary: [],
+         first_release: "2017-06-23", status: "Official" }] })).length, 1,
+     "but a genuine studio album survives verification");
+
+  /*
+   * Three different ways of having no answer, all of which must LEAVE THE
+   * FINDING ALONE. MusicBrainz is an editorial database and an incomplete one,
+   * so its silence is not evidence against a release existing. This is the
+   * mistake this codebase has made more than any other.
+   */
+  eq(d16Verify([finding], () => ({ groups: [] })).length, 1,
+     "MusicBrainz not knowing the album is not evidence against it");
+  eq(d16Verify([finding], () => null).length, 1,
+     "nor is a failed lookup");
+  eq(d16Verify([finding], undefined).length, 1,
+     "nor is having no verifier at all");
+
+  eq(d16Verify([{ detector: "D4", album: "X" }], () => mbATL).length, 1,
+     "and findings from other detectors are not touched");
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

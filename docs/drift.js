@@ -4502,6 +4502,71 @@ export function d16Candidates(rest, { minPlays = 1 } = {}) {
  * `owned` is the set of normalised album strings the library already has plays
  * of, which is the difference between a merge and an invention.
  */
+/**
+ * Is this release something a track can sensibly be said to "live on"?
+ *
+ * Shared so the Spotify and MusicBrainz paths cannot disagree about it, which
+ * is precisely how the bootlegs got through.
+ */
+function isStudioAlbum(g) {
+  if (!g || g.primary !== "Album") return false;
+  const sec = g.secondary || [];
+  if (sec.includes("Compilation")) return false;
+  if (sec.some((t) => /bootleg|demo|mixtape|street/i.test(t))) return false;
+  if (g.status && g.status !== "Official") return false;
+  return true;
+}
+
+/**
+ * Drop D16 findings whose target MusicBrainz says is not a studio album.
+ *
+ * Spotify carries no editorial metadata about what a release IS. `album_type`
+ * is one of album/single/compilation and nothing more, so `spAlbumToGroup` has
+ * to hardcode `status: "Official"` and can only ever report `secondary: []`.
+ * Bootleg compilations are uploaded to streaming constantly, especially in rap,
+ * and they look exactly like albums from there.
+ *
+ * Two reported in one sitting:
+ *
+ *   Quavo - Trapstar      -> 'ATL' (2017), which MusicBrainz marks Compilation
+ *   SoFaygo - Lil Mama    -> 'PenSoFaygo', a fake album
+ *
+ * MusicBrainz already classifies these correctly and `isStudioAlbum` already
+ * rejects them. The problem is purely that Spotify answered first and
+ * MusicBrainz was never asked, so its verdict never arrived.
+ *
+ * Run only over findings that already exist, not over every candidate. D16 on a
+ * large library checks hundreds of tracks and produces a handful of findings;
+ * verifying the handful costs a handful of calls, and verifying everything
+ * would double the cost of the whole offer to re-confirm silence.
+ *
+ * `verify(artist, track)` returns the MusicBrainz answer or null. Null leaves
+ * the finding alone: an unreachable database is not evidence against it.
+ */
+export function d16Verify(issues, verify) {
+  if (typeof verify !== "function") return issues || [];
+  const out = [];
+
+  for (const issue of issues || []) {
+    if (issue?.detector !== "D16" || !issue.album) { out.push(issue); continue; }
+
+    const probe = issue.members?.find((m) => m?.track) || issue.members?.[0];
+    const answer = probe ? verify(issue.artist || probe.artist, probe.track) : null;
+    if (!answer) { out.push(issue); continue; }
+
+    const want = norm(issue.album);
+    const seen = (answer.groups || []).filter((g) => norm(g.title) === want);
+    // MusicBrainz has never heard of this album under this artist. Not evidence
+    // either way: it is an editorial database and it is incomplete.
+    if (!seen.length) { out.push(issue); continue; }
+
+    // It knows the release and says it is not a studio album. That is a verdict,
+    // and it outranks Spotify's silence.
+    if (seen.some(isStudioAlbum)) out.push(issue);
+  }
+  return out;
+}
+
 export function d16StrandedSingles(
   candidates, lookup, { owned = new Set(), lastfm = null } = {},
 ) {
@@ -4533,14 +4598,9 @@ export function d16StrandedSingles(
      * A missing status is allowed through: Spotify groups carry no MusicBrainz
      * status and everything Spotify lists is a commercial release.
      */
-    const albums = (groups || []).filter((g) => {
-      if (g.primary !== "Album") return false;
-      const sec = g.secondary || [];
-      if (sec.includes("Compilation")) return false;
-      if (sec.some((t) => /bootleg|demo|mixtape|street/i.test(t))) return false;
-      if (g.status && g.status !== "Official") return false;
-      return true;
-    });
+    // The same predicate the verification pass uses. Two copies of "what counts
+    // as a studio album" is how the bootlegs got through in the first place.
+    const albums = (groups || []).filter(isStudioAlbum);
     const curated = albums[0]?.title || "";
 
     // Last.fm's own idea of the canonical album, if we asked and it knew.
