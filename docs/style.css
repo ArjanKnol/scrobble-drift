@@ -132,9 +132,23 @@ button.ghost:hover{background:transparent;color:var(--ink);
 
 /* ---- Last.fm attribution ------------------------------------------------
    The API terms ask for attribution and a link back, so this is a compliance
-   item as much as a design one. Rendered as type rather than a copy of their
-   logo: reproducing a trademark imprecisely is worse than not using it, and a
-   hotlinked hashed asset from their CDN breaks the moment they redeploy. */
+   item as much as a design one. Rendered as type, not as their logo.
+
+   Three reasons, in order of weight:
+
+   1. Clause 7.1 makes any use of Last.fm's marks "subject to the prior written
+      approval of Last.fm in each case", under their Brand Guidelines. No such
+      approval has been given, so the safe rendering is plain type.
+   2. Clause 2.7 asks for a button from last.fm/resources. That page is empty
+      as of October 2026, so there is no official asset to use. Substituting
+      another file of theirs is not the same thing as complying.
+   3. The file previously used here was lastfm_logo_facebook.<hash>.png, their
+      1200x630 Open Graph image, hotlinked from their CDN. It was never an
+      attribution asset, and the fingerprint in the name means the URL dies
+      whenever they redeploy.
+
+   If Last.fm supply a button and approve its placement, that is the moment to
+   put an image back, self-hosted in docs/. */
 .attrib{border-top:1px solid var(--line);margin-top:56px;padding:22px 0 8px;
   display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;
   font-size:12.5px;color:var(--dim)}
@@ -143,21 +157,6 @@ button.ghost:hover{background:transparent;color:var(--ink);
   letter-spacing:-.02em;color:var(--ink);font-size:14px;line-height:1}
 .lfm:hover{color:var(--ink);opacity:.85}
 
-/* The official asset is the 1200x630 social share image, so the red wordmark
-   sits inside dark padding. Shown whole rather than cropped: a crop needs
-   hard-coded pixel offsets into someone else's file, which silently breaks if
-   they ever re-export it. The padding is near-black and blends into --bg, so
-   there is nothing to gain from the fragile version. */
-.lfm-logo{display:block;width:96px;height:auto;line-height:0}
-.lfm-logo img{display:block;width:100%;height:auto;border-radius:2px}
-
-/* Shown only if the hotlinked asset 404s. Last.fm fingerprints static files
-   (lastfm_logo_facebook.15d8133be114.png), so that URL dies whenever they
-   redeploy. Self-hosting the file in docs/ removes this failure mode. */
-.lfm-fallback{display:none;align-items:center;gap:7px}
-.lfm-fallback .mark{display:inline-flex;align-items:center;justify-content:center;
-  width:22px;height:22px;border-radius:3px;background:var(--accent);
-  color:#fff;font-size:10px;font-weight:800;letter-spacing:-.04em}
 .attrib .sep{color:var(--line)}
 
 /* ------------------------------------------------------------------ tooltips */
