@@ -38,7 +38,8 @@ Python copy before it.
 | **D14c** | One track title filed under several eras (informational) |
 | **D14e** | Unreleased material that now has an official release (see caveat below) |
 | **D14f** | A whole artist's unreleased output in one undifferentiated bucket (informational, unscored) |
-| **D15** | One album split across two **album artists** (`Cruel Winter` by Kanye West and by Various Artists) |
+| **D15** | One album split across two or more **album artists** (`Cruel Winter` by Kanye West and by Various Artists). Reported once per album, with every credit listed, not once per pair. |
+| **D16** | A track filed only under a single or EP that may since have appeared on an album. Always `review` and a style choice, surfaced as a discovery offer rather than a finding. |
 | **D1** | Artist name variants |
 | **D5 / D6 / D11 / D12** | Missing albums, duplicate scrobbles, Various Artists, impossible timestamps |
 
@@ -212,8 +213,15 @@ The scan used to resolve every finding up front. Measured on a 2,000-scrobble
 library that was **312 lookups and about twenty minutes**, spent attaching detail
 to findings nobody had opened. Attention is demand-driven, so resolution is too.
 
-A scan is now your scrobbles plus local analysis. No MusicBrainz, no Spotify, no
-waiting. Every outside answer is offered inside the report, priced, and spent only
+A scan is now your scrobbles plus local analysis, with one exception: a handful
+of ambiguous album names are checked against a release database before analysis
+runs. `The Leaks` is both a Lil Baby record and a common label for leaked tracks,
+and the answer decides which partition the album lands in, so it cannot wait for
+a button. Everything else is on demand.
+
+This section used to say "No MusicBrainz, no Spotify" flatly, which was false,
+and the summary panel on the site said the same until it was corrected to report
+the real count. Every outside answer is offered inside the report, priced, and spent only
 when asked for.
 
 The split that makes this safe:
@@ -365,7 +373,11 @@ The denominator has a floor of 80 album strings. Without it, a small library
 bottoms out a whole bucket on a single finding, which is noise rather than
 information.
 
-`12` (the penalty a bucket absorbs per album string before hitting zero) and the
+`HALF_AT`, set to 6% of the album-string count, is the alarmism dial: it is the
+penalty that scores 50, roughly one finding per 17 album strings. The curve is
+hyperbolic rather than linear and is floored at 1, so a bucket never actually
+reaches zero and cannot zero the geometric mean. The README previously described
+a linear `12`-point form that no longer exists. That and the
 class weights are judgement calls about how alarmist to be, not facts. They are
 the numbers to change if the score ever feels wrong.
 
@@ -459,13 +471,19 @@ identical findings.
 
 ## Hosting
 
-Live at **<https://arjanknol.github.io/scrobble-drift/>** once Pages is enabled.
+Live at **<https://scrobble-drift.pages.dev/>**.
+
+The GitHub Pages URL this used to name is not where it runs. The site moved to
+Cloudflare Pages and the old address was left here, saying "once Pages is
+enabled" about a site that had been live for weeks. Both origins are still in the
+Worker's CORS allowlist so the old link keeps working, which is exactly why
+nobody noticed.
 
 Two pieces, split by necessity rather than preference:
 
 | Piece | Where | Why there |
 |---|---|---|
-| Frontend + detectors | **GitHub Pages** (free) | Static files. `docs/drift.js` runs the whole analysis in the visitor's browser. |
+| Frontend + detectors | **Cloudflare Pages** (free) | Static files from `docs/`. `docs/drift.js` runs the whole analysis in the visitor's browser. |
 | API proxy | **Cloudflare Worker** (free) | Last.fm sends no `Access-Control-Allow-Origin` header, so a browser cannot call it. And the API key must never reach the client. |
 
 It cannot be GitHub-only. Not a limitation of Pages, a property of Last.fm: no
@@ -474,7 +492,14 @@ in between, and the Worker free tier does it at no cost.
 
 **Nothing is stored server-side.** The Worker proxies and forgets: it never
 writes a scrobble anywhere, and analysis happens entirely in the visitor's
-browser. There is no database to breach and no retention policy to write.
+browser. There is no database of listening history to breach and no retention
+policy to write for it.
+
+One correction, because this used to stop at "no database to breach" and that is
+no longer true: a D1 database (`MB_CACHE`) now caches MusicBrainz and Spotify
+answers, keyed by artist and title. It holds public release data only, with no
+scrobbles and no user identifiers, so the privacy claim stands. The absolute
+version of it does not.
 
 **Some things are stored client-side**, in the visitor's own browser via
 IndexedDB, and the UI says so plainly rather than claiming otherwise:
@@ -498,7 +523,17 @@ history is closer to 100MB. Every storage call is best-effort, so a quota
 failure or private-browsing mode degrades to an in-memory scan rather than
 breaking it.
 
-### Enabling Pages
+### Publishing the frontend
+
+**Cloudflare Pages**, which is where this actually runs: connect the repo, set
+the output directory to `docs`, no build command.
+
+The GitHub Pages steps below are kept only because `ALLOWED_ORIGINS` still lists
+the old origin, so a fork can use either. Following them on this repo produces a
+second, stale copy at the address that let the wrong URL sit in this README
+unnoticed for weeks.
+
+### Enabling Pages (alternative, for a fork)
 
 Settings → Pages → Source **Deploy from a branch** → branch `main`, folder
 **`/docs`**.
@@ -535,9 +570,12 @@ what is missing rather than throwing a CORS error at whoever opened it.
 
 **Before sharing the URL with anyone, two non-optional steps:**
 
-1. **Bind the KV namespace for rate limiting.** Uncomment the block in
-   `wrangler.toml` after `npx wrangler kv namespace create RATE`. The Worker
-   degrades to allow-all without it, which is fine for a first deploy and
+1. **Check the rate limiters came up.** There is nothing to provision: the five
+   `[[ratelimits]]` bindings in `wrangler.toml` exist on deploy with wrangler
+   4.36.0 or later. Confirm `/api/health` reports all five true. This step used
+   to say "bind the KV namespace" and reference `wrangler kv namespace create
+   RATE`; there is no KV anywhere in this project and never was. The Worker
+   degrades to allow-all without the limiters, which is fine for a first deploy and
    reckless in public: this proxy spends a real API key, and Last.fm error 26
    (suspended key) takes every user down at once.
 2. **Check `ALLOWED_ORIGINS`.** It must list your Pages origin and nothing
@@ -595,7 +633,15 @@ Six layers, in order of how much work they actually do:
 4. **Own key** — visitors can paste their own API key and bypass the shared
    budget and breaker entirely. The only layer that genuinely scales, because
    it removes the shared resource.
-5. **Per-client limits** — 6 scan requests/10s and 120 pages/min per IP.
+5. **Per-client limits** — 15 scan requests/10s and 120 pages/min per IP. The
+   burst limit was 6 and that was too low: a request carries 8 pages spaced by
+   PACE_MS, so one sequential scan issues 7 to 9 per 10 seconds and tripped it
+   continuously, stalling every large scan through no fault of the user.
+6. **MusicBrainz limits** — 90/min per IP and 60/min shared, plus a separate
+   60-second circuit breaker. These are reported by `/api/health` as
+   `mb_client` and `mb_shared`, because MusicBrainz protection was absent
+   entirely for a while and "the limiters are configured" was true the whole
+   time.
 6. **Shared ceiling** — 240 pages/min against the shared key.
 
 Two honest limits of layer 6, straight from Cloudflare's docs: counters are
@@ -632,7 +678,12 @@ and never reaches the browser.
 
 See **Deploying the Worker** above.
 
-### 3. Enable GitHub Pages
+### 3. Publish the frontend
+
+Cloudflare Pages: connect the repo, output directory `docs`, no build command.
+The GitHub Pages route below also works for a fork.
+
+#### GitHub Pages (alternative)
 
 Settings → Pages → Source: **Deploy from a branch** → branch `main`, folder
 **`/docs`**
@@ -734,8 +785,11 @@ and merging genuinely different songs is the worst failure available here.
   Editing is also a paid Last.fm Pro feature. So this reports and you fix by
   hand, which is why the output gives exact before and after strings.
 - **Case-only differences cannot be fixed by anyone**, due to how Last.fm
-  stores names. They are reported in their own `unfixable` bucket so the list
-  is not padded with impossible work.
+  stores names, so they are not reported at all. D1 drops casing-only groups
+  outright. The `unfixable` class still exists but has no live producer: its
+  only one, `d7Casing`, is written and deliberately never called. This section
+  used to claim they were reported in that bucket, contradicting the earlier
+  section that correctly says they are absent.
 - **Last.fm sends no CORS headers**, so a browser cannot call the API directly.
   A Cloudflare Worker proxies it, which is also what keeps the key off the
   frontend. The analysis itself still runs entirely in the browser.
@@ -747,7 +801,7 @@ and merging genuinely different songs is the worst failure available here.
 
 ## Sharing this with other people
 
-Two of the three original blockers are designed out rather than mitigated:
+One of the three original blockers is designed out rather than mitigated:
 
 **Other people's listening history.** There is nowhere to put it. The Worker
 proxies and forgets, and the analysis runs in the visitor's own browser with
