@@ -2109,7 +2109,8 @@ function render() {
     <h2>${esc(d.user)}</h2>
     <div class="grid g2">
       <div class="panel">
-        <div class="score" style="color:${col(h.score)}">${h.score}<span
+        <div class="score" style="color:${col(h.score)}"><span id="score-n"
+          data-to="${h.score}">${h.score}</span><span
           style="font-size:18px;color:var(--dim)">/100</span></div>
         <div class="l" style="color:var(--dim);font-size:12px;margin-bottom:4px">
           hygiene score${tip(
@@ -2162,7 +2163,18 @@ function render() {
                   font-size:11.5px">${N(h.issue_counts[k])} found</span>
                   <span style="color:var(--line)">&middot;</span> ` : ""
                 }${v}</span></div>
-            <div class="bar"><i style="width:${Math.max(v, 2)}%;
+            ${/*
+               * Rendered at the FINAL width, with the target repeated in
+               * data-w. growBars() flips it to 0 and back on the next frame, so
+               * the bar grows from the left.
+               *
+               * The order matters and is the same reasoning as the score
+               * count-up: if the animation never runs, the bar is already
+               * correct. Rendering at zero and relying on JS to fill it would
+               * mean one thrown exception shows every area as perfect.
+               */""}
+            <div class="bar"><i data-w="${Math.max(v, 2)}"
+              style="width:${Math.max(v, 2)}%;
               background:${col(v)}"></i></div>
             ${/*
                * Say what this area was worth. Areas are weighted by how much of
@@ -2323,6 +2335,70 @@ function render() {
       $("issues-anchor").scrollIntoView({ block: "start" });
   }
   issues();
+  countUpScore();
+  growBars();
+}
+
+/**
+ * Grow the hygiene bars from zero.
+ *
+ * They are rendered at their true width, so this collapses them and lets the CSS
+ * transition carry them back out. Two frames are needed: one for the browser to
+ * accept width 0 as the current value, one for the change to the real width to
+ * be seen as a transition rather than as the initial paint.
+ *
+ * Skipped entirely under reduced motion, which also means the bars simply stay
+ * at their rendered width. Nothing to restore, nothing to get wrong.
+ */
+function growBars() {
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+  const bars = [...document.querySelectorAll("#out .bar > i[data-w]")];
+  if (!bars.length) return;
+
+  for (const b of bars) b.style.width = "0%";
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    for (const b of bars) b.style.width = b.dataset.w + "%";
+  }));
+}
+
+/**
+ * Count the hygiene score up from zero.
+ *
+ * Done in JS because CSS cannot animate text content, and done carefully for two
+ * reasons.
+ *
+ * The final value is rendered in the HTML FIRST and only then animated down to
+ * zero and back up. So if this function throws, never runs, or the browser kills
+ * the frame loop, the correct number is already on screen. A count-up that
+ * starts at zero in the markup is one bug away from a library being told its
+ * score is 0.
+ *
+ * And it checks prefers-reduced-motion itself. The CSS blanket opt-out cannot
+ * reach a requestAnimationFrame loop, so a user who asked for no motion would
+ * still get a spinning number.
+ */
+function countUpScore() {
+  const el = $("score-n");
+  if (!el) return;
+  const to = Number(el.dataset.to);
+  if (!Number.isFinite(to)) return;
+
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+
+  const DUR = 850;
+  const start = performance.now();
+  // Cubic ease-out, so it sprints then settles rather than crawling linearly.
+  const ease = (t) => 1 - Math.pow(1 - t, 3);
+
+  const step = (now) => {
+    const t = Math.min((now - start) / DUR, 1);
+    el.textContent = Math.round(to * ease(t));
+    if (t < 1) requestAnimationFrame(step);
+    // The last frame is assigned exactly, not rounded from 0.999, so the number
+    // can never settle one short of the real score.
+    else el.textContent = to;
+  };
+  requestAnimationFrame(step);
 }
 
 /**

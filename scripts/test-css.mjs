@@ -115,6 +115,56 @@ ok(
   `${recolour.length} of ${hovers.length} are colour-only`,
 );
 
+/* ---- motion must be switchable off -------------------------------------- */
+{
+  /*
+   * The opt-out is a blanket universal selector on purpose.
+   *
+   * Listing animations individually means every new @keyframes needs a matching
+   * line in the media query, and the one that gets forgotten is the one that
+   * makes somebody ill. A `*, *::before, *::after` rule cannot be forgotten.
+   *
+   * Asserted rather than trusted because this is invisible to anyone not using
+   * the setting, so it can rot for months without a single report.
+   */
+  const css = decomment(readFileSync(join(root, "docs/style.css"), "utf8"));
+  const mq = css.match(/@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{([\s\S]*?)\n\}/);
+  ok("a reduced-motion media query exists", Boolean(mq));
+
+  const body = mq ? mq[1] : "";
+  ok("it disables animation universally",
+     /\*\s*,\s*\*::before\s*,\s*\*::after/.test(body),
+     "Per-animation opt-outs rot: the next @keyframes will not be listed here.");
+  ok("animation-duration is neutralised",
+     /animation-duration:\s*\.?0*1?ms\s*!important/.test(body));
+  ok("and so are looping animations",
+     /animation-iteration-count:\s*1\s*!important/.test(body));
+  ok("and transitions", /transition-duration:\s*\.?0*1?ms\s*!important/.test(body));
+
+  /*
+   * The two JS-driven animations are unreachable from CSS, so they check the
+   * preference themselves. A requestAnimationFrame loop does not care what the
+   * media query says.
+   */
+  const html = readFileSync(join(root, "docs/index.html"), "utf8");
+  const guards = html.match(
+    /matchMedia\?\.\("\(prefers-reduced-motion: reduce\)"\)\.matches/g) || [];
+  ok("the JS count-up and bar growth each check the preference too",
+     guards.length >= 2,
+     `found ${guards.length}; CSS cannot stop a requestAnimationFrame loop.`);
+
+  /*
+   * Both JS animations render the TRUE value first and animate away from it, so
+   * a thrown exception leaves the correct number on screen rather than a zero.
+   */
+  ok("the score renders its real value in the markup",
+     /id="score-n"[\s\S]{0,60}\$\{h\.score\}/.test(html),
+     "Rendering 0 and counting up means one bug shows every library a 0 score.");
+  ok("and the bars render their real width",
+     /data-w="\$\{Math\.max\(v, 2\)\}"[\s\S]{0,40}width:\$\{Math\.max\(v, 2\)\}%/.test(html),
+     "Same reasoning: a failed animation must degrade to correct, not to empty.");
+}
+
 console.log(`\n  ${pass} passed, ${fails.length} failed`);
 if (fails.length) {
   console.log("\n  FAILED");

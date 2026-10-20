@@ -7,6 +7,17 @@
   --accent:#d51007;          /* Last.fm red */
   --accent-hover:#ff2010;
   --good:#5cb85c; --warn:#e0af68; --bad:#d51007; --era:#b56bd8;
+
+  /* Motion tokens. One place to retune the whole feel, and one place for the
+     reduced-motion block to reason about. The two easings do different jobs:
+     `--ease` decelerates into rest for things arriving, `--ease-out` is for
+     things responding to a click and should feel immediate. */
+  --ease:cubic-bezier(.22,.68,.36,1);
+  --ease-out:cubic-bezier(.33,1,.68,1);
+  --t-fast:.14s;
+  --t-mid:.28s;
+  --t-slow:.5s;
+  --glow:0 0 0 1px rgba(213,16,7,.22), 0 0 22px -6px rgba(213,16,7,.55);
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);
@@ -50,8 +61,28 @@ button.ghost{background:transparent;color:var(--dim);border-color:var(--line);
   font-weight:600}
 button.ghost:hover{background:transparent;color:var(--ink);
   border-color:var(--dim)}
-.bar{height:7px;background:var(--line);border-radius:99px;overflow:hidden;margin-top:9px}
-.bar>i{display:block;height:100%;background:var(--accent);transition:width .25s}
+/*
+ * The progress bar, which is the one thing a user stares at for a whole minute.
+ *
+ * Two separate motions, deliberately. The WIDTH transition is the real progress
+ * and must never run on its own timer, or the bar would lie about where the scan
+ * is. The shimmer sweeping across the filled portion is pure liveness: it keeps
+ * moving while a slow page is in flight, which is the difference between "still
+ * working" and "hung". The bar used to sit motionless for seconds at a time and
+ * that reads as frozen.
+ */
+.bar{height:7px;background:var(--line);border-radius:99px;overflow:hidden;
+  margin-top:9px;position:relative}
+.bar>i{display:block;height:100%;border-radius:99px;position:relative;
+  overflow:hidden;
+  background:linear-gradient(90deg,#8d0b05,var(--accent) 55%,#ff3a2a);
+  box-shadow:0 0 14px -4px rgba(213,16,7,.9);
+  transition:width var(--t-mid) var(--ease-out)}
+.bar>i::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.42),transparent);
+  transform:translateX(-100%);
+  animation:sheen 1.5s var(--ease) infinite}
+@keyframes sheen{to{transform:translateX(100%)}}
 .metric .n{font-size:29px;font-weight:650;letter-spacing:-.02em}
 .metric .l{color:var(--dim);font-size:12px;text-transform:uppercase;
   letter-spacing:.06em;margin-top:2px}
@@ -201,13 +232,162 @@ button.i:focus-visible{background:var(--dim);color:var(--panel);
 .jump:hover{background:var(--accent);color:#fff;border-color:var(--accent)}
 .jump .arr{font-size:15px;line-height:1;transform:translateY(1px)}
 
+/* ========================================================================== */
+/* MOTION                                                                     */
+/* ========================================================================== */
+/*
+ * The rule this section is built on: motion has to mean something.
+ *
+ * Everything below marks a real change of state. A finding arriving, a number
+ * being computed, a lookup landing, a recommendation being withdrawn. Nothing
+ * loops forever for decoration except the progress sheen, which is there to say
+ * "still working" during the one part of this app that makes you wait.
+ *
+ * Two constraints shaped it. The report can render 200 findings at once, so a
+ * naive per-card stagger would take ten seconds to settle; the stagger is capped
+ * instead. And every animation is opacity or transform only, which the compositor
+ * handles without re-layout, so a long report does not stutter.
+ */
+
+@keyframes driftIn{
+  from{opacity:0;transform:translateY(9px)}
+  to{opacity:1;transform:none}
+}
+@keyframes verdictIn{
+  from{opacity:0;transform:translateX(-7px);
+       clip-path:inset(0 100% 0 0)}
+  to{opacity:1;transform:none;clip-path:inset(0 0 0 0)}
+}
+@keyframes strikeOut{ from{opacity:.95} to{opacity:.55} }
+@keyframes spin{ to{transform:rotate(360deg)} }
+@keyframes pulseGlow{
+  0%,100%{box-shadow:0 0 0 0 rgba(213,16,7,.35)}
+  50%{box-shadow:0 0 0 7px rgba(213,16,7,0)}
+}
+
+/* ---- arrival ------------------------------------------------------------ */
+/*
+ * Findings rise in, staggered, but the stagger STOPS after ten.
+ *
+ * nth-child(-n+10) rather than a per-card inline delay: a library with 200
+ * findings would otherwise finish arriving eight seconds after the scan said it
+ * was done, and the last cards would animate far below the fold where nobody is
+ * looking. Ten is roughly a screenful, which is all the stagger needs to cover.
+ */
+.issue,.panel.offer{animation:driftIn var(--t-mid) var(--ease) both}
+.issue:nth-child(-n+10){animation-delay:calc((var(--i,0)) * 34ms)}
+.issue:nth-child(1){--i:0} .issue:nth-child(2){--i:1}
+.issue:nth-child(3){--i:2} .issue:nth-child(4){--i:3}
+.issue:nth-child(5){--i:4} .issue:nth-child(6){--i:5}
+.issue:nth-child(7){--i:6} .issue:nth-child(8){--i:7}
+.issue:nth-child(9){--i:8} .issue:nth-child(10){--i:9}
+
+#out > .panel,#out > .grid,#out > h2{animation:driftIn var(--t-slow) var(--ease) both}
+
+/* ---- the score ---------------------------------------------------------- */
+/*
+ * The headline number counts up from zero, driven by JS, and the digits are
+ * tabular so the box does not twitch as it climbs through different widths.
+ * Without that the whole panel jitters for the length of the count.
+ */
+.score{font-variant-numeric:tabular-nums;
+  text-shadow:0 0 28px rgba(213,16,7,.3)}
+.metric .n{font-variant-numeric:tabular-nums}
+
+/* The four hygiene bars grow from the left rather than appearing at length. */
+.panel .bar>i{transition:width .9s var(--ease)}
+
+/* ---- the lookup lifecycle ----------------------------------------------- */
+/*
+ * This is where motion earns its place.
+ *
+ * A user pressed Check, the answer arrived as a third sentence in an existing
+ * paragraph, and they reported that nothing had happened. They were right to:
+ * nothing moved. The verdict now wipes in from the left, so the eye is taken to
+ * the thing that changed.
+ */
+.verdict{animation:verdictIn var(--t-slow) var(--ease) both}
+.superseded{animation:strikeOut var(--t-slow) var(--ease) both}
+
+/* A busy button reads as busy. `disabled` alone looked dead, and on a lookup
+   that takes two seconds people press it again. */
+button.check:disabled,button.check-all:disabled{position:relative;
+  padding-right:26px}
+button.check:disabled::after,button.check-all:disabled::after{
+  content:"";position:absolute;right:9px;top:50%;width:9px;height:9px;
+  margin-top:-5px;border-radius:50%;
+  border:1.5px solid currentColor;border-top-color:transparent;
+  animation:spin .62s linear infinite}
+
+/* ---- chrome ------------------------------------------------------------- */
+/*
+ * Panels get a barely-there top-down gradient and a hairline highlight along the
+ * top edge. At 3% opacity it is not a visible effect, it just stops a flat
+ * #1c1c1c rectangle reading as a div with a border.
+ */
+.panel{background:linear-gradient(180deg,#20201f,var(--panel) 120px);
+  position:relative}
+.panel::before{content:"";position:absolute;inset:0 0 auto;height:1px;
+  border-radius:10px 10px 0 0;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.07) 30%,
+    rgba(255,255,255,.07) 70%,transparent);
+  pointer-events:none}
+
+.issue{transition:border-color var(--t-fast),box-shadow var(--t-fast),
+  transform var(--t-fast) var(--ease-out)}
+.issue:hover{border-color:#3b3b3b;
+  box-shadow:0 6px 22px -14px #000;transform:translateY(-1px)}
+
+button{transition:background var(--t-fast),color var(--t-fast),
+  border-color var(--t-fast),box-shadow var(--t-fast),transform var(--t-fast)}
+button:hover:not(:disabled){box-shadow:var(--glow)}
+button:active:not(:disabled){transform:translateY(1px)}
+button.check:hover:not(:disabled),button.check-all:hover:not(:disabled){
+  box-shadow:var(--glow)}
+
+input,select{transition:border-color var(--t-fast),box-shadow var(--t-fast)}
+input:focus,select:focus{box-shadow:0 0 0 3px rgba(213,16,7,.16)}
+
+/*
+ * The offer card breathes, because it is asking for something.
+ *
+ * It is the only control on the page that costs the user real time, and it sits
+ * among findings that look similar. A slow pulse on its border separates "here
+ * is a problem" from "here is a question you can choose to pay for". Stops as
+ * soon as it has been answered.
+ */
+.panel.offer:not(.done){animation:driftIn var(--t-mid) var(--ease) both,
+  pulseGlow 3.4s var(--ease) 1.2s infinite}
+.panel.offer.done{animation:driftIn var(--t-mid) var(--ease) both}
+
+.tag{transition:color var(--t-fast),border-color var(--t-fast)}
+.done-mark{animation:driftIn var(--t-slow) var(--ease) both}
+
 /* Respects a reduced-motion preference: smooth scrolling is set here rather
    than inline so the media query can switch it off, which an inline
    behavior:"smooth" in JS could not. */
 html{scroll-behavior:smooth}
+
+/*
+ * The opt-out, and it is deliberately a blanket one.
+ *
+ * Listing the animations individually would mean every new keyframe needs a
+ * matching line here, and the one that gets forgotten is the one that makes
+ * somebody ill. A universal selector cannot be forgotten. `!important` because
+ * these have to beat the shorthand `animation` declarations above.
+ *
+ * Nothing is lost: every animation here is an entrance or a liveness hint, and
+ * the final state is identical with them switched off. The score count-up is JS
+ * and checks the same preference itself, because CSS cannot stop it.
+ */
 @media (prefers-reduced-motion:reduce){
   html{scroll-behavior:auto}
-  .i::after,.i::before{transition:none}
+  *,*::before,*::after{
+    animation-duration:.001ms !important;
+    animation-iteration-count:1 !important;
+    transition-duration:.001ms !important;
+    scroll-behavior:auto !important;
+  }
 }
 
 /* Anchor offset so the heading is not flush against the viewport top after a
