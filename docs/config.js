@@ -46,7 +46,7 @@ export const isConfigured = () =>
  * after the filter that excludes it was verified live on a different query. The
  * fix was correct and deployed; the reader was being served a day-old answer.
  */
-export const API_V = "28";
+export const API_V = "29";
 
 /** Append the API version, preserving any query string already present. */
 export const apiUrl = (base, path, params) => {

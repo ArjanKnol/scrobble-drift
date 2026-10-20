@@ -985,9 +985,10 @@ async function waitVisibly(seconds, why) {
    * that is now known to be wrong.
    */
   const line = $("status");
-  if (line && / · about .* left$/.test(line.textContent)) {
-    line.textContent = line.textContent.replace(/ · about .* left$/,
-                                                " · paused");
+  // Matches both shapes the estimate can take: "about Ns left" and "nearly done".
+  const STALE_ETA = / · (?:about .* left|nearly done)$/;
+  if (line && STALE_ETA.test(line.textContent)) {
+    line.textContent = line.textContent.replace(STALE_ETA, " · paused");
   }
   const box = $("waiting");
   box.classList.remove("hide");
@@ -1400,12 +1401,20 @@ async function runDiscovery(offer) {
   const recent = [];
   const WINDOW = 24;
 
-  /** Coarse and honest. False precision on a guess reads as a promise. */
-  const humanise = (sec) => {
-    if (sec < 10) return "a few seconds";
-    if (sec < 90) return `${Math.round(sec / 5) * 5}s`;
-    if (sec < 3600) return `${Math.max(1, Math.round(sec / 60))} min`;
-    return `${(sec / 3600).toFixed(1)} hours`;
+  /*
+   * Returns the WHOLE phrase, not a duration to be wrapped in one.
+   *
+   * It used to return "a few seconds" and the caller wrapped it as
+   * "about ${x} left", which produced "about a few seconds left". Two pieces of
+   * wording composed by different hands, each fine alone.
+   *
+   * Coarse on purpose: false precision on an estimate reads as a promise.
+   */
+  const timeLeft = (sec) => {
+    if (sec < 10) return "nearly done";
+    if (sec < 90) return `about ${Math.round(sec / 5) * 5}s left`;
+    if (sec < 3600) return `about ${Math.max(1, Math.round(sec / 60))} min left`;
+    return `about ${(sec / 3600).toFixed(1)} hours left`;
   };
 
   const tick = (label) => {
@@ -1436,7 +1445,7 @@ async function runDiscovery(offer) {
       (pause > 1
         // Say the truth rather than a countdown that the banner contradicts.
         ? ` · paused, waiting on the release database`
-        : left !== null ? ` · about ${humanise(left)} left` : "");
+        : left !== null ? ` · ${timeLeft(left)}` : "");
 
     if (document.hidden) {
       $("waiting").classList.remove("hide");

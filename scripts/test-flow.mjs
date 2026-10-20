@@ -712,7 +712,8 @@ if (fails.length) {
      "and while paused it says so instead of counting down");
   ok(/let pausedUntil = 0;/.test(code) && /pausedUntil = Date\.now\(\)/.test(code),
      "waitVisibly publishes when the pause ends, so both agree on one number");
-  ok(/line\.textContent\.replace\(\/ · about \.\* left\$\//.test(code),
+  ok(/STALE_ETA\.test\(line\.textContent\)/.test(code) &&
+     /nearly done/.test(code),
      "the stale estimate is stripped when a pause begins, since nothing ticks",
      "Progress stays; only the prediction known to be wrong is removed.");
 
@@ -721,23 +722,32 @@ if (fails.length) {
    * 200 answers came from cache in 2s and whose remainder runs at 1/s, the old
    * whole-run mean said "a few seconds" for work that takes two minutes.
    */
-  const humanise = (sec) => {
-    if (sec < 10) return "a few seconds";
-    if (sec < 90) return `${Math.round(sec / 5) * 5}s`;
-    if (sec < 3600) return `${Math.max(1, Math.round(sec / 60))} min`;
-    return `${(sec / 3600).toFixed(1)} hours`;
+  /*
+   * The helper returns the WHOLE phrase. It used to return a bare duration and
+   * the caller wrapped it as "about ${x} left", which rendered as "about a few
+   * seconds left" on a live run: two pieces of wording composed separately,
+   * each fine on its own.
+   */
+  const timeLeft = (sec) => {
+    if (sec < 10) return "nearly done";
+    if (sec < 90) return `about ${Math.round(sec / 5) * 5}s left`;
+    if (sec < 3600) return `about ${Math.max(1, Math.round(sec / 60))} min left`;
+    return `about ${(sec / 3600).toFixed(1)} hours left`;
   };
   const t = 1e6;
   const win = [t, t + 1000, t + 2000, t + 3000, t + 4000, t + 5000];
   const span = (win[win.length - 1] - win[0]) / 1000;
   const rate = (win.length - 1) / span;
   ok(Math.abs(rate - 1) < 0.01, `the window rate is 1/s (${rate.toFixed(2)})`);
-  eqStr(humanise((300 - 200) / rate), "2 min",
+  eqStr(timeLeft((300 - 200) / rate), "about 2 min left",
      "so 100 remaining at 1/s reads as 2 min");
-  eqStr(humanise(100 * (2 / 200)), "a few seconds",
-     "where the old whole-run mean would have said this");
-  eqStr(humanise(5), "a few seconds", "and small numbers stay vague");
-  eqStr(humanise(3700), "1.0 hours", "while long ones do not pretend to seconds");
+  eqStr(timeLeft(100 * (2 / 200)), "nearly done",
+     "where the old whole-run mean would have claimed this");
+  eqStr(timeLeft(5), "nearly done", "and a phrase that fits the sentence");
+  eqStr(timeLeft(3700), "about 1.0 hours left",
+     "while long ones do not pretend to seconds");
+  ok(!/about a few seconds left/.test(timeLeft(5)),
+     "never 'about a few seconds left', which is what shipped");
 }
 
 console.log("  The scan flow cannot claim to be finished when it is not.\n");
