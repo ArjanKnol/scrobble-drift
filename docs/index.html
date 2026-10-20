@@ -2730,7 +2730,18 @@ function issues() {
      * are the way through: narrowing by class or detector re-slices from the
      * full set, so the hidden findings are reachable, just not all at once.
      */
-    (shown < matching ? `<div class="panel" style="margin-top:9px">
+    /*
+     * Only worth saying when the gap is worth knowing about.
+     *
+     * With the cap applied per section, a library can sit one finding over and
+     * get "Showing 271 of 272 findings", which is true, useless, and makes a
+     * deliberate design decision look like a malfunction. The notice exists to
+     * stop the reader wondering where the rest went; one card does not prompt
+     * that question.
+     *
+     * Five is a judgement call. The point is that there is a threshold at all.
+     */
+    (matching - shown >= 5 ? `<div class="panel" style="margin-top:9px">
       <strong>Showing ${N(shown)} of ${N(matching)} findings.</strong>
       <div class="note" style="margin:5px 0 0">The list is capped so a large
         library stays readable. Use the class and detector filters above to
