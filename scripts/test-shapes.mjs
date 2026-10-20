@@ -341,7 +341,7 @@ for (const [label, lib] of [
      * wave through three functions that happen to be cheap would leave the next
      * genuine regex export unfuzzed, which is the failure mode it exists to catch.
      */
-    "isResolvable", "resolveOne", "sameRecording",
+    "isResolvable", "resolveOne", "sameRecording", "affectsChart",
   ];
   const unary = STRING_FNS.map((n) => [n, drift[n]]).filter(([, v]) => typeof v === "function");
   ok(unary.length === STRING_FNS.length,

@@ -497,6 +497,32 @@ button.check:disabled, button.check-all:disabled {
   color: var(--dim);
 }
 
+/* ---------------------------------------------------------------- sections */
+/*
+ * The report is two lists, and they must not look like one.
+ *
+ * More than half of a typical report has no bearing on the chart figure at the
+ * top of the page, and it used to sit in a single ranked list with the half that
+ * does. A heading alone is not enough separation when every card below it is
+ * styled identically, so the choices section is collapsed and dimmed.
+ */
+.sec-head{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;
+  margin:18px 0 9px;padding-bottom:7px;border-bottom:1px solid var(--line)}
+.sec-head strong{font-size:13px;text-transform:uppercase;letter-spacing:.09em}
+.sec-head .note{margin:0;flex:1 1 220px;font-size:12px}
+
+details.choices{margin-top:4px}
+details.choices > summary{list-style:none;cursor:pointer}
+details.choices > summary::-webkit-details-marker{display:none}
+details.choices > summary .sec-head strong::after{
+  content:" \\25B8";color:var(--dim);font-size:11px}
+details.choices[open] > summary .sec-head strong::after{content:" \\25BE"}
+details.choices > summary:hover .sec-head strong{color:var(--accent)}
+/* Dimmed while closed is wrong: it is the OPEN cards that should read as
+   secondary, because nothing in them changes a number. */
+details.choices[open] .issue{opacity:.82}
+details.choices[open] .issue:hover{opacity:1}
+
 /* ------------------------------------------------------------------ offers */
 /*
  * A lookup being offered rather than performed.

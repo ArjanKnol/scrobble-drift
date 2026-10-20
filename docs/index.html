@@ -143,7 +143,7 @@
 import {
   analyse, partitionEra, d14eReleasedSince, d16StrandedSingles,
   hygieneScore, weakEraCandidates, officialKey, byImportance,
-  resolveOne, isResolvable, discoveryOffers, baseTitle,
+  resolveOne, isResolvable, discoveryOffers, baseTitle, affectsChart,
 } from "./drift.js";
 /*
  * Six imports left with the resolve phase: d0Resolve, d5Resolve, verifyEraNames,
@@ -2519,8 +2519,25 @@ function issues() {
   // Counted BEFORE the cap, so the notice at the bottom can say how many are
   // being withheld rather than leaving the reader to wonder.
   const matching = all.length;
-  const list = all.slice(0, 200);
-  const shown = list.length;
+
+  /*
+   * Two sections: what moves plays, and what is a tagging choice.
+   *
+   * Measured on a real library: 272 findings, of which 71 were D15 and said on
+   * their own cards that the corrected chart "already counts all of them". More
+   * than half the report had no bearing on the number at the top of the page
+   * while looking identical to the half that did.
+   *
+   * The cap is applied PER SECTION rather than to the combined list. Otherwise
+   * 200 compilation credits could push every chart-affecting finding off the
+   * page, which is the precise failure this split exists to prevent.
+   */
+  const CAP = 200;
+  const chartAll = all.filter(affectsChart);
+  const choiceAll = all.filter((i) => !affectsChart(i));
+  const list = chartAll.slice(0, CAP);
+  const choices = choiceAll.slice(0, CAP);
+  const shown = list.length + choices.length;
 
   /*
    * Findings are addressed by index into report.issues, not by position in the
@@ -2540,7 +2557,13 @@ function issues() {
         checked on its own. This does them all, about
         ${pending < 20 ? "a few seconds" : Math.max(1, Math.round(pending / 60)) + " min"},
         and the answers are shared so nobody pays for them twice.</span>
-    </div>` : "") + (list.length ? list.map((i) => `
+    </div>` : "") + (() => {
+    /*
+     * One card template, two sections. Extracted from the .map() it used to
+     * live inside so the chart findings and the tagging choices cannot drift
+     * apart in how they render.
+     */
+    const card = (i) => `
     <div class="issue" data-idx="${report.issues.indexOf(i)}">
       <h3>${esc(i.title)}</h3>
       <div>
@@ -2672,7 +2695,29 @@ function issues() {
               <span class="note" style="margin:0 0 0 9px;color:var(--dim)">
                 Looks up what the release databases hold for this one finding.</span>
             </div>`}
-    </div>`).join("") : `<div class="panel">Nothing matches that filter.</div>`) +
+    </div>`;
+
+    if (!matching) return `<div class="panel">Nothing matches that filter.</div>`;
+
+    const head = (title, n, note) => `<div class="sec-head">
+      <strong>${esc(title)}</strong><span class="tag">${N(n)}</span>
+      <span class="note">${esc(note)}</span></div>`;
+
+    return (list.length ? head("Affects your chart", chartAll.length,
+        "Plays sitting under the wrong album, artist or title. Fixing these " +
+        "changes what your chart says.") + list.map(card).join("") : "") +
+      /*
+       * Collapsed by default, and the count is on the summary line so the
+       * reader knows what is behind it before deciding to open it. These are
+       * real findings, not noise, but none of them moves a number in this
+       * report and most people will not want them first.
+       */
+      (choices.length ? `<details class="choices"><summary>` +
+        head("Tagging choices", choiceAll.length,
+          "Nothing here is wrong. These either affect only Last.fm's own " +
+          "chart, or are a filing convention you may well prefer.") +
+        `</summary>` + choices.map(card).join("") + `</details>` : "");
+  })() +
     /*
      * Say when the list is cut off.
      *

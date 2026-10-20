@@ -4488,6 +4488,35 @@ export const SCORED_DETECTORS = new Set(Object.values(BUCKETS).flat());
  */
 export const UNSCORED_BY_DESIGN = new Set(["D16"]);
 
+/**
+ * Does this finding put plays in the wrong place, or is it a tagging choice?
+ *
+ * The split the report is organised around, and the reason it exists: on a real
+ * 10,000-scrobble library, more than half the findings had no bearing whatever
+ * on the number at the top of the page, yet sat in one ranked list with the ones
+ * that did. 71 of 272 were D15, whose own card says the corrected chart "already
+ * counts all of them".
+ *
+ * Three kinds are choices rather than defects:
+ *
+ *   chart_already_correct  D15. It splits LAST.FM's chart, not the one computed
+ *                          here, which groups on the track artist and never saw
+ *                          the split. Real, worth telling you, but nothing in
+ *                          this report's numbers moves if you fix it.
+ *   style_choice           D14f. Pooling unreleased tracks under one name is a
+ *                          convention, and conventions are not defects.
+ *   DISCOVERY              D14e and D16. Both say outright that nothing is
+ *                          wrong, only that you might prefer a different filing.
+ *
+ * Everything else moves plays, so it belongs above the fold.
+ */
+export function affectsChart(issue) {
+  if (!issue?.detector) return false;
+  if (issue.style_choice || issue.chart_already_correct) return false;
+  if (DISCOVERY.has(issue.detector)) return false;
+  return true;
+}
+
 /* --------------------------------------------------------- orchestration */
 
 export function analyse(scrobbles, { official, topAlbums } = {}) {

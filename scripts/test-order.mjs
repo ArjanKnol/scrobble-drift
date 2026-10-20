@@ -15,7 +15,7 @@
  * Run: node scripts/test-order.mjs
  */
 import {
-  d14aFormatVariants, analyse, byImportance, DETECTOR_ORDER, d4AlbumSplits,
+  d14aFormatVariants, analyse, byImportance, DETECTOR_ORDER, d4AlbumSplits, affectsChart,
 } from "../docs/drift.js";
 
 let pass = 0, fail = 0;
@@ -261,6 +261,51 @@ console.log("\nactionable findings outrank informational ones");
      "and keeps the migration wording it earned");
   ok(/consolidate to 'The Album'/.test(real.suggest),
      "consolidating forward into the album, which is the real direction");
+}
+
+/* ---- the report is two lists: consequence, then choices ----------------- */
+{
+  /*
+   * Measured on a real library: 272 findings, 71 of them D15 whose own cards say
+   * the corrected chart "already counts all of them". More than half the report
+   * had no bearing on the figure at the top of the page while looking identical
+   * to the half that did.
+   *
+   * This is the classifier that splits them. Getting it wrong in the permissive
+   * direction buries real findings under compilation credits; getting it wrong
+   * in the strict direction hides something that actually moves plays.
+   */
+  const chart = ["D0", "D4", "D5", "D1", "D6", "D8", "D11", "D12", "D15"];
+  for (const d of chart) {
+    ok(affectsChart({ detector: d }), `${d} moves plays, so it is above the fold`);
+  }
+
+  ok(!affectsChart({ detector: "D15", chart_already_correct: true }),
+     "D15 is a choice: it splits Last.fm's chart, not the one computed here",
+     "Its own suggestion says the corrected chart already counts all of them.");
+  ok(!affectsChart({ detector: "D14f", style_choice: true }),
+     "pooling unreleased tracks is a convention, not a defect");
+  for (const d of ["D14e", "D16"]) {
+    ok(!affectsChart({ detector: d }),
+       `${d} is discovery and says outright that nothing is wrong`);
+  }
+
+  ok(!affectsChart(null) && !affectsChart(undefined) && !affectsChart({}),
+     "and a malformed finding is never promoted into the chart section");
+
+  /*
+   * The two sections must partition the report: every finding lands in exactly
+   * one. A finding in neither would vanish from the page without being counted
+   * as withheld, which is the silent-truncation bug in a new costume.
+   */
+  const sample = [
+    { detector: "D4" }, { detector: "D15", chart_already_correct: true },
+    { detector: "D16" }, { detector: "D6" },
+    { detector: "D14f", style_choice: true },
+  ];
+  const a = sample.filter(affectsChart).length;
+  const b = sample.filter((i) => !affectsChart(i)).length;
+  eq(a + b, sample.length, "the two sections partition the findings exactly");
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
