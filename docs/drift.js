@@ -268,8 +268,25 @@ const UNREL_STRONG =
 
 // Pluralised deliberately: the old \bsnippet\b failed on the bare "Snippets"
 // that people actually use, because the trailing s ate the word boundary.
+/*
+ * `loosie` added, `vault` deliberately not.
+ *
+ * A "loosie" is a loose track not attached to any project, and the word is used
+ * almost nowhere except leak communities, so it is about as safe a weak marker
+ * as this list has. It was simply missing.
+ *
+ * `vault` is the obvious next candidate and is a trap: Taylor Swift's "From The
+ * Vault" tracks are official commercial releases on her re-recordings. Treating
+ * those as unreleased would hide a real album from the split detectors, which
+ * is exactly the damage the strong/weak split exists to prevent. The same
+ * reasoning rules out `scraps` and `throwaway`, both of which are real titles.
+ *
+ * Weak markers only count when the SAME ARTIST is strongly marked somewhere
+ * else in the library, so a one-off false positive here is contained. That is
+ * an argument for being careful about what goes in, not for being relaxed.
+ */
 const UNREL_WEAK =
-  /\bleak(?:s|ed)?\b|\bsnippet(?:s)?\b|\bouttake(?:s)?\b|\bleftover(?:s)?\b/i;
+  /\bleak(?:s|ed)?\b|\bsnippet(?:s)?\b|\bouttake(?:s)?\b|\bleftover(?:s)?\b|\bloosie(?:s)?\b/i;
 
 // Kept for eraName(), which needs to strip any marker before reading the
 // qualifier, regardless of strength.
@@ -2372,6 +2389,25 @@ export function eraVerificationPlan(issues) {
  * Returns descriptors, not findings. Each carries the jobs its lookup needs, so
  * the caller does the pacing, progress and caching that do not belong in here.
  */
+/*
+ * How many lookups one offer may spend.
+ *
+ * Measured across five real libraries, the unreleased offer ranged from 2 to
+ * 236 jobs and the stranded-singles offer from 153 to 2,847. A single visitor
+ * pressing the 2,847 one spends about forty-five minutes of MusicBrainz's
+ * one-request-per-second budget, and that budget is shared by everybody.
+ *
+ * A hundred people arriving from a link and pressing these would be tens of
+ * thousands of requests against a service that allows one per second and blocks
+ * by User-Agent when exceeded. That block would hit every user at once.
+ *
+ * Jobs are already sorted busiest-first, so the cap keeps the plays that matter
+ * and drops a long tail of one-play tracks. The card SAYS it is capped: silently
+ * checking a fraction while reporting the total is the same dishonesty as the
+ * findings list quietly rendering 200 of 338.
+ */
+export const OFFER_CAP = 150;
+
 export function discoveryOffers(scrobbles) {
   const { era, rest } = partitionEra(scrobbles || []);
   const offers = [];
@@ -2386,9 +2422,11 @@ export function discoveryOffers(scrobbles) {
     eraTracks.set(k, cur);
   }
   if (eraTracks.size) {
-    const jobs = [...eraTracks.values()].sort((a, b) => b.plays - a.plays);
+    const all = [...eraTracks.values()].sort((a, b) => b.plays - a.plays);
+    const jobs = all.slice(0, OFFER_CAP);
     offers.push({
       id: "era_released",
+      candidates: all.length,
       detector: "D14e",
       /*
        * Rendered inside the Unreleased material section, not above the findings.
@@ -2399,7 +2437,7 @@ export function discoveryOffers(scrobbles) {
        * pressing it may well confirm that nothing is.
        */
       section: "era",
-      title: `${jobs.length} track${jobs.length === 1 ? " is" : "s are"} filed ` +
+      title: `${all.length} track${all.length === 1 ? " is" : "s are"} filed ` +
              `as unreleased or leaked`,
       note: "Some may have had an official release since you tagged them, which " +
             "would mean the plays are stranded on a bootleg entry instead of " +
@@ -2415,6 +2453,7 @@ export function discoveryOffers(scrobbles) {
   for (const s of rest) if (s.album) owned.add(norm(s.album));
   const cands = d16Candidates(rest);
   if (cands.length) {
+    const capped = cands.slice(0, OFFER_CAP);
     offers.push({
       id: "stranded_singles",
       detector: "D16",
@@ -2428,7 +2467,8 @@ export function discoveryOffers(scrobbles) {
             "sees them. Your library holds only one album string for these, so " +
             "there is nothing to compare against locally.",
       action: "Check for album versions",
-      jobs: cands,
+      jobs: capped,
+      candidates: cands.length,
       owned,
     });
   }

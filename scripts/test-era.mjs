@@ -607,5 +607,45 @@ console.log("\nera findings name the library's album string");
      "D14f says nothing to a library whose eras are named outside the bracket");
 }
 
+/* ---- "loosies" is leak vocabulary; "vault" is not ----------------------- */
+{
+  /*
+   * A "loosie" is a loose track not attached to any project. The word is used
+   * almost nowhere outside leak communities and was simply missing from the
+   * marker list.
+   *
+   * It goes in the WEAK tier, so it only counts when the same artist is
+   * strongly marked somewhere else in the library. That containment is why a
+   * term like this can be added at all.
+   */
+  const lib = [
+    // Strong marker establishes this artist tags unreleased material.
+    ...Array.from({ length: 4 }, (_, i) =>
+      ({ artist: "Yeat", track: `S${i}`, album: "Unreleased", uts: 1000 + i })),
+    ...Array.from({ length: 3 }, (_, i) =>
+      ({ artist: "Yeat", track: `L${i}`, album: "Loosies", uts: 2000 + i })),
+  ];
+  const { era } = partitionEra(lib);
+  ok(era.some((s) => s.album === "Loosies"),
+     "a 'Loosies' bucket is recognised as unreleased material");
+
+  /*
+   * `vault` is the obvious next candidate and is a trap: Taylor Swift's "From
+   * The Vault" tracks are official commercial releases on her re-recordings.
+   * Treating those as unreleased would hide a real album from the split
+   * detectors, which is the exact damage the strong/weak split prevents.
+   */
+  const vault = [
+    ...Array.from({ length: 4 }, (_, i) =>
+      ({ artist: "Taylor Swift", track: `U${i}`, album: "Unreleased", uts: 1000 + i })),
+    ...Array.from({ length: 3 }, (_, i) =>
+      ({ artist: "Taylor Swift", track: `V${i}`,
+         album: "Red (Taylor's Version) [From The Vault]", uts: 2000 + i })),
+  ];
+  const v = partitionEra(vault);
+  ok(!v.era.some((s) => /From The Vault/.test(s.album)),
+     "but 'From The Vault' is a real release and stays out of the era bucket");
+}
+
 console.log(`\n${pass} passed, ${fail} failed (including appended block)\n`);
 process.exit(fail ? 1 : 0);

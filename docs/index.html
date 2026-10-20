@@ -39,8 +39,10 @@
       <select id="depth">
         <option value="2000" selected>Last 2,000 scrobbles (~15s)</option>
         <option value="10000">Last 10,000 (~1 min)</option>
-        <option value="50000">Last 50,000 (~5 min)</option>
-        <option value="0">Entire history (10 min or more)</option>
+        <!-- Labelled so the requirement is visible before you pick it, not
+             only after the scan is refused. -->
+        <option value="50000">Last 50,000 (~5 min, needs your own API key)</option>
+        <option value="0">Entire history (10 min or more, needs your own API key)</option>
       </select>
       <button id="go">Scan</button>
       <button id="stop" class="ghost hide" type="button">Stop</button>
@@ -507,6 +509,37 @@ $("f").onsubmit = async (e) => {
     return fail("That API key does not look right. It should be 32 characters, " +
                 "digits and letters a to f. Make sure you pasted the API key " +
                 "and not the shared secret.");
+  }
+
+  /*
+   * Deep scans need your own API key.
+   *
+   * Everyone shares one Last.fm key. A 2,000-scrobble scan costs about ten
+   * upstream pages and is nothing; the whole-history option costs seven hundred,
+   * and a handful of those at once is what gets a key rate limited and then
+   * suspended, which takes every visitor down at once rather than just the
+   * person who asked for it.
+   *
+   * Gated rather than removed, because the deep scan is the most interesting
+   * thing here and anyone who wants it can have it in about two minutes. The
+   * key is used for that scan only and never stored.
+   */
+  const DEEP_FROM = 10000;
+  const wanted = Number($("depth").value);
+  if (!apiKey && (wanted === 0 || wanted > DEEP_FROM)) {
+    $("ownkey").classList.remove("hide");
+    $("apikey").focus();
+    return fail(
+      wanted === 0
+        ? "Scanning an entire history needs your own Last.fm API key."
+        : `Scanning more than ${N(DEEP_FROM)} scrobbles needs your own ` +
+          `Last.fm API key.`,
+      "Everyone shares one key here, and a deep scan spends hundreds of " +
+      "requests against it. One person can exhaust it for everybody, so the " +
+      "big scans run on your own key instead. Getting one takes a minute at " +
+      "last.fm/api/account/create, and it is used for this scan only, never " +
+      "stored and never sent anywhere else. Smaller scans need nothing.",
+      null);
   }
 
   abort = false;
@@ -2516,9 +2549,11 @@ function render() {
       <p class="note">Unreleased material is protected. No detector will ever
       suggest merging it into an official release, whichever convention you
       use.${report.issues.some((i) => i.detector === "D14f") ? ` Entries marked
-      <span class="tag t-anomaly">pooled</span> hold many different tracks under
-      one album name, so they compete with real albums in your chart as a single
-      enormous record. There is a finding below for each.` : ""}</p>
+      <span class="tag t-anomaly">pooled</span> are filed under one name for the
+      whole artist rather than split by era or session, so every unreleased
+      track by them lands in a single bucket. That bucket then competes with
+      real albums in your chart as one enormous record. There is a finding
+      below for each.` : ""}</p>
       ${offerCards("era")}` : ""}
 
     ${im.biggest_movers.length ? (() => {
@@ -2712,7 +2747,9 @@ function offerCards(section) {
     .map((o) => o.done
       ? `<div class="panel offer done">
            <strong>${esc(o.title)}</strong>
-           <div class="note" style="margin:5px 0 0">Checked ${N(o.checked)}.
+           <div class="note" style="margin:5px 0 0">Checked ${N(o.checked)}${
+             o.candidates && o.candidates > o.checked
+               ? ` of ${N(o.candidates)}, the most played first` : ""}.
              ${o.found
                ? `${N(o.found)} added to the findings below.`
                : "Nothing came back, so none of these has a release the " +
@@ -2724,7 +2761,16 @@ function offerCards(section) {
            <div class="note" style="margin:5px 0 8px">${esc(o.note)}</div>
            <button class="check discover" type="button">${esc(o.action)}</button>
            <span class="note" style="margin:0 0 0 9px;color:var(--dim)">${
-             N(o.jobs.length)} lookup${o.jobs.length === 1 ? "" : "s"}, about ${
+             N(o.jobs.length)} lookup${o.jobs.length === 1 ? "" : "s"}${
+               /*
+                * Say when the check is CAPPED, rather than quietly doing a fraction
+                * of the number in the heading. Jobs are sorted busiest-first, so the
+                * cap keeps the plays that matter and drops a tail of one-play tracks.
+                * That is a defensible trade, but only if it is stated.
+                */
+               o.candidates && o.candidates > o.jobs.length
+                 ? `, the ${N(o.jobs.length)} most played of ${N(o.candidates)}`
+                 : ""}, about ${
              o.jobs.length < 30 ? "a few seconds"
                : Math.max(1, Math.round(o.jobs.length / 60)) + " min"
            }. Answers are cached and shared, so nobody pays for them twice.</span>
