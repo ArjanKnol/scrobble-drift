@@ -536,10 +536,14 @@ $("f").onsubmit = async (e) => {
           `Last.fm API key.`,
       "Everyone shares one key here, and a deep scan spends hundreds of " +
       "requests against it. One person can exhaust it for everybody, so the " +
-      "big scans run on your own key instead. Getting one takes a minute at " +
-      "last.fm/api/account/create, and it is used for this scan only, never " +
-      "stored and never sent anywhere else. Smaller scans need nothing.",
-      null);
+      "big scans run on your own key instead. The form asks for an " +
+      "application name and description: anything will do, it is not " +
+      "reviewed. Copy the API key it gives you, not the shared secret, into " +
+      "the box above. It is used for this scan only, never stored and never " +
+      "sent anywhere else. Smaller scans need no key at all.",
+      null,
+      { href: "https://www.last.fm/api/account/create",
+        label: "Get a free API key" });
   }
 
   abort = false;
@@ -957,7 +961,34 @@ async function fetchTopAlbums(user, apiKey, { maxPages = 6 } = {}) {
 }
 
 /** Visible countdown, so a wait never looks like a hang. */
+/*
+ * When the current backoff ends, in epoch ms, or 0 when nothing is waiting.
+ *
+ * Shared so the time estimate can ADD a pause it already knows about instead of
+ * contradicting it. The estimate used to read "about 3s left" while a fifteen
+ * second cooldown was in flight, with the banner underneath saying "retrying in
+ * 15s": two numbers on one screen disagreeing, which makes a reader distrust
+ * both.
+ */
+let pausedUntil = 0;
+
 async function waitVisibly(seconds, why) {
+  pausedUntil = Date.now() + seconds * 1000;
+
+  /*
+   * Strip the stale estimate from the status line as the pause begins.
+   *
+   * Nothing ticks while we wait, so whatever the status said a moment ago stays
+   * frozen on screen. That is how "about 3s left" ended up sitting directly
+   * above a banner counting down from fifteen. The progress itself is still
+   * true and stays; only the prediction is removed, because it is the one part
+   * that is now known to be wrong.
+   */
+  const line = $("status");
+  if (line && / · about .* left$/.test(line.textContent)) {
+    line.textContent = line.textContent.replace(/ · about .* left$/,
+                                                " · paused");
+  }
   const box = $("waiting");
   box.classList.remove("hide");
   for (let s = seconds; s > 0 && !abort; s--) {
@@ -965,6 +996,7 @@ async function waitVisibly(seconds, why) {
       Retrying in ${s}s. Your progress so far is kept.`;
     await sleep(1000);
   }
+  pausedUntil = 0;
   box.classList.add("hide");
 }
 
@@ -1357,16 +1389,54 @@ async function runDiscovery(offer) {
    */
   const say = (text) => { $("status").textContent = text; };
 
+  /*
+   * Completion times for the last few lookups, for the estimate below.
+   *
+   * A whole-run average is wrong in a way that always flatters: the first
+   * hundred answers usually come from the local cache in milliseconds, which
+   * drags the mean down and then stays in it forever. A rolling window forgets
+   * the cached head and tracks what is happening NOW.
+   */
+  const recent = [];
+  const WINDOW = 24;
+
+  /** Coarse and honest. False precision on a guess reads as a promise. */
+  const humanise = (sec) => {
+    if (sec < 10) return "a few seconds";
+    if (sec < 90) return `${Math.round(sec / 5) * 5}s`;
+    if (sec < 3600) return `${Math.max(1, Math.round(sec / 60))} min`;
+    return `${(sec / 3600).toFixed(1)} hours`;
+  };
+
   const tick = (label) => {
     done++;
     $("fill").style.width = ((done / total) * 100) + "%";
-    const elapsed = (Date.now() - started) / 1000;
-    const left = Math.round((elapsed / done) * (total - done));
+
+    recent.push(Date.now());
+    if (recent.length > WINDOW) recent.shift();
+
+    /*
+     * Rate from the window, plus any pause we already know we owe.
+     *
+     * Below five samples there is no rate worth quoting, so nothing is quoted.
+     * Saying "about 4s left" from two data points and then being wrong by a
+     * factor of thirty is worse than saying nothing at all.
+     */
+    const span = (recent[recent.length - 1] - recent[0]) / 1000;
+    const rate = recent.length >= 5 && span > 0
+      ? (recent.length - 1) / span : null;
+    const pause = Math.max(0, (pausedUntil - Date.now()) / 1000);
+    const left = rate !== null
+      ? (total - done) / rate + pause : null;
+
     $("status").textContent =
       `${label}: ${N(done)} of ${N(total)} lookups` +
       (cacheHits ? ` · ${N(cacheHits)} from local cache` : "") +
       (failed ? ` (${N(failed)} not found)` : "") +
-      ` · about ${left > 90 ? Math.round(left / 60) + " min" : left + "s"} left`;
+      (pause > 1
+        // Say the truth rather than a countdown that the banner contradicts.
+        ? ` · paused, waiting on the release database`
+        : left !== null ? ` · about ${humanise(left)} left` : "");
 
     if (document.hidden) {
       $("waiting").classList.remove("hide");
@@ -1913,7 +1983,20 @@ async function runDiscovery(offer) {
  * If there is nothing on screen yet, the error box IS the output. If there is,
  * the error goes above it as a banner and the findings stay put.
  */
-function fail(msg, detail = "", hint = undefined) {
+/*
+ * `link` is a separate, explicitly-trusted slot. Everything else stays escaped.
+ *
+ * `detail` can carry a message that came back from a server, so it is escaped
+ * and must stay escaped. But an error whose answer is "go and do this one thing
+ * on another site" needs that thing to be clickable, and telling someone to
+ * type out last.fm/api/account/create by hand is a worse answer than not
+ * mentioning it.
+ *
+ * So the caller passes {href, label} explicitly. The href is checked to be a
+ * literal https URL rather than interpolated blind, because a link is the one
+ * place in this panel where an injected value would actually be dangerous.
+ */
+function fail(msg, detail = "", hint = undefined, link = null) {
   $("prog").classList.add("hide");
 
   // Never stack error panels. A retry that fails again should replace the
@@ -1928,6 +2011,9 @@ function fail(msg, detail = "", hint = undefined) {
       <p style="margin:13px 0 0;display:flex;gap:9px;align-items:center;
                 flex-wrap:wrap">
         <button class="retry ghost" type="button">Try again</button>
+        ${link && /^https:\/\//.test(link.href || "") ? `<a class="jump"
+          href="${esc(link.href)}" target="_blank" rel="noopener noreferrer"
+          style="text-decoration:none">${esc(link.label || "Open")}</a>` : ""}
         ${hint === null ? "" : `<span class="note"
           style="color:var(--dim);margin:0">${esc(hint ?? "Or scan fewer months, " +
           "or use your own Last.fm API key for unlimited scanning.")}</span>`}

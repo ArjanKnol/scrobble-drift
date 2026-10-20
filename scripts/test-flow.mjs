@@ -45,6 +45,7 @@ const driftCode = readFileSync(join(root, "docs/drift.js"), "utf8")
 
 let pass = 0;
 const fails = [];
+const eqStr = (a, b, name) => ok(name + ` (got "${a}")`, a === b);
 const ok = (name, cond, detail = "") =>
   cond ? pass++ : fails.push(name + (detail ? `\n      ${detail}` : ""));
 
@@ -365,7 +366,17 @@ const code = html
    * Suggesting it sends people off to generate an API key for nothing.
    */
   ok("fail() takes a hint channel",
-     /function fail\(msg, detail = "", hint = undefined\)/.test(code));
+     /function fail\(msg, detail = "", hint = undefined, link = null\)/.test(code));
+  /*
+   * `link` is separate from `detail` on purpose. Detail can carry a message
+   * that came back from a server, so it stays escaped; a link is the one place
+   * in this panel where an injected value would be dangerous, so the href is
+   * checked to be a literal https URL rather than interpolated blind.
+   */
+  ok("and a separate, explicitly-trusted link slot",
+     /link && \/\^https:\\\/\\\/\/\.test\(link\.href/.test(code),
+     "An error whose answer is 'go and do this on another site' needs that " +
+     "thing clickable, without loosening the escaping on everything else.");
   ok("and null suppresses the generic advice entirely",
      /hint === null \? "" :/.test(code),
      "Not an empty string: the default must still apply when nothing is passed.");
@@ -675,6 +686,58 @@ if (fails.length) {
   const body = code.slice(at, code.indexOf("});", at));
   ok((body.match(/tick\("Verifying albums"\)/g) || []).length === 2,
      "including the early-return path, or the bar never reaches 100%");
+}
+
+/* ---- the time estimate must not flatter or contradict ------------------- */
+{
+  /*
+   * Observed live during a D16 run: the status read "about 3s left" while the
+   * banner directly underneath counted down from fifteen. Two numbers on one
+   * screen disagreeing, which makes a reader distrust both.
+   *
+   * Four separate faults, all of which flattered:
+   *   - averaged over the WHOLE run, so a cached head stayed in the mean forever
+   *   - ignored a backoff already in flight
+   *   - only recalculated on tick, so it froze mid-pause at its last wrong value
+   *   - mixed cache hits (~0ms) and network calls (~1s) into one rate
+   */
+  ok(/const recent = \[\];/.test(code) && /recent\.shift\(\)/.test(code),
+     "the rate comes from a rolling window, not the whole run");
+  ok(/recent\.length >= 5 && span > 0/.test(code),
+     "and no estimate at all below five samples",
+     "A figure from two data points is a guess dressed as a promise.");
+  ok(/const pause = Math\.max\(0, \(pausedUntil - Date\.now\(\)\) \/ 1000\)/.test(code),
+     "a backoff already in flight is added rather than ignored");
+  ok(/paused, waiting on the release database/.test(code),
+     "and while paused it says so instead of counting down");
+  ok(/let pausedUntil = 0;/.test(code) && /pausedUntil = Date\.now\(\)/.test(code),
+     "waitVisibly publishes when the pause ends, so both agree on one number");
+  ok(/line\.textContent\.replace\(\/ · about \.\* left\$\//.test(code),
+     "the stale estimate is stripped when a pause begins, since nothing ticks",
+     "Progress stays; only the prediction known to be wrong is removed.");
+
+  /*
+   * The arithmetic itself, checked rather than asserted. On a run whose first
+   * 200 answers came from cache in 2s and whose remainder runs at 1/s, the old
+   * whole-run mean said "a few seconds" for work that takes two minutes.
+   */
+  const humanise = (sec) => {
+    if (sec < 10) return "a few seconds";
+    if (sec < 90) return `${Math.round(sec / 5) * 5}s`;
+    if (sec < 3600) return `${Math.max(1, Math.round(sec / 60))} min`;
+    return `${(sec / 3600).toFixed(1)} hours`;
+  };
+  const t = 1e6;
+  const win = [t, t + 1000, t + 2000, t + 3000, t + 4000, t + 5000];
+  const span = (win[win.length - 1] - win[0]) / 1000;
+  const rate = (win.length - 1) / span;
+  ok(Math.abs(rate - 1) < 0.01, `the window rate is 1/s (${rate.toFixed(2)})`);
+  eqStr(humanise((300 - 200) / rate), "2 min",
+     "so 100 remaining at 1/s reads as 2 min");
+  eqStr(humanise(100 * (2 / 200)), "a few seconds",
+     "where the old whole-run mean would have said this");
+  eqStr(humanise(5), "a few seconds", "and small numbers stay vague");
+  eqStr(humanise(3700), "1.0 hours", "while long ones do not pretend to seconds");
 }
 
 console.log("  The scan flow cannot claim to be finished when it is not.\n");
