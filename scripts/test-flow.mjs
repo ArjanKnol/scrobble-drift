@@ -642,4 +642,39 @@ if (fails.length) {
      "with the version itself a named constant, so bumping it is one edit");
 }
 
+/* ---- the D16 verification pass is counted, not hidden ------------------- */
+{
+  /*
+   * D16 asks MusicBrainz about the albums it is about to NAME, because Spotify
+   * carries no editorial metadata and cannot tell a bootleg compilation from a
+   * real record.
+   *
+   * The first version ran that as a bare sequential loop AFTER the main pool,
+   * so the bar sat at "153 of 153 lookups, about 0s left" while the work
+   * carried on behind it and tripped MusicBrainz's limiter. Observed live: the
+   * offer looked frozen for over a minute while the UI claimed it had finished.
+   *
+   * A progress bar that says "done" while work continues is the same lie this
+   * file already has two other assertions about.
+   */
+  ok(/total \+= found\.length;/.test(code),
+     "the verification calls are added to the progress total",
+     "Otherwise the bar reaches 100% and then keeps working.");
+  ok(/await pool\(found, \d+, async \(f\) => \{/.test(code),
+     "and run through the same pool as every other phase, not a bare loop");
+  ok(/tick\("Verifying albums"\)/.test(code),
+     "ticking as they complete, so the bar actually moves");
+  ok(/Verifying \$\{N\(found\.length\)\} album/.test(code),
+     "and the status line says what is happening before it starts");
+  /*
+   * Every path through the pooled body must tick, including the early return
+   * for a finding with no usable track. One that does not leaves the bar
+   * permanently short of its total.
+   */
+  const at = code.indexOf("await pool(found,");
+  const body = code.slice(at, code.indexOf("});", at));
+  ok((body.match(/tick\("Verifying albums"\)/g) || []).length === 2,
+     "including the early-return path, or the bar never reaches 100%");
+}
+
 console.log("  The scan flow cannot claim to be finished when it is not.\n");

@@ -1813,16 +1813,39 @@ async function runDiscovery(offer) {
      * costs a handful of calls, while verifying everything would double the
      * cost of the offer to re-confirm silence.
      */
-    for (const f of found) {
-      const probe = f.members?.find((m) => m?.track) || f.members?.[0];
-      if (!probe?.track) continue;
-      const mb = await paced("/api/mb/recording",
-                             { artist: f.artist || probe.artist, track: probe.track },
-                             2, "rec");
-      if (mb) mbVerdicts.set(`${f.artist || probe.artist}\u241f${probe.track}`, mb);
+    if (found.length) {
+      /*
+       * Counted into `total` and announced BEFORE it runs.
+       *
+       * The first version ran this as a bare sequential loop after the main
+       * pool, so the progress bar sat at "153 of 153 lookups, about 0s left"
+       * while the verification quietly carried on behind it, tripping
+       * MusicBrainz's rate limiter on the way. Observed live: the offer looked
+       * frozen for over a minute with the bar claiming it was finished.
+       *
+       * A progress bar that says "done" while work continues is the same class
+       * of lie this project has already fixed twice. Pooled, paced and counted
+       * like every other phase.
+       */
+      total += found.length;
+      say(`Verifying ${N(found.length)} album${found.length === 1 ? "" : "s"} ` +
+          `against MusicBrainz, so a bootleg is not named as a real one…`);
+
+      await pool(found, 3, async (f) => {
+        const probe = f.members?.find((m) => m?.track) || f.members?.[0];
+        if (!probe?.track) { tick("Verifying albums"); return; }
+        const artist = f.artist || probe.artist;
+        const mb = await paced("/api/mb/recording",
+                               { artist, track: probe.track }, 2, "rec");
+        if (mb) mbVerdicts.set(`${artist}\u241f${probe.track}`, mb);
+        tick("Verifying albums");
+      });
+
+      const before = found.length;
+      found = d16Verify(found, (artist, track) =>
+        mbVerdicts.get(`${artist}\u241f${track}`) || null);
+      if (stats) stats.d16_rejected = before - found.length;
     }
-    found = d16Verify(found, (artist, track) =>
-      mbVerdicts.get(`${artist}\u241f${track}`) || null);
   }
 
   report.issues = [...report.issues, ...found].sort(byImportance);
@@ -1888,6 +1911,27 @@ function fail(msg, detail = "", hint = undefined) {
    * again. Scanning is idempotent and resumes from whatever is already cached on
    * the device, so re-running is cheap and safe.
    */
+  /*
+   * A misspelled username gets a different button, because retrying cannot help.
+   *
+   * "Try again" re-runs the SAME scan for the SAME name, and for a name that
+   * does not exist it will fail identically every time. Offering it is the same
+   * mistake as the generic "use your own API key" hint that `hint: null`
+   * already suppresses here: a workaround that cannot work.
+   *
+   * What the reader needs is the username box, so that is what the button does.
+   */
+  const noUser = $("out").querySelector(".panel.err .retry");
+  if (noUser && /no user called/i.test($("out").textContent || "")) {
+    noUser.textContent = "Edit the username";
+    noUser.onclick = () => {
+      $("out").innerHTML = "";
+      $("user").focus();
+      $("user").select();
+    };
+    return;
+  }
+
   const btn = $("out").querySelector(".panel.err .retry");
   if (btn) btn.onclick = async () => {
     btn.disabled = true;
