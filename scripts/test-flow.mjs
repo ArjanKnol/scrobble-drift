@@ -23,7 +23,19 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const html = readFileSync(join(root, "docs/index.html"), "utf8");
+/*
+ * Line endings are normalised on read.
+ *
+ * These are source-SHAPE tests and several of their patterns anchor on "\n".
+ * The repo is edited from Windows, so a checkout with core.autocrlf turns every
+ * line ending into CRLF and `;\n` stops matching, which fails the test with
+ * "could not extract esc from index.html" while the code is perfectly fine.
+ *
+ * A test that depends on which OS last touched the file is worse than no test:
+ * it cries wolf, and the next person starts ignoring it.
+ */
+const lf = (s) => s.replace(/\r\n/g, "\n");
+const html = lf(readFileSync(join(root, "docs/index.html"), "utf8"));
 // Some invariants span both files: the page delegates a ruling to drift.js, and
 // asserting only on the call site would pass with the callee deleted.
 const driftCode = readFileSync(join(root, "docs/drift.js"), "utf8")

@@ -9,7 +9,7 @@
  * Run: node scripts/test-score.mjs
  */
 
-import { hygieneScore, SCORED_DETECTORS, UNSCORED_BY_DESIGN, analyse }
+import { chartWrongness, hygieneScore, SCORED_DETECTORS, UNSCORED_BY_DESIGN, analyse }
   from "../docs/drift.js";
 
 let pass = 0, fail = 0;
@@ -442,5 +442,56 @@ console.log("\nbounds and degenerate input");
 }
 
 /* ------------------------------------------------------------------------- */
+/* ---- chart wrongness: the count the headline is built on ---------------- */
+{
+  /*
+   * The old score measured library SIZE as much as library quality. A
+   * 10,000-scrobble library scored 16/100 off 895 findings that were almost
+   * entirely ordinary Spotify tagging artefacts, while a smaller and messier one
+   * scored 77. Readers reasonably took 16 to mean "your library is broken".
+   *
+   * This counts the thing a reader actually cares about and can go and verify: a
+   * play is in the wrong place if it sits under a non-dominant spelling of an
+   * album, or under no album at all.
+   */
+  const S = (n, album) => Array.from({ length: n }, () => ({ artist: "A", track: "t", album }));
+  const scrobbles = [...S(880, "Rodeo"), ...S(20, "Rodeo (Deluxe)"), ...S(100, null)];
+
+  const w = chartWrongness(scrobbles, [
+    { detector: "D4", members: [{ album: "Rodeo", plays: 880 },
+                                { album: "Rodeo (Deluxe)", plays: 20 }] },
+  ]);
+  eq(w.misplaced, 20, "everything outside the dominant spelling is misplaced");
+  eq(w.blank, 100, "and a play with no album is absent from the chart entirely");
+  eq(w.affected, 120, "the two combine into the headline figure");
+  eq(w.share, 0.12, "expressed as a share of all plays");
+  eq(w.albums, 1, "with the number of albums involved");
+
+  /*
+   * D15 splits LAST.FM's chart, not the one computed here: this groups on the
+   * track artist and never saw the split, so those plays are already in the
+   * right bucket. Counting them would double-count.
+   */
+  const d15 = chartWrongness(scrobbles, [
+    { detector: "D15", chart_already_correct: true,
+      members: [{ album: "X", plays: 150 }, { album: "X", plays: 50 }] },
+  ]);
+  eq(d15.misplaced, 0, "a finding our own chart already counts is not wrongness");
+
+  // A convention is not a defect and must not be charged for.
+  const style = chartWrongness(scrobbles, [
+    { detector: "D4", style_choice: true,
+      members: [{ album: "Unreleased", plays: 300 }, { album: "Unreleased 2", plays: 9 }] },
+  ]);
+  eq(style.misplaced, 0, "a declared tagging choice costs nothing");
+
+  // Degenerate inputs must not throw: this feeds the first thing on the page.
+  for (const [sc, is] of [[[], []], [null, null], [scrobbles, null]]) {
+    const out = chartWrongness(sc, is);
+    ok(Number.isFinite(out.share), "an empty or null input still returns a number");
+  }
+  eq(chartWrongness([], []).share, 0, "and no plays is zero, not NaN");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

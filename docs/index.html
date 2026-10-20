@@ -2107,6 +2107,38 @@ function render() {
   $("out").innerHTML = `
     ${scanSummary()}
     <h2>${esc(d.user)}</h2>
+    ${/*
+       * The headline is a COUNT, not a score.
+       *
+       * A score out of 100 is a judgement whose derivation the reader cannot
+       * check, and the old one was measuring library size as much as library
+       * quality: 16/100 for a 10,000-scrobble library whose faults were almost
+       * all ordinary Spotify tagging. "184 of your 10,000 plays sit on the
+       * wrong album string" is the same information without the verdict, and
+       * it is falsifiable: the reader can go and look.
+       *
+       * The score stays, below, as a summary of the four areas. It is no longer
+       * the first thing anyone reads.
+       */""}
+    ${(() => {
+      const w = d.wrongness;
+      if (!w || !w.total) return "";
+      const pct = w.share * 100;
+      const shown = pct > 0 && pct < 0.1 ? "<0.1" : pct.toFixed(1);
+      return `<div class="panel" style="margin-bottom:14px">
+        <div class="metric"><div class="n" style="color:${
+          w.share < 0.01 ? "var(--good)" : w.share < 0.05 ? "var(--warn)" : "var(--bad)"
+        }">${shown}%</div>
+        <div class="l">of your plays are in the wrong place</div></div>
+        <p class="note" style="margin:9px 0 0">
+          <strong>${N(w.affected)}</strong> of ${N(w.total)} plays:
+          ${N(w.misplaced)} sitting under a non-dominant spelling of an album
+          ${w.albums ? `across ${N(w.albums)} album${w.albums === 1 ? "" : "s"}` : ""},
+          and ${N(w.blank)} with no album at all, which the album chart cannot
+          see. Everything else below is either already counted correctly or a
+          tagging choice rather than a defect.</p>
+      </div>`;
+    })()}
     <div class="grid g2">
       <div class="panel">
         <div class="score" style="color:${col(h.score)}"><span id="score-n"

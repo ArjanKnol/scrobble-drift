@@ -3056,6 +3056,70 @@ const bucketWeight = (v) => {
   return Number.isFinite(v) && v > 0 ? v : 0;
 };
 
+/**
+ * How wrong is your album chart, as a number rather than a feeling?
+ *
+ * The question the score should have been answering all along. The old one
+ * counted findings weighted by severity, which made library SIZE the dominant
+ * term: a 10,000-scrobble library scored 16/100 off 895 findings that were
+ * almost entirely ordinary Spotify tagging artefacts, while a smaller and
+ * messier one scored 77. The number was measuring how much there was to look
+ * at, not how much was wrong.
+ *
+ * What a reader actually wants to know is whether their chart lies to them, and
+ * that has a concrete definition: a play is in the wrong place if it sits under
+ * a non-dominant spelling of an album it belongs to, or under no album at all.
+ * Both are countable.
+ *
+ * Deliberately excluded:
+ *
+ *   chart_already_correct  D15 splits Last.fm's chart, not the one computed
+ *                          here, because this groups on the track artist and
+ *                          never saw the split. Counting it would double-count
+ *                          plays that are already in the right bucket.
+ *   style_choice           A convention is not a defect. Pooling unreleased
+ *                          tracks under one name is a choice, and the reader is
+ *                          told about it without being charged for it.
+ *
+ * Returns the raw counts as well as the share, because the headline should be
+ * "184 of your 10,000 plays sit on the wrong album string" rather than a score
+ * whose derivation nobody can check.
+ */
+const CHART_DETECTORS = new Set(["D0", "D4"]);
+
+export function chartWrongness(scrobbles, issues) {
+  const total = (scrobbles || []).length;
+  // A play with no album is not merely mis-filed, it is absent from the album
+  // chart entirely, which is the most wrong a play can be.
+  const blank = (scrobbles || []).filter((s) => s && !s.album).length;
+
+  let misplaced = 0;
+  const albums = new Set();
+
+  for (const i of issues || []) {
+    if (!CHART_DETECTORS.has(i?.detector)) continue;
+    if (i.chart_already_correct || i.style_choice) continue;
+
+    const mem = (i.members || [])
+      .filter((m) => m?.album && Number.isFinite(m.plays));
+    if (mem.length < 2) continue;
+
+    // Everything outside the most-played spelling is in the wrong place. Which
+    // spelling is "right" is the user's call, but the count does not depend on
+    // that: consolidating either way moves the same number of plays.
+    const sorted = [...mem].sort((a, b) => b.plays - a.plays);
+    misplaced += sorted.slice(1).reduce((n, m) => n + m.plays, 0);
+    albums.add(norm(sorted[0].album));
+  }
+
+  const affected = misplaced + blank;
+  return {
+    misplaced, blank, affected, total,
+    albums: albums.size,
+    share: total ? affected / total : 0,
+  };
+}
+
 export function hygieneScore(totalPlays, issues, albumStrings = 0, weights = null) {
   const subscores = {};
   const counts = {};
@@ -4437,6 +4501,14 @@ export function analyse(scrobbles, { official, topAlbums } = {}) {
     ),
     era: d14Overview(era, total),
     impact: chartImpact(rest, splits),
+    /*
+     * Computed over the WHOLE library, not `rest`.
+     *
+     * Blank-album plays are the largest single component of chart wrongness and
+     * they are not excluded by the era guard, so narrowing the input here would
+     * quietly undercount the thing the headline is about.
+     */
+    wrongness: chartWrongness(scrobbles, issues),
     summary_by_detector: byDetector,
     issues,
     issues_total: issues.length,

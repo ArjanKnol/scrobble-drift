@@ -146,7 +146,7 @@ ok(
    * preference themselves. A requestAnimationFrame loop does not care what the
    * media query says.
    */
-  const html = readFileSync(join(root, "docs/index.html"), "utf8");
+  const html = readFileSync(join(root, "docs/index.html"), "utf8").replace(/\r\n/g, "\n");
   const guards = html.match(
     /matchMedia\?\.\("\(prefers-reduced-motion: reduce\)"\)\.matches/g) || [];
   ok("the JS count-up and bar growth each check the preference too",
@@ -179,7 +179,7 @@ ok(
    * Lasts one frame. Long enough to be seen, too short to reproduce on demand,
    * which is why it is pinned here rather than left to manual testing.
    */
-  const html = readFileSync(join(root, "docs/index.html"), "utf8");
+  const html = readFileSync(join(root, "docs/index.html"), "utf8").replace(/\r\n/g, "\n");
   ok("the count-up clamps progress at both ends",
      /Math\.min\(Math\.max\(\(now - start\) \/ DUR, 0\), 1\)/.test(html),
      "Clamping only the top lets a negative elapsed time through, and a cubic " +
