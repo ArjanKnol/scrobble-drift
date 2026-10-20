@@ -9,7 +9,8 @@
  * Run: node scripts/test-score.mjs
  */
 
-import { chartWrongness, fixList, fixListText, recoverablePlays, hygieneScore, SCORED_DETECTORS, UNSCORED_BY_DESIGN, analyse }
+import { chartWrongness, fixList, fixListText, recoverablePlays,
+  blankAlbumSummary, NO_ALBUM, hygieneScore, SCORED_DETECTORS, UNSCORED_BY_DESIGN, analyse }
   from "../docs/drift.js";
 
 let pass = 0, fail = 0;
@@ -541,6 +542,56 @@ console.log("\nbounds and degenerate input");
   ok(/change "Rodeo \(Deluxe\)" \(120\) -> "Rodeo"/.test(txt),
      "with the exact before and after strings, which is the whole point");
   eq(fixListText([], "x"), "", "no fixes means no file, not an empty template");
+}
+
+/* ---- blank albums are usually the biggest single lever ----------------- */
+{
+  /*
+   * Measured on a real library: 1,181 of 2,553 misplaced plays had no album tag
+   * at all. 46% of everything wrong with the chart, arriving as a single row
+   * reading "1,181 scrobbles have no album, across 619 tracks". True, and
+   * useless: 619 tracks is hopeless, and nothing suggested where to start.
+   *
+   * Grouped by artist because that is how the work is actually done, and the
+   * shape of this problem is reliably "a few artists, lots of tracks".
+   */
+  const tracks = [
+    { artist: "Juice WRLD", track: "Lucid Dreams", plays: 300 },
+    { artist: "Juice WRLD", track: "Righteous", plays: 120 },
+    { artist: "Juice WRLD", track: "Robbery", plays: 80 },
+    { artist: "Juice WRLD", track: "Wasted", plays: 40 },
+    { artist: "Drake", track: "Passionfruit", plays: 200 },
+    { artist: "Adele", track: "Hello", plays: 60 },
+  ];
+  const d5 = { detector: "D5", plays_affected: 800, tracks };
+  const b = blankAlbumSummary([d5]);
+
+  eq(b.plays, 800, "the blank play count comes from the finding");
+  eq(b.tracks, 6, "across every blank track, not just the rendered ones");
+  eq(b.artists[0].artist, "Juice WRLD", "artists ranked by plays");
+  eq(b.artists[0].plays, 540, "with their tracks summed");
+  eq(b.artists[0].tracks, 4, "and counted");
+  eq(b.halfCoveredBy, 1,
+     "and it says how few artists cover half, which is the actionable part");
+
+  eq(blankAlbumSummary([{ detector: "D4" }]), null,
+     "no D5 finding means no panel, rather than an empty one");
+  eq(blankAlbumSummary([]), null, "and neither does an empty report");
+
+  /*
+   * "(no album)" is OUR placeholder for a scrobble carrying none. Telling
+   * someone to change "(no album)" to something reads as an instruction to find
+   * and replace a string that appears nowhere in their library.
+   */
+  const txt = fixListText([{
+    detector: "D4", artist: "Imogen Heap", track: "Headlock",
+    members: [{ album: "Speak For Yourself", plays: 20 },
+              { album: NO_ALBUM, plays: 14 }],
+  }], "u", 1);
+  ok(/set album to "Speak For Yourself" on 14 plays that have none/.test(txt),
+     "a blank source is phrased as the action it is");
+  ok(!/change "\(no album\)"/.test(txt),
+     "and never as a find-and-replace on a string that does not exist");
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

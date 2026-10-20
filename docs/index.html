@@ -144,7 +144,7 @@ import {
   analyse, partitionEra, d14eReleasedSince, d16StrandedSingles,
   hygieneScore, weakEraCandidates, officialKey, byImportance,
   resolveOne, isResolvable, discoveryOffers, baseTitle, affectsChart,
-  fixList, fixListText,
+  fixList, fixListText, blankAlbumSummary, NO_ALBUM,
 } from "./drift.js";
 /*
  * Six imports left with the resolve phase: d0Resolve, d5Resolve, verifyEraNames,
@@ -2158,8 +2158,20 @@ function render() {
       return `<div class="panel" style="margin-bottom:14px">
         <div class="sec-head" style="margin-top:0">
           <strong>Start here</strong><span class="tag">${N(rows.length)}</span>
+          ${/*
+             * Says what share of the problem these twenty actually solve.
+             *
+             * Measured on a real library: the top 20 recovered 211 of 2,553
+             * misplaced plays, which is 8%. Presenting that the same way as a
+             * library where twenty fixes clear most of it would overstate what
+             * fifteen minutes buys, and this report's whole claim is that its
+             * numbers can be checked.
+             */""}
           <span class="note">These recover <strong>${N(total)}</strong> plays
-            between them, most first. Each is a manual edit on Last.fm.</span>
+            between them${d.wrongness?.affected
+              ? `, ${Math.round(100 * total / d.wrongness.affected)}% of the
+                 ${N(d.wrongness.affected)} in the wrong place` : ""},
+            most first. Each is a manual edit on Last.fm.</span>
         </div>
         ${rows.map(({ issue, recovers }) => {
           const mem = [...(issue.members || [])].sort((a, b) => b.plays - a.plays);
@@ -2169,7 +2181,12 @@ function render() {
               ? ` &mdash; ${esc(issue.track)}` : ""}
               <span class="note" style="margin:0;display:block">${
                 mem.slice(1).map((m) =>
-                  `<code>${esc(m.album)}</code> &rarr; <code>${esc(to.album)}</code>`
+                  // "(no album)" is our placeholder, not a string anyone can
+                  // search for and replace. Phrase it as the action it is.
+                  m.album === NO_ALBUM
+                    ? `set album to <code>${esc(to.album)}</code> on ${N(m.plays)}
+                       with none`
+                    : `<code>${esc(m.album)}</code> &rarr; <code>${esc(to.album)}</code>`
                 ).join(" &middot; ")}</span></span>
             <span class="v">+${N(recovers)}</span></div>`;
         }).join("")}
@@ -2179,6 +2196,41 @@ function render() {
             to work through by hand. Last.fm has no bulk edit and no write API,
             so there is nothing to import this into.</span>
         </div>
+      </div>`;
+    })()}
+    ${/*
+       * Blank albums get their own panel, because they are usually the single
+       * biggest thing wrong and the report buried them.
+       *
+       * On a real library they were 1,181 of 2,553 misplaced plays: 46% of
+       * everything, arriving as one row reading "1,181 scrobbles have no album,
+       * across 619 tracks". True, and useless. 619 tracks is hopeless; "eight
+       * artists account for half of them" is an afternoon's work.
+       */""}
+    ${(() => {
+      const b = blankAlbumSummary(d.issues);
+      if (!b || b.plays < 20) return "";
+      const share = d.wrongness?.affected
+        ? Math.round(100 * b.plays / d.wrongness.affected) : 0;
+      return `<div class="panel" style="margin-bottom:14px">
+        <div class="sec-head" style="margin-top:0">
+          <strong>Plays with no album</strong>
+          <span class="tag">${N(b.plays)}</span>
+          <span class="note">${share
+            ? `<strong>${share}%</strong> of everything in the wrong place. ` : ""
+          }These are missing from your album chart entirely, not merely filed
+          under the wrong name.</span>
+        </div>
+        <p class="note" style="margin:0 0 9px">Across ${N(b.tracks)} tracks, but
+          concentrated: the top ${N(b.halfCoveredBy)}
+          artist${b.halfCoveredBy === 1 ? "" : "s"} account for half of them.
+          Fixing by artist is far quicker than by track.</p>
+        ${b.artists.slice(0, 10).map((a) => `<div class="row">
+          <span>${esc(a.artist)}
+            <span class="note" style="margin:0;display:block">${
+              esc(a.top.join(", "))}${a.tracks > a.top.length
+                ? ` and ${N(a.tracks - a.top.length)} more` : ""}</span></span>
+          <span class="v">${N(a.plays)}</span></div>`).join("")}
       </div>`;
     })()}
     <div class="grid g2">

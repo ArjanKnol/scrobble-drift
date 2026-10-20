@@ -3247,6 +3247,51 @@ export function fixList(issues, limit = 20) {
  * to. Producing something that looks like a machine format would promise a
  * workflow that does not exist, which is a worse failure than producing nothing.
  */
+/** The string d4AlbumSplits uses for a scrobble carrying no album at all. */
+export const NO_ALBUM = "(no album)";
+
+/**
+ * Blank-album plays, grouped by artist.
+ *
+ * Measured on a real library: 1,181 of 2,553 misplaced plays had no album tag
+ * at all. That is 46% of everything wrong with the chart, and it arrived as a
+ * single row reading "1,181 scrobbles have no album, across 619 tracks". One
+ * row, half the problem, and nothing about it suggested where to start.
+ *
+ * Grouped by artist because that is how the work is actually done: you open an
+ * artist's page in your library and fix their tracks together. 619 tracks is
+ * hopeless; "these 8 artists account for half of them" is an afternoon.
+ */
+export function blankAlbumSummary(issues) {
+  const d5 = (issues || []).find((i) => i?.detector === "D5");
+  if (!d5?.tracks?.length) return null;
+
+  const byArtist = new Map();
+  for (const t of d5.tracks) {
+    const k = norm(t.artist);
+    const rec = byArtist.get(k) ||
+      { artist: t.artist, plays: 0, tracks: 0, top: [] };
+    rec.plays += t.plays;
+    rec.tracks++;
+    if (rec.top.length < 3) rec.top.push(t.track);
+    byArtist.set(k, rec);
+  }
+
+  const artists = [...byArtist.values()].sort((a, b) => b.plays - a.plays);
+  const plays = d5.plays_affected || 0;
+
+  // How many artists it takes to cover half the blank plays. The useful shape
+  // of this problem is almost always "a few artists, lots of tracks".
+  let running = 0, half = 0;
+  for (const a of artists) {
+    running += a.plays;
+    half++;
+    if (running >= plays / 2) break;
+  }
+
+  return { plays, tracks: d5.tracks.length, artists, halfCoveredBy: half };
+}
+
 export function fixListText(issues, user, limit = 20) {
   const rows = fixList(issues, limit);
   if (!rows.length) return "";
@@ -3268,7 +3313,15 @@ export function fixListText(issues, user, limit = 20) {
       .replace(/\s+-\s+$/, ""));
     lines.push(`   recovers ${recovers} plays`);
     for (const m of mem.slice(1)) {
-      lines.push(`   change "${m.album}" (${m.plays}) -> "${to.album}"`);
+      /*
+       * "(no album)" is our own placeholder, not a string the user can edit.
+       * Printing `change "(no album)" -> "X"` reads as an instruction to find
+       * and replace text that does not exist anywhere in their library.
+       */
+      lines.push(m.album === NO_ALBUM
+        ? `   set album to "${to.album}" on ${m.plays} play` +
+          `${m.plays === 1 ? "" : "s"} that have none`
+        : `   change "${m.album}" (${m.plays}) -> "${to.album}"`);
     }
     lines.push("");
   }
