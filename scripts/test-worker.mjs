@@ -18,6 +18,7 @@ import { readFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+const lf = (t) => t.replace(/\r\n/g, "\n");
 let pass = 0, fail = 0;
 const ok = (cond, msg) => {
   if (cond) { pass++; console.log(`  ok   ${msg}`); }
@@ -884,6 +885,44 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
    */
   ok(/env, `one\d+:/.test(src),
      "the Spotify per-track cache key is versioned so the filter takes effect");
+}
+
+/* ---- an unknown username says so --------------------------------------- */
+{
+  /*
+   * Typing a username that does not exist reported "upstream failure", which
+   * reads as "our server is broken" and invites a retry that can never succeed.
+   *
+   * There WAS a handler for this, `err.lastfm === 6`, and it never fired. Last
+   * .fm answers an unknown user with a bare HTTP 404 and no JSON body, so
+   * callLastfm throws before anything can set `err.lastfm`. A handler that
+   * cannot be reached is worse than no handler: it reads as covered.
+   *
+   * Verified live first: /api/scrobbles for a nonexistent user returned
+   * 502 {"error":"upstream failure","reason":"Error: last.fm http 404"}.
+   */
+  const src = await readFile(
+    new URL("../worker/src/index.js", import.meta.url), "utf8");
+
+  ok(/err\.lastfm === 6 \|\| err\.status === 404/.test(src),
+     "both routes to 'no such user' are checked, not just the JSON one",
+     "HTTP 404 arrives with no body, so err.lastfm is never set.");
+  ok((src.match(/err\.status === 404/g) || []).length >= 2,
+     "in the scrobbles handler and the generic one");
+  ok(/error: "no such user"/.test(src) && /Check the spelling/.test(src),
+     "and it names the problem and what to do about it");
+
+  const html = lf(await readFile(
+    new URL("../docs/index.html", import.meta.url), "utf8"));
+  const at = html.indexOf("if (res.status === 404)");
+  ok(at > 0, "the client handles 404 specifically");
+  /*
+   * `hint: null` matters. The default advice is "scan fewer months, or use
+   * your own Last.fm API key", and neither helps a typo: every key gets the
+   * same 404 and a shallower scan asks about the same missing user.
+   */
+  ok(/hint: null/.test(html.slice(at, at + 900)),
+     "with no generic workaround offered, because none can help a typo");
 }
 
 /* ---- the forbidden tracklist endpoint stays gone ----------------------- */

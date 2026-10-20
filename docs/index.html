@@ -1045,7 +1045,25 @@ async function fetchAll(user, cap, apiKey) {
         (all.length ? `Kept the ${N(all.length)} scrobbles fetched so far.` : ""));
     }
 
-    if (res.status === 404) throw new Error("No such Last.fm user.");
+    /*
+     * An unknown username. Permanent, so no retry and no workaround offered.
+     *
+     * This threw a bare Error, which the UI rendered with the generic advice
+     * "scan fewer months, or use your own Last.fm API key". Neither helps a
+     * typo: every key gets the same 404 and a shallower scan asks about the
+     * same missing user. `hint: null` suppresses that, the same way it is
+     * suppressed for a private profile.
+     */
+    if (res.status === 404) {
+      const body = await res.json().catch(() => ({}));
+      throw failure(
+        body.message || "No such Last.fm user.",
+        body.fix ||
+          "Check the spelling. A Last.fm username is the one in the profile " +
+          "URL, last.fm/user/NAME, which is not always the same as the " +
+          "display name shown on the page.",
+        { hint: null });
+    }
 
     /*
      * A private listening history. Permanent, so never retried.

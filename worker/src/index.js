@@ -58,7 +58,7 @@
  *
  * Bump this in the same commit as any Worker change. /api/health reports it.
  */
-const BUILD = "2026-10-20-24-spotify-primary-credit-only";
+const BUILD = "2026-10-20-25-say-no-such-user";
 
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";
@@ -645,8 +645,22 @@ async function lastfm(url, env, cors) {
     return json(await callLastfm(params, key), 200, cors);
   } catch (err) {
     if (err instanceof Retryable) throw err;
-    return json({ error: err.message, lastfm: err.lastfm ?? null },
-                err.lastfm === 6 ? 404 : 502, cors);
+    /*
+     * `err.status === 404` as well as `err.lastfm === 6`.
+     *
+     * Both mean "no such user", and only the second was being checked. Last.fm
+     * answers an unknown username with HTTP 404 and no JSON body at all, so
+     * callLastfm throws before anything can set `err.lastfm`, the condition
+     * never fired, and a simple typo in the username box was reported as
+     * "upstream failure" -- which reads as "our server is broken" and invites a
+     * retry that cannot ever succeed.
+     */
+    const missing = err.lastfm === 6 || err.status === 404;
+    return json({
+      error: missing ? "no such user" : err.message,
+      lastfm: err.lastfm ?? null,
+      ...(missing ? { user: params.user || null } : {}),
+    }, missing ? 404 : 502, cors);
   }
 }
 
@@ -724,7 +738,22 @@ async function scrobbles(url, request, env, cors) {
         if (out.length) break;
         throw err;
       }
-      if (err.lastfm === 6) return json({ error: "no such user" }, 404, cors);
+      /*
+       * Same two conditions as the generic handler, and for the same reason: an
+       * unknown username comes back as a bare HTTP 404 with no JSON body, so
+       * `err.lastfm` is never set and this used to fall through to "upstream
+       * failure".
+       */
+      if (err.lastfm === 6 || err.status === 404) {
+        return json({
+          error: "no such user",
+          user,
+          message: `Last.fm has no user called "${user}".`,
+          fix: "Check the spelling. A Last.fm username is the one in the " +
+               "profile URL, last.fm/user/NAME, which is not always the same " +
+               "as the display name shown on the page.",
+        }, 404, cors);
+      }
 
       /*
        * 403 on getRecentTracks means the listening history is PRIVATE.
