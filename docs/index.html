@@ -144,7 +144,7 @@ import {
   analyse, partitionEra, d14eReleasedSince, d16StrandedSingles,
   hygieneScore, weakEraCandidates, officialKey, byImportance,
   resolveOne, isResolvable, discoveryOffers, baseTitle, affectsChart,
-  fixList, fixListText, blankAlbumSummary, NO_ALBUM,
+  fixList, fixListCsv, blankAlbumSummary, NO_ALBUM,
 } from "./drift.js";
 /*
  * Six imports left with the resolve phase: d0Resolve, d5Resolve, verifyEraNames,
@@ -2193,10 +2193,14 @@ function render() {
         }).join("")}
         </div>
         <div style="margin-top:11px">
-          <button class="check" type="button" id="copy-fixes">Copy as a worklist</button>
-          <span class="note" style="margin:0 0 0 9px;color:var(--dim)">Plain text
-            to work through by hand. Last.fm has no bulk edit and no write API,
-            so there is nothing to import this into.</span>
+          <button class="check" type="button" id="copy-fixes">Download all
+            ${N(fixList(d.issues, Infinity).reduce((n, r) =>
+              n + Math.max(((r.issue.members || []).length - 1), 1), 0))}
+            as CSV</button>
+          <span class="note" style="margin:0 0 0 9px;color:var(--dim)">The full
+            list, one row per edit, so you can sort it and tick things off.
+            Last.fm has no bulk edit and no write API, so this is a worklist
+            that opens in a spreadsheet, not something you can import.</span>
         </div>
       </div>`;
     })()}
@@ -2227,12 +2231,13 @@ function render() {
           concentrated: the top ${N(b.halfCoveredBy)}
           artist${b.halfCoveredBy === 1 ? "" : "s"} account for half of them.
           Fixing by artist is far quicker than by track.</p>
-        ${b.artists.slice(0, 10).map((a) => `<div class="row">
+        <div class="fixgrid">\n        ${b.artists.slice(0, 10).map((a) => `<div class="row">
           <span>${esc(a.artist)}
             <span class="note" style="margin:0;display:block">${
               esc(a.top.join(", "))}${a.tracks > a.top.length
                 ? ` and ${N(a.tracks - a.top.length)} more` : ""}</span></span>
           <span class="v">${N(a.plays)}</span></div>`).join("")}
+        </div>
       </div>`;
     })()}
     <div class="grid g2">
@@ -2876,20 +2881,28 @@ function issues() {
      * puts the text on screen for manual selection rather than pretending.
      */
     if (btn.id === "copy-fixes") {
-      const text = fixListText(report.issues, report.user, 20);
-      try {
-        await navigator.clipboard.writeText(text);
-        btn.textContent = "Copied";
-        setTimeout(() => { btn.textContent = "Copy as a worklist"; }, 2000);
-      } catch {
-        const box = document.createElement("textarea");
-        box.value = text;
-        box.rows = 14;
-        box.style.cssText = "width:100%;margin-top:9px";
-        btn.closest(".panel").appendChild(box);
-        box.select();
-        btn.textContent = "Select and copy";
-      }
+      const csv = fixListCsv(report.issues, report.user);
+      if (!csv) return;
+      /*
+       * A Blob and an object URL rather than a data: URI.
+       *
+       * data: URLs are capped at a couple of megabytes in some browsers and
+       * silently truncate past it, which on a library with hundreds of fixes
+       * would produce a file that opens fine and is missing its tail. The URL
+       * is revoked on the next frame so the blob is not held for the session.
+       */
+      const name = `scrobble-drift-${(report.user || "fixes")
+        .replace(/[^\w-]/g, "")}.csv`;
+      const url = URL.createObjectURL(
+        new Blob([csv], { type: "text/csv;charset=utf-8" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      a.click();
+      requestAnimationFrame(() => URL.revokeObjectURL(url));
+      const was = btn.textContent;
+      btn.textContent = "Downloaded";
+      setTimeout(() => { btn.textContent = was; }, 2000);
       return;
     }
 

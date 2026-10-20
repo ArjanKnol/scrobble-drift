@@ -9,7 +9,7 @@
  * Run: node scripts/test-score.mjs
  */
 
-import { chartWrongness, fixList, fixListText, recoverablePlays,
+import { chartWrongness, fixList, fixListCsv, recoverablePlays,
   blankAlbumSummary, NO_ALBUM, hygieneScore, SCORED_DETECTORS, UNSCORED_BY_DESIGN, analyse }
   from "../docs/drift.js";
 
@@ -531,17 +531,26 @@ console.log("\nbounds and degenerate input");
   eq(fixList(issues, 2).length, 2, "and the limit is honoured");
 
   /*
-   * The export is a WORKLIST, not an import file, and says so. There is nothing
-   * to feed it to, so producing something that looked like a machine format
-   * would promise a workflow that does not exist.
+   * The CSV is the FULL list, one row per EDIT.
+   *
+   * Per edit rather than per finding: a finding with three spellings is three
+   * separate changes on Last.fm, and collapsing them would make the row count
+   * disagree with the amount of work.
+   *
+   * Still not an import file. Last.fm has no bulk edit and no write API, so
+   * nothing can consume it; it is a worklist that opens in a spreadsheet.
    */
-  const txt = fixListText(issues, "ArjanKnol", 2);
-  ok(/no bulk edit and no write/.test(txt),
-     "the export states plainly that nothing can import it");
-  ok(/Recovers 160 plays in total/.test(txt), "and totals what it recovers");
-  ok(/change "Rodeo \(Deluxe\)" \(120\) -> "Rodeo"/.test(txt),
+  const csv = fixListCsv(issues, "ArjanKnol");
+  const lines_ = csv.trim().split("\r\n");
+  eq(lines_[0],
+     "artist,track,change_from,change_to,plays_recovered,detector,confidence",
+     "the header names what each column is");
+  eq(lines_.length, 4, "three edits from three findings, plus the header");
+  ok(!csv.includes("D15"),
+     "and a finding our chart already counts correctly is not an edit");
+  ok(/Rodeo \(Deluxe\),Rodeo,120/.test(csv),
      "with the exact before and after strings, which is the whole point");
-  eq(fixListText([], "x"), "", "no fixes means no file, not an empty template");
+  eq(fixListCsv([], "x"), "", "no fixes means no file, not an empty template");
 }
 
 /* ---- blank albums are usually the biggest single lever ----------------- */
@@ -583,15 +592,20 @@ console.log("\nbounds and degenerate input");
    * someone to change "(no album)" to something reads as an instruction to find
    * and replace a string that appears nowhere in their library.
    */
-  const txt = fixListText([{
-    detector: "D4", artist: "Imogen Heap", track: "Headlock",
-    members: [{ album: "Speak For Yourself", plays: 20 },
+  const nasty = fixListCsv([{
+    detector: "D4", artist: "Jay-Z", track: `03' Bonnie & "Clyde"`,
+    confidence: 0.7,
+    members: [{ album: "The Blueprint, Vol. 2", plays: 20 },
               { album: NO_ALBUM, plays: 14 }],
-  }], "u", 1);
-  ok(/set album to "Speak For Yourself" on 14 plays that have none/.test(txt),
-     "a blank source is phrased as the action it is");
-  ok(!/change "\(no album\)"/.test(txt),
-     "and never as a find-and-replace on a string that does not exist");
+  }], "u");
+  ok(nasty.includes(`"03' Bonnie & ""Clyde"""`),
+     "an embedded quote is doubled and the field wrapped (RFC 4180)");
+  ok(nasty.includes(`"The Blueprint, Vol. 2"`),
+     "and a field containing a comma is wrapped, not left to split the row");
+  ok(nasty.includes("(no album set)"),
+     "a blank source reads as an instruction, not as a string to find");
+  ok(!nasty.includes("(no album)"),
+     "never our internal placeholder, which exists nowhere in their library");
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

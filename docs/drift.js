@@ -3292,40 +3292,56 @@ export function blankAlbumSummary(issues) {
   return { plays, tracks: d5.tracks.length, artists, halfCoveredBy: half };
 }
 
-export function fixListText(issues, user, limit = 20) {
-  const rows = fixList(issues, limit);
-  if (!rows.length) return "";
-  const total = rows.reduce((n, r) => n + r.recovers, 0);
+/**
+ * The FULL list of chart fixes as CSV, one row per edit.
+ *
+ * Not the top twenty: a spreadsheet is the right home for the long tail, since
+ * it sorts, filters and lets you tick things off across several sittings. The
+ * on-page list stays at twenty because that is what fits in a glance.
+ *
+ * One row per EDIT rather than per finding. A finding with three spellings is
+ * three separate changes on Last.fm, and collapsing them into one row would
+ * make the row count disagree with the amount of work.
+ *
+ * Still not an import file, and the README and UI say so. Last.fm has no bulk
+ * edit and no write API, so nothing can consume this. It is a worklist that
+ * happens to open in Excel.
+ */
+export function fixListCsv(issues, user) {
+  /*
+   * RFC 4180 quoting. Album and track names routinely contain commas, quotes
+   * and the occasional newline from a bad tag, and a CSV that breaks on
+   * `Jay-Z - "03' Bonnie & Clyde"` would corrupt the file silently at whatever
+   * row that lands on.
+   */
+  const q = (v) => {
+    const s = String(v ?? "");
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
 
-  const lines = [
-    `Scrobble Drift: ${rows.length} fixes for ${user || "this library"}`,
-    `Recovers ${total} plays in total.`,
-    "",
-    "Work through these by hand on last.fm. There is no bulk edit and no write",
-    "API, so this is a worklist, not something you can import anywhere.",
-    "",
-  ];
+  const rows = [[
+    "artist", "track", "change_from", "change_to",
+    "plays_recovered", "detector", "confidence",
+  ]];
 
-  for (const [n, { issue, recovers }] of rows.entries()) {
+  for (const { issue, recovers } of fixList(issues, Infinity)) {
     const mem = [...(issue.members || [])].sort((a, b) => b.plays - a.plays);
     const to = mem[0];
-    lines.push(`${n + 1}. ${issue.artist || ""} - ${issue.track || issue.album || ""}`
-      .replace(/\s+-\s+$/, ""));
-    lines.push(`   recovers ${recovers} plays`);
     for (const m of mem.slice(1)) {
-      /*
-       * "(no album)" is our own placeholder, not a string the user can edit.
-       * Printing `change "(no album)" -> "X"` reads as an instruction to find
-       * and replace text that does not exist anywhere in their library.
-       */
-      lines.push(m.album === NO_ALBUM
-        ? `   set album to "${to.album}" on ${m.plays} play` +
-          `${m.plays === 1 ? "" : "s"} that have none`
-        : `   change "${m.album}" (${m.plays}) -> "${to.album}"`);
+      rows.push([
+        issue.artist || "",
+        issue.track || issue.album || "",
+        m.album === NO_ALBUM ? "(no album set)" : m.album,
+        to.album,
+        m.plays,
+        issue.detector || "",
+        Math.round((issue.confidence || 0) * 100) + "%",
+      ].map(q));
     }
-    lines.push("");
   }
-  return lines.join("\n");
+  if (rows.length === 1) return "";
+  // CRLF per the spec: Excel is the likeliest consumer and is happiest with it.
+  return rows.map((r) => r.join(",")).join("\r\n") + "\r\n";
 }
 
 export function hygieneScore(totalPlays, issues, albumStrings = 0, weights = null) {
