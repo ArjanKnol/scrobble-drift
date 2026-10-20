@@ -165,6 +165,40 @@ ok(
      "Same reasoning: a failed animation must degrade to correct, not to empty.");
 }
 
+/* ---- the count-up can never render a number outside 0..score ------------ */
+{
+  /*
+   * A real scan showed "-54/100" for a library whose score was 77.
+   *
+   * The easing is cubic, so it amplifies an out-of-range input rather than
+   * absorbing it: 1-(1-t)^3 at t=-0.7 is -3.9. The progress was clamped at the
+   * top only, and the first requestAnimationFrame callback can carry a timestamp
+   * from a frame that started BEFORE the performance.now() that scheduled it,
+   * which makes the elapsed time negative.
+   *
+   * Lasts one frame. Long enough to be seen, too short to reproduce on demand,
+   * which is why it is pinned here rather than left to manual testing.
+   */
+  const html = readFileSync(join(root, "docs/index.html"), "utf8");
+  ok("the count-up clamps progress at both ends",
+     /Math\.min\(Math\.max\(\(now - start\) \/ DUR, 0\), 1\)/.test(html),
+     "Clamping only the top lets a negative elapsed time through, and a cubic " +
+     "ease turns that into a large negative score.");
+
+  // The curve itself, so the reasoning above is checked rather than asserted.
+  const ease = (t) => 1 - Math.pow(1 - t, 3);
+  ok("an unclamped negative t really does blow up",
+     Math.round(77 * ease(-0.7)) < -100,
+     `cubic ease at t=-0.7 gives ${ease(-0.7).toFixed(2)}`);
+  const clamp = (t) => Math.min(Math.max(t, 0), 1);
+  ok("and the clamp contains it",
+     [-5, -0.7, 0, 0.5, 1, 9].every((t) => {
+       const v = Math.round(77 * ease(clamp(t)));
+       return v >= 0 && v <= 77;
+     }),
+     "Every input must land inside 0..score.");
+}
+
 console.log(`\n  ${pass} passed, ${fails.length} failed`);
 if (fails.length) {
   console.log("\n  FAILED");

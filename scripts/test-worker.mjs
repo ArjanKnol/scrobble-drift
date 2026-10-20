@@ -788,8 +788,20 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
    * next reader nothing and costs a cache flush the first time somebody bumps it
    * out of superstition.
    */
-  ok(/env, `rec\d+:/.test(src),
-     "the recording cache key is versioned, so the date fix retires old rows");
+  ok(/env, `rec\$\{MB_REC_V\}:/.test(src),
+     "the recording cache key is versioned from a named constant");
+  /*
+   * The constant lives against the parser, not inside the key template.
+   *
+   * Twice in one week a parse was fixed and the key left alone, so the cache
+   * kept serving the old answer for the full thirty-day TTL. The second time the
+   * fix was deployed, verified in the source, and still wrong on the live site:
+   * `artist=MØ track=Drum` came back "shared": true with the wrong artist in it.
+   * Putting the version where the parsing is read is the cheapest way to make
+   * the two impossible to change independently.
+   */
+  ok(/const MB_REC_V = \d+;/.test(src),
+     "and declared next to the parser it versions, not buried in the key");
   ok(/env, `one\d+:/.test(src),
      "and so is the per-track Spotify key, which gained an ISRC field");
 }

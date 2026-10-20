@@ -58,7 +58,7 @@
  *
  * Bump this in the same commit as any Worker change. /api/health reports it.
  */
-const BUILD = "2026-10-20-20-verify-artist-and-title-on-mb-hits";
+const BUILD = "2026-10-20-21-retire-prefilter-recording-cache";
 
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";
@@ -1014,6 +1014,27 @@ async function mbArtistId(url, env, request, cors) {
               { ...cors, "Cache-Control": "public, max-age=86400" });
 }
 
+/*
+ * Bump this whenever the code below changes WHAT IT RETURNS, including when the
+ * values stay the same shape but get filtered differently.
+ *
+ * It is a constant sitting against the parser rather than a digit buried in a
+ * template literal, because the mistake it prevents has now been made twice in
+ * one week and both times the key and the parse were too far apart to be seen
+ * together.
+ *
+ *   v2  release dates fell back to the release's own date
+ *   v3  recordings with their titles and artist credits were added
+ *   v4  results filtered to the primary artist credit and a real title match
+ *
+ * Answers are cached in D1 for thirty days and served to every visitor. A deploy
+ * that fixes the parse and leaves the key alone fixes nothing anyone can see:
+ * after v4 shipped, `artist=M\u00d8 track=Drum` still came back `"shared": true` with
+ * Mighty Mo Rodgers in it, because the row predated the filter. The bug was
+ * fixed, deployed, verified in the source, and still live on the site.
+ */
+const MB_REC_V = 4;
+
 async function mbRecording(url, env, request, cors) {
   const artist = (url.searchParams.get("artist") || "").slice(0, 200);
   const track = (url.searchParams.get("track") || "").slice(0, 200);
@@ -1022,23 +1043,7 @@ async function mbRecording(url, env, request, cors) {
   }
   await chargeMb(env, clientId(request));
   const { body, shared } = await mbShared(
-    /*
-     * `rec3:`. The cached SHAPE keeps changing, most recently to carry the
-     * fallback was added, so every existing row holds `first_release: null`.
-     *
-     * Verified live rather than assumed: after deploying the fix, a fresh track
-     * came back with dates and a previously-cached one came back with
-     * `"shared": true` and every date still null. D14e's first guard rejects a
-     * candidate with no date, so 1,781 cached answers would have kept the
-     * detector switched off for the full thirty-day TTL, with the bug fixed and
-     * the symptom unchanged.
-     *
-     * The identical reasoning was applied to the Spotify track cache in the same
-     * edit and missed here, which is the whole argument for versioning a cache
-     * key by reflex whenever the value shape moves, rather than deciding case by
-     * case whether it matters.
-     */
-    env, `rec3:${spNorm(artist)}\u241f${spNorm(track)}`, async () => {
+    env, `rec${MB_REC_V}:${spNorm(artist)}\u241f${spNorm(track)}`, async () => {
   const esc = (s) => s.replace(/[\\+\-!(){}\[\]^"~*?:/&|]/g, (c) => "\\" + c);
   const query = `artist:"${esc(artist)}" AND recording:"${esc(track)}"`;
   const res = await mbFetch(

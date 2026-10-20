@@ -3840,13 +3840,43 @@ export function resolveOne(
     return out || { ...issue, resolved: true, dropped: true };
   }
 
-  if (issue.detector === "D5") return { ...d5Resolve(issue, lookup), resolved: true };
+  /*
+   * D5 and D4 get a verdict block too, and the reason is a measured failure.
+   *
+   * Five lookups were pressed on a real report. All five resolved, and not one
+   * showed any sign of it: the button vanished, a sentence changed somewhere in
+   * the middle of the card, and that was the entire feedback. This is the same
+   * "nothing happens when I press the button" that the verdict block was built
+   * for; these two detectors have bespoke resolvers and never got one.
+   */
+  if (issue.detector === "D5") {
+    const out = d5Resolve(issue, lookup);
+    const named = out.suggest !== issue.suggest;
+    return { ...out, resolved: true, unresolved: !named,
+      verdict: named
+        ? { state: "info", text: "Release data named the album these blank " +
+            "entries belong to. The suggestion above has been updated with it." }
+        : { state: "unclear", text: "No release database could name an album " +
+            "for these. That is normal for unreleased or self-published tracks." } };
+  }
 
   if (issue.detector === "D0" || issue.detector === "D4") {
     // D0 and D4 share a resolver: D0 IS a resolved D4.
     const [out] = d0Resolve([issue], lookup);
-    return out ? { ...out, resolved: true }
-               : { ...issue, resolved: true, unresolved: true };
+    if (!out) {
+      return { ...issue, resolved: true, unresolved: true,
+        verdict: { state: "unclear", text:
+          "No release database has an entry for this track, so the " +
+          "consolidation target above is still inferred from your own plays " +
+          "rather than confirmed." } };
+    }
+    const ext = out.external;
+    return { ...out, resolved: true,
+      verdict: { state: "info", text:
+        `Release data confirms '${ext?.title ?? "the target"}'` +
+        (ext?.primary ? ` (${ext.primary}` +
+          (ext.first_release ? `, ${ext.first_release})` : ")") : "") +
+        ` as the release to consolidate into.` } };
   }
 
   /*

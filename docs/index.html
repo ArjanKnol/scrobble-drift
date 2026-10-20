@@ -2412,7 +2412,22 @@ function countUpScore() {
   const ease = (t) => 1 - Math.pow(1 - t, 3);
 
   const step = (now) => {
-    const t = Math.min((now - start) / DUR, 1);
+    /*
+     * Clamped at BOTH ends, and the lower clamp is the one that matters.
+     *
+     * This was `Math.min(t, 1)`, which bounds the top and lets the bottom run
+     * negative. The first requestAnimationFrame callback carries the timestamp
+     * of the frame it belongs to, and that frame can have STARTED before the
+     * performance.now() that scheduled it. `now - start` is then negative, and
+     * because the easing is cubic it amplifies rather than absorbs it: at
+     * t = -0.7 the curve returns -3.9, so a score of 77 renders as -301.
+     *
+     * Caught on a real scan, where the headline read "-54/100" for a library
+     * whose actual score was 77. It lasts one frame, which is exactly long
+     * enough to be seen and screenshotted and not long enough to reproduce on
+     * demand.
+     */
+    const t = Math.min(Math.max((now - start) / DUR, 0), 1);
     el.textContent = Math.round(to * ease(t));
     if (t < 1) requestAnimationFrame(step);
     // The last frame is assigned exactly, not rounded from 0.999, so the number
