@@ -31,7 +31,7 @@
 </script>
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=19">
+<link rel="stylesheet" href="style.css?v=20">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -1227,8 +1227,13 @@ async function verifyOfficialAlbums(scrobbles, apiKey) {
            `could be either a real release or a folder of unreleased tracks. ` +
            `Asking, so real albums are not hidden from the split detectors.`);
 
+  $("fill").style.width = "0";
+  let n = 0;
   for (const c of candidates) {
     if (abort) break;
+    n++;
+    $("fill").style.width = `${Math.round(100 * n / candidates.length)}%`;
+    $("status").textContent = `${N(n)} of ${N(candidates.length)}: ${c.album}`;
 
     // Cached permanently: whether a release exists is a historical fact.
     const cached = await store.getLookup("official", c.artist, c.album);
@@ -1279,8 +1284,18 @@ async function verifyOfficialAlbums(scrobbles, apiKey) {
 async function fetchTopAlbums(user, apiKey, { maxPages = 6 } = {}) {
   const base = apiBase().replace(/\/+$/, "");
   const out = [];
+  /*
+   * Said out loud, because it is slow: each page of 1,000 albums takes Last.fm
+   * two to three seconds, and on a big library this step took fifteen seconds
+   * while the screen still read "Analysing… 100%" from the step before.
+   */
+  setPhase("Reading your album chart from Last.fm",
+           "Needed to spot albums credited to a different artist than the tracks.");
+  $("fill").style.width = "0";
+  let pages = maxPages;
   for (let page = 1; page <= maxPages; page++) {
     if (abort) break;
+    $("status").textContent = `Album chart, page ${page} of up to ${pages}`;
     const qs = new URLSearchParams({
       method: "user.getTopAlbums", user, period: "overall",
       limit: "1000", page: String(page),
@@ -1295,6 +1310,8 @@ async function fetchTopAlbums(user, apiKey, { maxPages = 6 } = {}) {
     out.push(...list);
 
     const total = Number(data.topalbums?.["@attr"]?.totalPages || 1);
+    pages = Math.min(maxPages, total);
+    $("fill").style.width = `${Math.round(100 * page / pages)}%`;
     if (page >= total) break;
     await sleep(250);                 // gentle on the shared key
   }
@@ -2720,7 +2737,10 @@ async function checkAll(btn) {
   // Highest index first, so a dropped finding cannot shift the indices of the
   // ones still queued.
   for (const idx of idxs.sort((a, b) => b - a)) {
+    const wasChart = affectsChart(report.issues[idx]);
     await resolveIssue(idx);
+    const now = report.issues[idx];
+    if (wasChart && now && !now.dropped && !affectsChart(now)) now.kept_in_place = true;
     btn.textContent = `Checking ${++done} of ${idxs.length}…`;
   }
   render();
@@ -3370,8 +3390,15 @@ function issues() {
    * page, which is the precise failure this split exists to prevent.
    */
   const CAP = 200;
-  const chartAll = all.filter(affectsChart);
-  const choiceAll = all.filter((i) => !affectsChart(i));
+  /*
+   * A finding that a check has just turned into a tagging choice stays where
+   * the reader is looking. Moving it into the collapsed choices section made it
+   * vanish the moment its button was pressed, which read as "the check deleted
+   * my finding". It goes to the choices on the next scan.
+   */
+  const inChart = (i) => affectsChart(i) || i.kept_in_place;
+  const chartAll = all.filter(inChart);
+  const choiceAll = all.filter((i) => !inChart(i));
   const list = chartAll.slice(0, CAP);
   const choices = choiceAll.slice(0, CAP);
   const shown = list.length + choices.length;
@@ -3456,7 +3483,9 @@ function issues() {
                           unclear: "Not confirmed", info: "Release data" };
           return `<div class="verdict v-${i.verdict.state}">
             <span class="v-label">${esc(i.verdict.label || label[i.verdict.state] || "Checked")}</span>
-            ${esc(i.verdict.text)}</div>`;
+            ${esc(i.verdict.text)}${i.kept_in_place
+              ? `<span class="moved-note">Kept here for now. It is listed under
+                 tagging choices from your next scan.</span>` : ""}</div>`;
         })()}
       ${i.superseded ? `<p class="superseded"><span class="v-label">no longer
         applies</span>${esc(i.superseded)}</p>` : ""}
@@ -3691,7 +3720,10 @@ function issues() {
     if (!Number.isInteger(idx)) return;
     btn.disabled = true;
     btn.textContent = "Checking…";
+    const wasChart = affectsChart(report.issues[idx]);
     await resolveIssue(idx);
+    const now = report.issues[idx];
+    if (wasChart && now && !now.dropped && !affectsChart(now)) now.kept_in_place = true;
     render();
   };
 }

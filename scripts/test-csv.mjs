@@ -204,5 +204,16 @@ console.log("\na song released on both projects is not a split");
      "a compilation does not count as a second release");
 }
 
+console.log("\na checked finding does not vanish from view");
+{
+  const html = (await readFile(new URL("../docs/index.html", import.meta.url), "utf8"))
+    .replace(/\r\n/g, "\n");
+  ok(/const inChart = \(i\) => affectsChart\(i\) \|\| i\.kept_in_place;/.test(html),
+     "a finding a check turned into a choice stays in the list being read");
+  ok((html.match(/now\.kept_in_place = true/g) || []).length === 2,
+     "for a single check and for Check all");
+  ok(/Kept here for now/.test(html), "and the card says where it will go");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
