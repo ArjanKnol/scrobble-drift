@@ -131,5 +131,75 @@ console.log("\nfindings that say 'nothing to fix' are not counted");
   eq(fixList([mk("migration")]).length, 1, "a real split still does");
 }
 
+console.log("\nanalysis off the main thread, with progress");
+{
+  const d = await import("../docs/drift.js");
+  const sc = [];
+  for (let i = 0; i < 300; i++) sc.push({ uts: 1e9 + i, artist: `Act ${i % 40}`,
+    album: `LP ${i % 7}`, track: `T${i % 11}` });
+  const seen = [];
+  const a = d.analyse(sc, { onProgress: (f, label) => seen.push([f, label]) });
+  const b = d.analyse(sc);
+  eq(JSON.stringify({ ...a, generated: 0 }), JSON.stringify({ ...b, generated: 0 }),
+     "progress reporting does not change the report");
+  ok(seen.length >= 5 && seen[0][0] === 0 && seen.at(-1)[0] === 1,
+     "progress runs from 0 to 1");
+  ok(seen.every((x, i) => i === 0 || x[0] >= seen[i - 1][0]), "and never goes backwards");
+  let cloned = null;
+  try { cloned = structuredClone(a); } catch {}
+  ok(cloned && cloned.issues_total === a.issues_total,
+     "the report survives the trip back from a worker");
+
+  const html = (await readFile(new URL("../docs/index.html", import.meta.url), "utf8"))
+    .replace(/\r\n/g, "\n");
+  ok(/new Worker\(new URL\("\.\/analyse-worker\.js", import\.meta\.url\)/.test(html),
+     "the page analyses in a module worker");
+  ok(/if \(!started\) \{\s+try \{ resolve\(analyse\(/.test(html),
+     "and falls back to the page if the worker cannot start");
+  ok(/analysisWorker\.terminate\(\)/.test(html), "Stop ends a running analysis");
+  const w = await readFile(new URL("../docs/analyse-worker.js", import.meta.url), "utf8");
+  ok(/import \{ analyse \} from "\.\/drift\.js"/.test(w),
+     "the worker runs the same drift.js as the page");
+}
+
+console.log("\n'Early Version' is unreleased material");
+{
+  const d = await import("../docs/drift.js");
+  const sc = [
+    { uts: 1, artist: "Kanye West", album: "The College Dropout: Early Version", track: "Home" },
+    { uts: 2, artist: "Kanye West", album: "Unreleased (Yandhi Era)", track: "Hurricane" },
+    { uts: 3, artist: "Kanye West", album: "The College Dropout", track: "Spaceship" },
+  ];
+  ok(d.weakEraCandidates(sc).some((c) => /Early Version/.test(c.album)),
+     "an Early Version album is treated as possible unreleased material");
+  ok(!d.weakEraCandidates(sc).some((c) => c.album === "The College Dropout"),
+     "the real album is not");
+}
+
+console.log("\na song released on both projects is not a split");
+{
+  const d = await import("../docs/drift.js");
+  const issue = { detector: "D4", class: "split", reason: "candidate",
+    artist: "Post Malone", track: "Money Made Me Do It", plays_affected: 22,
+    suggest: "consolidate to 'Stoney (Deluxe)'",
+    members: [{ album: "Stoney (Deluxe)", plays: 21 }, { album: "August 26th", plays: 1 }] };
+  const groups = [
+    { title: "Stoney", primary: "Album", secondary: [], first_release: "2016-12-09" },
+    { title: "August 26th", primary: "Album", secondary: ["Mixtape/Street"], first_release: "2016-05-11" },
+  ];
+  eq(d.membersOnRelease(issue.members, groups), ["Stoney", "August 26th"],
+     "both album strings are found among the release groups, editions ignored");
+  const out = d.resolveOne(issue, () => ({ groups }));
+  eq(out.reason, "on-both", "the lookup settles it as released on both");
+  eq(out.verdict?.label, "On both releases", "and says so on the card");
+  eq(d.fixList([out]).length, 0, "it leaves the fix list");
+  eq(d.chartWrongness([], [out]).misplaced, 0, "and the headline");
+  const single = d.resolveOne(issue, () => ({ groups: [groups[0]] }));
+  ok(single.reason !== "on-both", "when only one release has it, it is still a split");
+  eq(d.membersOnRelease(issue.members,
+       [{ title: "Hits", secondary: ["Compilation"] }, groups[0]]), ["Stoney"],
+     "a compilation does not count as a second release");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

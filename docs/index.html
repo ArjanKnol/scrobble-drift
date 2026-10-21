@@ -194,6 +194,7 @@ import {
   hygieneScore, weakEraCandidates, officialKey, byImportance,
   resolveOne, isResolvable, discoveryOffers, baseTitle, affectsChart,
   fixList, fixListCsv, blankAlbumSummary, blankAlbumCsv, NO_ALBUM, consolidationTarget,
+  chartWrongness,
 } from "./drift.js";
 /*
  * Six imports left with the resolve phase: d0Resolve, d5Resolve, verifyEraNames,
@@ -551,7 +552,13 @@ $("social").innerHTML = activeLinks().map((l) => `
     <span>${esc(l.label)}</span>
   </a>`).join("");
 
-$("stop").onclick = () => { abort = true; $("status").textContent = "stopping…"; };
+$("stop").onclick = () => {
+  abort = true;
+  $("status").textContent = "stopping…";
+  // A running analysis cannot check `abort` from inside its loop, so the worker
+  // is stopped outright. analyseOffThread() then rejects and the scan ends.
+  if (analysisWorker) { analysisWorker.terminate(); analysisWorker.onerror?.(new Error("stopped")); }
+};
 
 
 /**
@@ -771,10 +778,7 @@ $("f").onsubmit = async (e) => {
     // inside. On a full 139k history it is ~16 seconds of blocked main thread,
     // mostly the all-pairs artist comparison, which is deliberately not
     // shortcut for accuracy. Warn plainly so it does not look like a crash.
-    $("status").textContent = used.length > 40000
-      ? `Analysing ${N(used.length)} scrobbles. On a history this size the tab ` +
-        `freezes for up to a minute and cannot show progress. Do not close it.`
-      : `Analysing ${N(used.length)} scrobbles in your browser…`;
+    $("status").textContent = `Analysing ${N(used.length)} scrobbles in your browser…`;
     // Settle ambiguous album names BEFORE analysing, because the answer decides
     // which partition they land in and the era partition is hidden from most
     // detectors. Deliberately not part of resolvePhase: by then analyse() has
@@ -878,7 +882,7 @@ async function buildReport(used, focus, { user, topAlbums, apiKey }) {
   // Settle ambiguous album names BEFORE analysing (see verifyOfficialAlbums).
   // Run on the focused subset only, so a focused report asks about less.
   const official = await verifyOfficialAlbums(used, apiKey);
-  const r = analyse(used, { official, topAlbums });
+  const r = await analyseOffThread(used, { official, topAlbums });
   r.user = user;
   // Shown as the library spells it, not as typed: "the weeknd" reads as The Weeknd.
   r.focus = focus ? (topArtists(used, 1)[0]?.artist || focus) : "";
@@ -886,6 +890,70 @@ async function buildReport(used, focus, { user, topAlbums, apiKey }) {
   lastScrobbles = used;
   r.offers = discoveryOffers(used);
   return r;
+}
+
+/*
+ * Analysis off the main thread, with a real progress bar.
+ *
+ * analyse() on a full history took 34 seconds on one real 120,000-scrobble
+ * export, with the tab completely frozen: no scrolling, no Stop, and the browser
+ * offering to kill the page. Now it runs in a Web Worker and reports how far it
+ * has got, weighted by measured cost, so the bar moves steadily and the page
+ * stays usable.
+ *
+ * Falls back to running here if a module worker cannot start (very old browser,
+ * blocked by an extension). That path still works, it just freezes as before.
+ */
+let analysisWorker = null;
+
+function showAnalysisProgress(count, f, label) {
+  $("prog").classList.remove("hide");
+  setPhase("Analysing in your browser",
+           "Nothing is sent anywhere. This is the part that takes a while on a " +
+           "big history.");
+  $("fill").style.width = `${Math.round(Math.max(0.02, f) * 100)}%`;
+  $("status").textContent =
+    `${N(count)} scrobbles · ${Math.round(f * 100)}% · ${label || "Working"}`;
+}
+
+function analyseOffThread(scrobbles, { official, topAlbums }) {
+  const count = scrobbles.length;
+  showAnalysisProgress(count, 0, "Starting");
+  let worker;
+  try {
+    worker = new Worker(new URL("./analyse-worker.js", import.meta.url),
+                        { type: "module" });
+  } catch {
+    worker = null;
+  }
+  if (!worker) {
+    return Promise.resolve(analyse(scrobbles, { official, topAlbums }));
+  }
+  analysisWorker = worker;
+  return new Promise((resolve, reject) => {
+    let started = false;
+    const finish = () => { worker.terminate(); if (analysisWorker === worker) analysisWorker = null; };
+    worker.onmessage = (e) => {
+      const m = e.data || {};
+      started = true;
+      if (m.type === "progress") showAnalysisProgress(count, m.f, m.label);
+      else if (m.type === "done") { finish(); resolve(m.report); }
+      else if (m.type === "error") { finish(); reject(new Error(m.message)); }
+    };
+    worker.onerror = (ev) => {
+      finish();
+      if (abort) return reject(new Error("Stopped during the analysis."));
+      // A worker that failed before saying anything could not load at all.
+      // Run the analysis here instead rather than failing the scan.
+      if (!started) {
+        try { resolve(analyse(scrobbles, { official, topAlbums })); }
+        catch (err) { reject(err); }
+        return;
+      }
+      reject(new Error(ev?.message || "The analysis stopped unexpectedly."));
+    };
+    worker.postMessage({ scrobbles, official: [...(official || [])], topAlbums });
+  });
 }
 
 /**
@@ -2611,7 +2679,15 @@ async function resolveIssue(idx) {
       ? [baseTitle(variants[0]) || variants[0]]
       : [...new Set([issue.track, ...variants].filter(Boolean))].slice(0, 3);
 
-    const ask = twoVariants ? identifyingLookup : lookup;
+    /*
+     * Album splits ask both sources too. The question "is this song on both of
+     * these releases" needs every release group the song is on, and the two
+     * databases spell releases differently: Spotify has Post Malone's mixtape as
+     * "August 26", MusicBrainz as "August 26th", and only one of them matches
+     * what was scrobbled.
+     */
+    const albumSplit = issue.detector === "D0" || issue.detector === "D4";
+    const ask = twoVariants || albumSplit ? identifyingLookup : lookup;
     const answers = new Map();
     await Promise.all(tracks.map(async (t) => {
       answers.set(t.toLowerCase(), await ask(issue.artist, t));
@@ -2626,6 +2702,9 @@ async function resolveIssue(idx) {
 
   if (resolved?.dropped) report.issues.splice(idx, 1);
   else report.issues[idx] = resolved;
+  // A lookup can settle that a "split" is not one (the song is on both
+  // releases), so the headline is recomputed rather than left counting it.
+  if (lastScrobbles) report.wrongness = chartWrongness(lastScrobbles, report.issues);
 }
 
 /** Resolve every visible finding that has not been checked yet. */
@@ -3376,7 +3455,7 @@ function issues() {
           const label = { same: "Confirmed", different: "Two versions exist",
                           unclear: "Not confirmed", info: "Release data" };
           return `<div class="verdict v-${i.verdict.state}">
-            <span class="v-label">${esc(label[i.verdict.state] || "Checked")}</span>
+            <span class="v-label">${esc(i.verdict.label || label[i.verdict.state] || "Checked")}</span>
             ${esc(i.verdict.text)}</div>`;
         })()}
       ${i.superseded ? `<p class="superseded"><span class="v-label">no longer

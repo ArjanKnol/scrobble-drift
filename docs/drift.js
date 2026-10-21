@@ -285,8 +285,17 @@ const UNREL_STRONG =
  * else in the library, so a one-off false positive here is contained. That is
  * an argument for being careful about what goes in, not for being relaxed.
  */
+/*
+ * `early version` added after a real library's fix list suggested merging
+ * "The College Dropout: Early Version" into "The College Dropout". That is the
+ * pre-release cut that circulated as a bootleg, a different recording, not a
+ * spelling of the album. Weak rather than strong because the phrase is plain
+ * English: it only counts when the artist is strongly marked elsewhere, and
+ * every weak candidate is checked against the release databases during the scan,
+ * so a real album with this in its name is let back out.
+ */
 const UNREL_WEAK =
-  /\bleak(?:s|ed)?\b|\bsnippet(?:s)?\b|\bouttake(?:s)?\b|\bleftover(?:s)?\b|\bloosie(?:s)?\b/i;
+  /\bleak(?:s|ed)?\b|\bsnippet(?:s)?\b|\bouttake(?:s)?\b|\bleftover(?:s)?\b|\bloosie(?:s)?\b|\bearly\s+versions?\b/i;
 
 // Kept for eraName(), which needs to strip any marker before reading the
 // qualifier, regardless of strength.
@@ -1884,7 +1893,7 @@ export function d8VerifyJointCredits(issues, exists) {
 
 /* ------------------------------------ D1, D5, D6, D7, D11, D12 */
 
-export function d1ArtistVariants(rest) {
+export function d1ArtistVariants(rest, onProgress) {
   const plays = counter(rest, (s) => s.artist);
   const tracks = new Map();
   for (const s of rest) {
@@ -1968,7 +1977,15 @@ export function d1ArtistVariants(rest) {
   // whose lengths differ by more than 3 cannot reach 0.9 at these string
   // lengths. Skipping them loses nothing.
   const keys = [...buckets.keys()];
+  /*
+   * Progress, in PAIRS compared rather than rows, because row i only compares
+   * against the rows after it: the first rows cost far more than the last.
+   * Reported every 64 rows, which is cheap and frequent enough for a bar.
+   */
+  const n = keys.length;
+  const totalPairs = Math.max(1, (n * (n - 1)) / 2);
   for (let i = 0; i < keys.length; i++) {
+    if (onProgress && (i & 63) === 0) onProgress((i * (2 * n - i - 1)) / 2 / totalPairs);
     for (let j = i + 1; j < keys.length; j++) {
       const ka = keys[i], kb = keys[j];
       if (Math.abs(ka.length - kb.length) > 3) continue;
@@ -2545,6 +2562,29 @@ export function resolutionPlan(scrobbles, { budget = 3000 } = {}) {
  * secondary type. One rule handles both directions: singles resolve forward
  * into their album, compilations resolve back to the original studio release.
  */
+/**
+ * Which of a finding's album strings appear among the release groups the
+ * recording is on. Edition suffixes are ignored on both sides, so "Stoney
+ * (Deluxe)" matches a release group called "Stoney". Returns the matched
+ * release titles, one per distinct album.
+ */
+export function membersOnRelease(members, groups) {
+  const core = (t) => norm(String(t || "").replace(EDITION, ""));
+  const titles = new Map();
+  for (const g of groups || []) {
+    if ((g?.secondary || []).includes("Compilation")) continue;
+    const k = core(g?.title);
+    if (k && !titles.has(k)) titles.set(k, g.title);
+  }
+  const hit = new Set();
+  for (const m of members || []) {
+    if (!m?.album || m.album === "(no album)") continue;
+    const k = core(m.album);
+    if (titles.has(k)) hit.add(titles.get(k));
+  }
+  return [...hit];
+}
+
 export function d0Resolve(splits, lookup) {
   const out = [];
   for (const issue of splits) {
@@ -2562,6 +2602,9 @@ export function d0Resolve(splits, lookup) {
                `${target.first_release || "date unknown"})`,
       external: target,
       candidates: groups.slice(0, 8),
+      // Every group, for the on-both-releases check, which must not miss the
+      // second album just because it ranked ninth.
+      all_groups: groups,
     });
   }
   return out;
@@ -4276,6 +4319,27 @@ export function resolveOne(
           "consolidation target above is still inferred from your own plays " +
           "rather than confirmed." } };
     }
+    /*
+     * Is the song genuinely on more than one of these releases?
+     *
+     * The release data lists every release group the recording appears on, and
+     * it was only ever used to pick a target. Reported on launch day: Post
+     * Malone's "Money Made Me Do It" is on both Stoney and August 26th, yet the
+     * card said "consolidate to Stoney (Deluxe)" and the verdict confirmed it.
+     * Plays filed under either are correct, so this is not a split.
+     */
+    const both = membersOnRelease(issue.members, out.all_groups || out.candidates || []);
+    if (both.length >= 2) {
+      return { ...issue, resolved: true, reason: "on-both", class: "review",
+        confidence: 0.3, superseded: issue.suggest || null,
+        suggest: `This song is on ${both.map((t) => `'${t}'`).join(" and ")}, ` +
+          `so plays under each are filed correctly. Nothing to fix unless you ` +
+          `want them under one name.`,
+        verdict: { state: "same", label: "On both releases", text:
+          `Release data lists this song on ${both.map((t) => `'${t}'`).join(" and ")}. ` +
+          `It was released on both, so this is not a split and it no longer ` +
+          `counts towards plays in the wrong place.` } };
+    }
     const ext = out.external;
     return { ...out, resolved: true,
       verdict: { state: "info", text:
@@ -4842,7 +4906,7 @@ export const UNSCORED_BY_DESIGN = new Set(["D16"]);
  * Two different songs that share a structural title, recommended for merging
  * while the card further down correctly said "nothing to fix".
  */
-const NOT_A_SPLIT = new Set(["structural", "disproven", "plain-albums"]);
+const NOT_A_SPLIT = new Set(["structural", "disproven", "plain-albums", "on-both"]);
 
 export function affectsChart(issue) {
   if (!issue?.detector) return false;
@@ -4854,20 +4918,40 @@ export function affectsChart(issue) {
 
 /* --------------------------------------------------------- orchestration */
 
-export function analyse(scrobbles, { official, topAlbums } = {}) {
+export function analyse(scrobbles, { official, topAlbums, onProgress } = {}) {
   const total = scrobbles.length;
+  /*
+   * Progress is optional and weighted by measured cost, not by step count. On a
+   * 120,000-scrobble library the artist comparison (D1) is about 87% of the
+   * time, so it gets 87% of the bar and reports its own progress inside that
+   * span. Equal steps would race to 90% and then sit still for fifteen seconds.
+   */
+  const at = (f, label) => onProgress?.(Math.min(1, f), label);
+  at(0, "Sorting unreleased material from releases");
   // guard first, always. `official` lets verified real releases out of the
   // protected partition so they get checked for splits like any other album.
   const { era, rest } = partitionEra(scrobbles, { official });
 
+  at(0.01, "Looking for split albums");
   const splits = d4AlbumSplits(rest);
-  const issues = [
+  at(0.03, "Checking unreleased material");
+  const eraIssues = [
     ...d14aFormatVariants(era),
     ...d14cTrackInTwoEras(era),
     ...d14fSingleBucket(era, { rest }),
+  ];
+  at(0.04, "Checking feature credits");
+  const featIssues = d8FeatureCredits(rest);
+  at(0.09, "Comparing every artist name with every other");
+  const artistIssues = d1ArtistVariants(rest,
+    onProgress ? (f) => at(0.09 + 0.87 * f, "Comparing every artist name with every other")
+               : undefined);
+  at(0.96, "Finding duplicates and missing albums");
+  const issues = [
+    ...eraIssues,
     ...splits,
-    ...d8FeatureCredits(rest),
-    ...d1ArtistVariants(rest),
+    ...featIssues,
+    ...artistIssues,
     ...d5MissingAlbum(rest),
     ...d6Duplicates(scrobbles),
     ...d11VariousArtists(rest),
@@ -4898,7 +4982,7 @@ export function analyse(scrobbles, { official, topAlbums } = {}) {
     byDetector[i.detector].plays_affected += i.plays_affected || 0;
   }
 
-  return {
+  const report = {
     generated: Math.floor(Date.now() / 1000),
     profile: {
       scrobbles_ingested: total,
@@ -4957,4 +5041,6 @@ export function analyse(scrobbles, { official, topAlbums } = {}) {
     issues,
     issues_total: issues.length,
   };
+  at(1, "Done");
+  return report;
 }
