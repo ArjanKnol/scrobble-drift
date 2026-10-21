@@ -316,6 +316,21 @@ function issueLinks(issue, user) {
              `<span class="lk">${kind}</span>${esc(label)}</a>`);
   };
 
+  /*
+   * A leak that may have come out: link to the reader's OWN scrobbles, every
+   * title and album string they actually used. The bare song title is what was
+   * looked up, and linking only to that led to the released track, which is the
+   * one thing on the card they did not tag.
+   */
+  if (issue.detector === "D14e" && artist) {
+    for (const v of issue.versions || []) {
+      push("track", v, libUrl(user, artist, { track: v }));
+    }
+    for (const a of issue.tagged_albums || []) {
+      push("album", a.album, libUrl(user, artist, { album: a.album }));
+    }
+    if (out.length) return out.slice(0, 10);
+  }
   if (issue.track && artist) {
     push("track", issue.track, libUrl(user, artist, { track: issue.track }));
   }
@@ -2419,6 +2434,11 @@ async function runDiscovery(offer) {
     }
   }
 
+  // Never add a finding the report already holds (same kind, artist and song).
+  const have = new Set(report.issues.map((i) =>
+    `${i.detector}␟${i.artist}␟${i.track || i.album || i.title}`.toLowerCase()));
+  found = found.filter((i) => !have.has(
+    `${i.detector}␟${i.artist}␟${i.track || i.album || i.title}`.toLowerCase()));
   report.issues = [...report.issues, ...found].sort(byImportance);
   report.offers = (report.offers || []).map((o) => o.id === offer.id
     ? { ...o, done: true, found: found.length, checked: plan.length, failed,
@@ -3437,7 +3457,8 @@ function offerCards(section) {
       : `<div class="panel offer" data-offer="${esc(o.id)}">
            <strong>${esc(o.title)}</strong>
            <div class="note" style="margin:5px 0 8px">${esc(o.note)}</div>
-           <button class="check discover" type="button">${esc(o.action)}</button>
+           <button class="check discover" type="button"${o.running ? " disabled" : ""}>${
+             o.running ? "Checking…" : esc(o.action)}</button>
            <span class="note" style="margin:0 0 0 9px;color:var(--dim)">${
              N(o.jobs.length)} lookup${o.jobs.length === 1 ? "" : "s"}${
                /*
@@ -3810,7 +3831,14 @@ function issues() {
     if (btn.classList.contains("discover")) {
       const id = btn.closest("[data-offer]")?.dataset.offer;
       const offer = (report.offers || []).find((o) => o.id === id);
-      if (!offer || offer.done) return;
+      /*
+       * One run per offer. render() redraws the card mid-run, which used to
+       * bring the button back; pressed again during a slow MusicBrainz phase,
+       * two runs appended their findings twice, one answered by Spotify and one
+       * by MusicBrainz, and every result appeared as a pair.
+       */
+      if (!offer || offer.done || offer.running) return;
+      offer.running = true;
       btn.disabled = true;
       btn.textContent = "Checking…";
       /*
@@ -3862,6 +3890,7 @@ function issues() {
           `That check did not finish: ${err.message || err}. Your findings ` +
           `below are unaffected.`;
       } finally {
+        for (const o of report.offers || []) if (o.id === id) o.running = false;
         clearInterval(mirror);
         $("prog").classList.add("hide");
         $("stop").classList.add("hide");

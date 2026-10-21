@@ -2664,8 +2664,9 @@ export function d14eReleasedSince(era, lookup) {
     const k = `${s.artist}␟${normTitle(song)}`;
     const rec = tracks.get(k) ||
       { artist: s.artist, track: song, plays: 0, first: s.uts, last: s.uts,
-        eras: new Map(), versions: new Set() };
+        eras: new Map(), versions: new Set(), albums: new Map() };
     rec.versions.add(s.track);
+    if (s.album) rec.albums.set(s.album, (rec.albums.get(s.album) || 0) + 1);
     rec.plays++;
     rec.first = Math.min(rec.first, s.uts);
     rec.last = Math.max(rec.last, s.uts);
@@ -2759,6 +2760,10 @@ export function d14eReleasedSince(era, lookup) {
           ? `, across ${rec.versions.size} leaked versions with different credits.`
           : "."),
       versions: [...rec.versions],
+      // Exactly how these plays are tagged, so the card can link to the
+      // reader's own scrobbles rather than only to the released title.
+      tagged_albums: [...rec.albums.entries()]
+        .sort((a, b) => b[1] - a[1]).map(([album, plays]) => ({ album, plays })),
       members: [...rec.eras.entries()].map(([era_, plays]) => ({ era: era_, plays })),
       external: best,
       no_auto_action: true,

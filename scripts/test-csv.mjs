@@ -335,5 +335,26 @@ console.log("\nthe bootleg check asks MusicBrainz with the bare title");
      "the D16 verifier strips the feat. credit before asking");
 }
 
+console.log("\nleak findings link to how you tagged them, and never twice");
+{
+  const d = await import("../docs/drift.js");
+  const era = [
+    { uts: 1, artist: "Childish Gambino", album: "Unreleased (Atavista Era)", track: "Feels Like Summer (feat. Travis Scott)" },
+    { uts: 2, artist: "Childish Gambino", album: "Unreleased (Atavista Era)", track: "Feels Like Summer (feat. Travis Scott)" },
+  ];
+  const [f] = d.d14eReleasedSince(era, () => ({ groups: [{ title: "Summer Pack",
+    primary: "EP", status: "Official", secondary: [], first_release: "2018-07-11", source: "spotify" }] }));
+  eq(f.versions, ["Feels Like Summer (feat. Travis Scott)"], "the scrobbled title is kept");
+  eq(f.tagged_albums, [{ album: "Unreleased (Atavista Era)", plays: 2 }], "and so is the album string");
+  const html = (await readFile(new URL("../docs/index.html", import.meta.url), "utf8"))
+    .replace(/\r\n/g, "\n");
+  ok(/issue\.detector === "D14e" && artist/.test(html) && /for \(const v of issue\.versions/.test(html),
+     "the card links to each scrobbled version and album string");
+  ok(/offer\.done \|\| offer\.running\) return;/.test(html),
+     "a lookup cannot be started twice while it is running");
+  ok(/found = found\.filter\(\(i\) => !have\.has\(/.test(html),
+     "and a finding the report already holds is never added again");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
