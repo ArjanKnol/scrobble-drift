@@ -193,6 +193,8 @@ console.log("\na song released on both projects is not a split");
   eq(out.reason, "on-both", "the lookup settles it as released on both");
   eq(out.verdict?.label, "On both releases", "and says so on the card");
   ok(out.style_choice === true, "it becomes a tagging choice, not a defect");
+  ok(!/split/.test(out.title) && /is on 2 releases/.test(out.title),
+     "and the card title stops calling it a split");
   ok(/leave them as they are/.test(out.suggest) && /one album per song/.test(out.suggest),
      "and offers both options: keep accurate, or merge for the chart");
   eq(d.fixList([out]).length, 0, "it leaves the fix list");

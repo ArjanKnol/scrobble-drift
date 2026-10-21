@@ -4340,6 +4340,8 @@ export function resolveOne(
         (issue.members || []).filter((m) => m?.album && Number.isFinite(m.plays)));
       const names = both.map((t) => `'${t}'`).join(" and ");
       return { ...issue, resolved: true, reason: "on-both", class: "review",
+        // The old title called it a split, which the verdict now contradicts.
+        title: `${issue.artist} - '${issue.track}' is on ${both.length} releases`,
         style_choice: true, confidence: 0.3, superseded: issue.suggest || null,
         suggest: `This song is on ${names}, so plays under each are filed ` +
           `accurately. Your call: leave them as they are, or move them all to ` +
