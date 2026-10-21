@@ -233,5 +233,28 @@ console.log("\na leak that came out on the album its era is named after");
      "a MusicBrainz release named after the era still does not");
 }
 
+console.log("\nleaks are asked about as songs, not as leaked versions");
+{
+  const d = await import("../docs/drift.js");
+  eq(d.eraLookupTitle("Hurricane (feat. Ant Clemons, Ty Dolla $ign & Young Thug)"), "Hurricane",
+     "guest credits from the leak are dropped");
+  eq(d.eraLookupTitle("Off The Grid (Demo) [feat. Playboi Carti]"), "Off The Grid",
+     "and so are version tags like (Demo)");
+  eq(d.eraLookupTitle("Bye Bye Baby [V2]"), "Bye Bye Baby", "and [V2]");
+  eq(d.eraLookupTitle("Jail (Synthpop Remix)"), "Jail (Synthpop Remix)",
+     "but a remix is a different song and keeps its name");
+  const era = [
+    { uts: 1, artist: "Kanye West", album: "Unreleased (Yandhi Era)", track: "Hurricane (feat. Ant Clemons)" },
+    { uts: 2, artist: "Kanye West", album: "Unreleased (Yandhi Era)", track: "Hurricane (feat. Big Sean & Ty Dolla $ign)" },
+  ];
+  const asked = [];
+  const found = d.d14eReleasedSince(era, (a, t) => { asked.push(t); return { groups: [
+    { title: "Donda", primary: "Album", status: "Official", secondary: [],
+      first_release: "2021-08-29", source: "spotify" }] }; });
+  eq(asked, ["Hurricane"], "two leaked versions are one question, asked by the song title");
+  eq(found.length, 1, "and one finding");
+  ok(/2 leaked versions/.test(found[0].suggest), "which says how many versions you have");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

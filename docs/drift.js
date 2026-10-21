@@ -2540,11 +2540,13 @@ export function resolutionPlan(scrobbles, { budget = 3000 } = {}) {
   }
   for (const b of blanks.values()) add(b.artist, b.track, b.plays, "missing");
 
-  // D14e works per track, not per album string.
+  // D14e works per SONG, not per album string or per leaked version: every
+  // "Hurricane (feat. ...)" variant is one question, asked once.
   const eraTracks = new Map();
   for (const s of era) {
-    const k = `${s.artist}␟${s.track}`;
-    const cur = eraTracks.get(k) || { artist: s.artist, track: s.track, plays: 0 };
+    const song = eraLookupTitle(s.track);
+    const k = `${s.artist}␟${normTitle(song)}`;
+    const cur = eraTracks.get(k) || { artist: s.artist, track: song, plays: 0 };
     cur.plays++;
     eraTracks.set(k, cur);
   }
@@ -2620,12 +2622,33 @@ export function d0Resolve(splits, lookup) {
  * different ones, with no duration or fingerprint fallback. Precision over
  * recall, always "verify".
  */
+/**
+ * The song a leaked track is a version of, for asking whether it came out.
+ *
+ * Leaks are scrobbled with the credits and version tags of the leak:
+ * "Hurricane (feat. Ant Clemons, Ty Dolla $ign & Young Thug)". The released song
+ * has different guests, so asking for the leak's exact credits found nothing,
+ * on a Kanye-heavy library 0 of 150, while Spotify lists Hurricane on Donda.
+ * The question D14e asks is whether the SONG was released, so it asks with the
+ * bare title and says plainly that the release may be a different version.
+ */
+const LEAK_VERSION =
+  /\s*[([]\s*(?:demo|v\s*\d+|version\s*\d*|ref(?:erence)?|snippet|og|original|early|alt(?:ernate)?|cdq|hq|lq|orchestrated|extended|full)\b[^)\]]*[)\]]\s*$/i;
+export function eraLookupTitle(track) {
+  let out = baseTitle(track || ""), prev = null;
+  while (out !== prev) { prev = out; out = out.replace(LEAK_VERSION, "").trim(); }
+  return out || String(track || "");
+}
+
 export function d14eReleasedSince(era, lookup) {
   const tracks = new Map();
   for (const s of era) {
-    const k = `${s.artist}␟${s.track}`;
+    const song = eraLookupTitle(s.track);
+    const k = `${s.artist}␟${normTitle(song)}`;
     const rec = tracks.get(k) ||
-      { artist: s.artist, track: s.track, plays: 0, first: s.uts, last: s.uts, eras: new Map() };
+      { artist: s.artist, track: song, plays: 0, first: s.uts, last: s.uts,
+        eras: new Map(), versions: new Set() };
+    rec.versions.add(s.track);
     rec.plays++;
     rec.first = Math.min(rec.first, s.uts);
     rec.last = Math.max(rec.last, s.uts);
@@ -2710,7 +2733,11 @@ export function d14eReleasedSince(era, lookup) {
             `and bootlegged projects, so this is weaker evidence than it looks. `) +
         `Verify it is the same version before doing anything: the leak may be a ` +
         `different mix. Your plays run ${monthName(rec.first)} to ` +
-        `${monthName(rec.last)}.`,
+        `${monthName(rec.last)}` +
+        (rec.versions.size > 1
+          ? `, across ${rec.versions.size} leaked versions with different credits.`
+          : "."),
+      versions: [...rec.versions],
       members: [...rec.eras.entries()].map(([era_, plays]) => ({ era: era_, plays })),
       external: best,
       no_auto_action: true,
