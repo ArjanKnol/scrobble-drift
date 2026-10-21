@@ -31,7 +31,7 @@
 </script>
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=24">
+<link rel="stylesheet" href="style.css?v=25">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -3448,9 +3448,18 @@ function offerCards(section) {
                 */
                o.candidates && o.candidates > o.jobs.length
                  ? `, the ${N(o.jobs.length)} most played of ${N(o.candidates)}`
-                 : ""}, about ${
-             o.jobs.length < 30 ? "a few seconds"
-               : Math.max(1, Math.round(o.jobs.length / 60)) + " min"
+                 : ""}, ${
+             o.jobs.length < 30 ? "about a few seconds"
+             /*
+              * Honest about MusicBrainz. Unreleased tracks mostly miss Spotify
+              * and fall through to it, and it allows one lookup a second shared
+              * by every visitor, with pauses when it is busy. "About 3 min" was
+              * measured at 15 minutes on a busy evening.
+              */
+             : o.id === "era_released"
+               ? `a few minutes, up to ${Math.max(5, Math.round(o.jobs.length / 12))} min
+                  when MusicBrainz is busy`
+               : `about ${Math.max(1, Math.round(o.jobs.length / 60))} min`
            }. Answers are cached and shared, so nobody pays for them twice.</span>
          </div>`).join("");
 }
@@ -3816,6 +3825,36 @@ function issues() {
       abort = false;
       $("prog").classList.remove("hide");
       $("stop").classList.remove("hide");
+      /*
+       * Progress on the card that was pressed.
+       *
+       * The real progress lives in the scan panel at the top of the page, which
+       * is a long scroll away from these cards. Reported on launch day: a check
+       * "taking at least 15 minutes" behind a button that just said Checking…,
+       * while the panel up top was showing MusicBrainz pauses nobody could see.
+       * The card mirrors it twice a second; render() can replace the card, so
+       * it is looked up afresh each time.
+       */
+      const mirror = setInterval(() => {
+        const card = document.querySelector(`[data-offer="${CSS.escape(id)}"]`);
+        if (!card) return;
+        let live = card.querySelector(".offer-live");
+        if (!live) {
+          live = document.createElement("div");
+          live.className = "offer-live";
+          live.innerHTML = `<div class="bar"><i></i></div>
+            <div class="note live-status"></div><div class="note live-wait"></div>
+            <a href="#" class="live-stop">Stop</a>`;
+          live.querySelector(".live-stop").onclick = (e) => {
+            e.preventDefault(); $("stop").click(); };
+          card.appendChild(live);
+        }
+        live.querySelector(".bar > i").style.width = $("fill").style.width || "0";
+        live.querySelector(".live-status").textContent = $("status").textContent;
+        const w = $("waiting");
+        live.querySelector(".live-wait").textContent =
+          w.classList.contains("hide") ? "" : w.textContent.replace(/\s+/g, " ").trim();
+      }, 500);
       try {
         await runDiscovery(offer);
       } catch (err) {
@@ -3823,6 +3862,7 @@ function issues() {
           `That check did not finish: ${err.message || err}. Your findings ` +
           `below are unaffected.`;
       } finally {
+        clearInterval(mirror);
         $("prog").classList.add("hide");
         $("stop").classList.add("hide");
       }

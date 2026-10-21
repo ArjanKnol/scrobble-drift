@@ -796,3 +796,9 @@ button.mode.on,button.mode.on:hover:not(:disabled){background:#2a2a2a;color:var(
 /* A finished lookup with results stays at full strength: it still asks for
    something, a review of what it found. */
 .panel.offer.done:has([data-review]){opacity:1}
+/* Live progress on a lookup card, mirrored from the scan panel. */
+.offer-live{margin-top:12px}
+.offer-live .note{margin:6px 0 0}
+.offer-live .live-wait:empty{display:none}
+.offer-live .live-wait{color:var(--warn)}
+.offer-live .live-stop{display:inline-block;margin-top:6px;font-size:13px}
