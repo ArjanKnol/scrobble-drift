@@ -4330,14 +4330,23 @@ export function resolveOne(
      */
     const both = membersOnRelease(issue.members, out.all_groups || out.candidates || []);
     if (both.length >= 2) {
+      /*
+       * A preference, not a defect. Some people want one album per song in their
+       * chart, others want every play filed where it was actually heard. Both are
+       * right, so this moves to the tagging choices with both options spelled
+       * out, and stops counting as plays in the wrong place.
+       */
+      const target = consolidationTarget(
+        (issue.members || []).filter((m) => m?.album && Number.isFinite(m.plays)));
+      const names = both.map((t) => `'${t}'`).join(" and ");
       return { ...issue, resolved: true, reason: "on-both", class: "review",
-        confidence: 0.3, superseded: issue.suggest || null,
-        suggest: `This song is on ${both.map((t) => `'${t}'`).join(" and ")}, ` +
-          `so plays under each are filed correctly. Nothing to fix unless you ` +
-          `want them under one name.`,
+        style_choice: true, confidence: 0.3, superseded: issue.suggest || null,
+        suggest: `This song is on ${names}, so plays under each are filed ` +
+          `accurately. Your call: leave them as they are, or move them all to ` +
+          `'${target?.album ?? both[0]}' if you prefer one album per song in your chart.`,
         verdict: { state: "same", label: "On both releases", text:
-          `Release data lists this song on ${both.map((t) => `'${t}'`).join(" and ")}. ` +
-          `It was released on both, so this is not a split and it no longer ` +
+          `Release data lists this song on ${names}. It was released on both, ` +
+          `so this is a tagging choice rather than a mistake, and it no longer ` +
           `counts towards plays in the wrong place.` } };
     }
     const ext = out.external;

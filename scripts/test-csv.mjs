@@ -192,6 +192,9 @@ console.log("\na song released on both projects is not a split");
   const out = d.resolveOne(issue, () => ({ groups }));
   eq(out.reason, "on-both", "the lookup settles it as released on both");
   eq(out.verdict?.label, "On both releases", "and says so on the card");
+  ok(out.style_choice === true, "it becomes a tagging choice, not a defect");
+  ok(/leave them as they are/.test(out.suggest) && /one album per song/.test(out.suggest),
+     "and offers both options: keep accurate, or merge for the chart");
   eq(d.fixList([out]).length, 0, "it leaves the fix list");
   eq(d.chartWrongness([], [out]).misplaced, 0, "and the headline");
   const single = d.resolveOne(issue, () => ({ groups: [groups[0]] }));
