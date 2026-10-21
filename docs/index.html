@@ -2403,8 +2403,11 @@ async function runDiscovery(offer) {
         const probe = f.members?.find((m) => m?.track) || f.members?.[0];
         if (!probe?.track) { tick("Verifying albums"); return; }
         const artist = f.artist || probe.artist;
+        // Asked with the bare title. "More (Feat. PartyNextDoor)" is unknown to
+        // MusicBrainz, "More" is not, and with no answer the bootleg ATL was
+        // named as the album these plays belong on.
         const mb = await paced("/api/mb/recording",
-                               { artist, track: probe.track }, 2, "rec");
+                               { artist, track: baseTitle(probe.track) || probe.track }, 2, "rec");
         if (mb) mbVerdicts.set(`${artist}\u241f${probe.track}`, mb);
         tick("Verifying albums");
       });

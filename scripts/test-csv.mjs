@@ -327,5 +327,13 @@ console.log("\nthe chart simulation never promotes a stray one-play album");
   ok(!skipped.biggest_movers.length, "a song on both releases moves nothing in the chart");
 }
 
+console.log("\nthe bootleg check asks MusicBrainz with the bare title");
+{
+  const html = (await readFile(new URL("../docs/index.html", import.meta.url), "utf8"))
+    .replace(/\r\n/g, "\n");
+  ok(/\{ artist, track: baseTitle\(probe\.track\) \|\| probe\.track \}/.test(html),
+     "the D16 verifier strips the feat. credit before asking");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
