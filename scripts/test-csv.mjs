@@ -254,6 +254,11 @@ console.log("\nleaks are asked about as songs, not as leaked versions");
   eq(asked, ["Hurricane"], "two leaked versions are one question, asked by the song title");
   eq(found.length, 1, "and one finding");
   ok(/2 leaked versions/.test(found[0].suggest), "which says how many versions you have");
+  // The button runs discoveryOffers' jobs, not the resolution plan. Testing only
+  // d14eReleasedSince let the first version of this fix ship without effect.
+  const offer = d.discoveryOffers(era).find((o) => o.id === "era_released");
+  eq(offer.jobs.map((j) => j.track), ["Hurricane"],
+     "the 'check for official releases' button asks for the song, once");
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

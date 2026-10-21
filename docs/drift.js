@@ -2430,11 +2430,15 @@ export function discoveryOffers(scrobbles) {
   const offers = [];
 
   // D14e: unreleased material that may since have had an official release.
+  // Asked per SONG (see eraLookupTitle): the leak's own credits and version
+  // tags made every lookup miss, and four "Hurricane" leaks are one question.
+  // These jobs, not the resolution plan, are what the button actually runs.
   const eraTracks = new Map();
   for (const s of era) {
     if (!s.artist || !s.track) continue;
-    const k = `${s.artist}␟${s.track}`;
-    const cur = eraTracks.get(k) || { artist: s.artist, track: s.track, plays: 0 };
+    const song = eraLookupTitle(s.track);
+    const k = `${s.artist}␟${normTitle(song)}`;
+    const cur = eraTracks.get(k) || { artist: s.artist, track: song, plays: 0 };
     cur.plays++;
     eraTracks.set(k, cur);
   }
