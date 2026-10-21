@@ -2721,7 +2721,9 @@ export function d14eReleasedSince(era, lookup) {
     const best = official[0];
     const streaming = best.source === "spotify";
     issues.push({
-      detector: "D14e", class: "split",
+      // "review", not "split": nothing is split, a song with this title may
+      // have come out, and the card asks the reader to check.
+      detector: "D14e", class: "review",
       track: rec.track,
       // Spotify presence is much better evidence than a MusicBrainz entry, so
       // the two are not reported with the same confidence.
@@ -2733,7 +2735,8 @@ export function d14eReleasedSince(era, lookup) {
         `${best.primary} '${best.title}' (${best.first_release}) contains a ` +
         `recording with this title` +
         (streaming
-          ? `, and it is on Spotify now, so it is genuinely available. `
+          ? `, and that release is on Spotify. A matching title is not proof ` +
+            `it is the version you have. `
           : `, according to MusicBrainz. Note MusicBrainz also documents leaked ` +
             `and bootlegged projects, so this is weaker evidence than it looks. `) +
         `Verify it is the same version before doing anything: the leak may be a ` +

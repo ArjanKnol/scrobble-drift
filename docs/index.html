@@ -31,7 +31,7 @@
 </script>
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=23">
+<link rel="stylesheet" href="style.css?v=24">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -3471,9 +3471,15 @@ function issues() {
   const pending = report.issues.filter(
     (i) => isResolvable(i) && !i.resolved && !i.dropped).length;
 
-  const offers = offerCards("issues");
+  /*
+   * While a filter is set, the list is about one kind of finding. The lookup
+   * offers and "Check all" are about the whole report, and sitting above a
+   * filtered list they read as part of it.
+   */
+  const filtered = Boolean(fDet || fCls);
+  const offers = filtered ? "" : offerCards("issues");
 
-  $("issues").innerHTML = offers + (pending ? `
+  $("issues").innerHTML = offers + (pending && !filtered ? `
     <div class="panel" style="margin-bottom:9px;display:flex;gap:11px;
          align-items:center;flex-wrap:wrap">
       <button class="check-all ghost" type="button">Check all ${N(pending)}</button>
@@ -3638,11 +3644,17 @@ function issues() {
        * real findings, not noise, but none of them moves a number in this
        * report and most people will not want them first.
        */
-      (choices.length ? `<details class="choices"><summary>` +
+      /*
+       * Open, under its own rule, rather than collapsed. Collapsed, a filter
+       * that matched only tagging choices showed a closed heading and nothing
+       * else, which looked like an empty result.
+       */
+      (choices.length ? `<div class="choices">` +
+        (list.length ? `<hr class="sec-rule">` : "") +
         head("Tagging choices", choiceAll.length,
           "Nothing here is wrong. These either affect only Last.fm's own " +
           "chart, or are a filing convention you may well prefer.") +
-        `</summary>` + choices.map(card).join("") + `</details>` : "");
+        choices.map(card).join("") + `</div>` : "");
   })() +
     /*
      * Say when the list is cut off.
@@ -3709,7 +3721,6 @@ function issues() {
       if ($("fd")) $("fd").value = fDet;
       if ($("fc")) $("fc").value = "";
       issues();
-      for (const det of document.querySelectorAll("#issues details.choices")) det.open = true;
       const top = $("issues-anchor").getBoundingClientRect().top + window.scrollY - 16;
       window.scrollTo({ top, behavior: "smooth" });
       return;

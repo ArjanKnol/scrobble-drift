@@ -277,9 +277,13 @@ console.log("\nfilters and lookup results are readable");
   eq(named.length, codes.size, "every detector the analysis can produce has a name");
   ok(/data-review="\$\{esc\(o\.detector/.test(html),
      "a finished lookup offers a button to review what it found");
-  ok(/const review = ev\.target\.closest\("\[data-review\]"\)/.test(html) &&
-     /det\.open = true/.test(html),
-     "which filters to those findings and opens the section they are in");
+  ok(/const review = ev\.target\.closest\("\[data-review\]"\)/.test(html),
+     "which filters to those findings");
+  ok(!/<details class="choices">/.test(html) && /<hr class="sec-rule">/.test(html),
+     "tagging choices are an open section under a rule, not a collapsed group");
+  ok(/const offers = filtered \? "" : offerCards\("issues"\)/.test(html) &&
+     /pending && !filtered/.test(html),
+     "a filtered list is not topped by the whole-report lookups");
   ok(!/offerResults/.test(html), "rather than listing bare Spotify links as if certain");
 }
 

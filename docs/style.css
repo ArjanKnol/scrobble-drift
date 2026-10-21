@@ -563,8 +563,9 @@ details.choices[open] > summary .sec-head strong::after{content:" ▾"}
 details.choices > summary:hover .sec-head strong{color:var(--accent)}
 /* Dimmed while closed is wrong: it is the OPEN cards that should read as
    secondary, because nothing in them changes a number. */
-details.choices[open] .issue{opacity:.82}
-details.choices[open] .issue:hover{opacity:1}
+.choices .issue{opacity:.85}
+.choices .issue:hover{opacity:1}
+hr.sec-rule{border:0;border-top:1px solid var(--line);margin:40px 0 8px}
 
 /* ------------------------------------------------------------------ offers */
 /*

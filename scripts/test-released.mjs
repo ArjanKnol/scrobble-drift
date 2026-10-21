@@ -99,8 +99,10 @@ console.log("\nguard 3: Spotify outranks MusicBrainz, and says so");
 
   ok(spotify.confidence > mbOnly.confidence,
      `Spotify evidence scores higher (${spotify.confidence} > ${mbOnly.confidence})`);
-  ok(/on Spotify now/.test(spotify.suggest),
-     "the Spotify case says it is actually available");
+  // Softened on 21 Oct 2026: most matches on a real Kanye library were a
+  // different version of the leak, so "genuinely available" overstated it.
+  ok(/on Spotify/.test(spotify.suggest) && /not proof/.test(spotify.suggest),
+     "the Spotify case names Spotify and says a title match is not proof");
   ok(/also documents leaked and bootlegged/.test(mbOnly.suggest),
      "the MusicBrainz case warns that MB catalogues leaks");
   ok(!/date unknown/.test(mbOnly.suggest),
