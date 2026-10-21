@@ -792,7 +792,6 @@ button.mode.on,button.mode.on:hover:not(:disabled){background:#2a2a2a;color:var(
 .era-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));
   gap:0 32px;border-top:1px solid var(--line);padding-top:8px}
 .era-list .row:last-child{border-bottom:1px solid var(--line)}
-/* Results of a finished lookup, listed on the card that ran it. */
-.offer-results{margin-top:12px;display:grid;
-  grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:0 28px}
-.panel.offer.done:has(.offer-results){opacity:1}
+/* A finished lookup with results stays at full strength: it still asks for
+   something, a review of what it found. */
+.panel.offer.done:has([data-review]){opacity:1}

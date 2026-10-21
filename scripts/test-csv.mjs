@@ -275,8 +275,12 @@ console.log("\nfilters and lookup results are readable");
   for (const m of src.matchAll(/detector: "(D\d+[a-z]?)"/g)) codes.add(m[1]);
   const named = [...codes].filter((c) => new RegExp(`\\b${c}: "`).test(html));
   eq(named.length, codes.size, "every detector the analysis can produce has a name");
-  ok(/\$\{offerResults\(o\)\}/.test(html),
-     "a finished lookup lists what it found on its own card");
+  ok(/data-review="\$\{esc\(o\.detector/.test(html),
+     "a finished lookup offers a button to review what it found");
+  ok(/const review = ev\.target\.closest\("\[data-review\]"\)/.test(html) &&
+     /det\.open = true/.test(html),
+     "which filters to those findings and opens the section they are in");
+  ok(!/offerResults/.test(html), "rather than listing bare Spotify links as if certain");
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

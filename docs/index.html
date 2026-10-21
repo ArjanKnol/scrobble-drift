@@ -31,7 +31,7 @@
 </script>
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=22">
+<link rel="stylesheet" href="style.css?v=23">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -2419,17 +2419,7 @@ async function runDiscovery(offer) {
   report.issues = [...report.issues, ...found].sort(byImportance);
   report.offers = (report.offers || []).map((o) => o.id === offer.id
     ? { ...o, done: true, found: found.length, checked: plan.length, failed,
-        // Kept on the card itself. These findings are tagging choices, so in the
-        // list below they land in the collapsed section, and "10 added to the
-        // findings below" pointed at something the reader could not see.
-        results: found.map((i) => ({
-          artist: i.artist, track: i.track || null, title: i.title,
-          plays: i.plays_affected || 0,
-          release: i.external ? { title: i.external.title, primary: i.external.primary,
-            date: i.external.first_release, url: i.external.url || null,
-            spotify: i.external.source === "spotify" } : null,
-          album: i.album || null, released: i.released || null,
-        })) } : o);
+      } : o);
 
   report.summary_by_detector = {};
   for (const i of report.issues) {
@@ -3391,27 +3381,6 @@ function countUpScore() {
  * ran from a check that came back empty, which is the distinction this codebase
  * has got wrong more times than any other.
  */
-/** The results of a finished lookup, listed on its own card. */
-function offerResults(o) {
-  const rows = (o.results || []).slice().sort((a, b) => b.plays - a.plays);
-  if (!rows.length) return "";
-  return `<div class="offer-results">${rows.map((r) => {
-    const lib = libUrl(report.user, r.artist, r.track ? { track: r.track } : { album: r.album });
-    const what = r.track ? esc(r.track) : esc(r.title);
-    const where = r.release
-      ? `${esc(r.release.primary || "Release")} <strong>${esc(r.release.title)}</strong>${
-          r.release.date ? `, ${esc(String(r.release.date).slice(0, 4))}` : ""}${
-          r.release.spotify ? " &middot; on Spotify" : " &middot; per MusicBrainz"}`
-      : r.album ? `on <strong>${esc(r.album)}</strong>${r.released ? `, ${esc(String(r.released).slice(0, 4))}` : ""}` : "";
-    const out = r.release?.url && /^https:\/\//.test(r.release.url)
-      ? ` <a href="${esc(r.release.url)}" target="_blank" rel="noopener noreferrer">open</a>` : "";
-    return `<div class="row"><span>${lib
-        ? `<a href="${lib}" target="_blank" rel="noopener noreferrer">${what}</a>` : what}
-        <span class="note" style="margin:0;display:block">${where}${out}</span></span>
-      <span class="v">${N(r.plays)} play${r.plays === 1 ? "" : "s"}</span></div>`;
-  }).join("")}</div>`;
-}
-
 function offerCards(section) {
   return (report.offers || [])
     .filter((o) => (o.section || "issues") === section)
@@ -3422,8 +3391,9 @@ function offerCards(section) {
              o.candidates && o.candidates > o.checked
                ? ` of ${N(o.candidates)}, the most played first` : ""}.
              ${o.found
-               ? `Found ${N(o.found)}. Check each is the same version before
-                  changing anything.`
+               ? `Found ${N(o.found)}. A matching title is not proof: many will be
+                  a different version from the one you have, so go through them
+                  one by one.`
                /*
                 * "Nothing came back" is only a finding when every lookup
                 * answered. A failed lookup is not a "no", and saying "none of
@@ -3435,7 +3405,9 @@ function offerCards(section) {
                : "Nothing came back, so none of these has a release the " +
                  "databases know about. That is the normal answer for genuinely " +
                  "unreleased material."}</div>
-           ${offerResults(o)}
+           ${o.found ? `<div style="margin-top:12px">
+             <button type="button" class="check" data-review="${esc(o.detector || "")}">
+               Review the ${N(o.found)} finding${o.found === 1 ? "" : "s"}</button></div>` : ""}
          </div>`
       : `<div class="panel offer" data-offer="${esc(o.id)}">
            <strong>${esc(o.title)}</strong>
@@ -3723,6 +3695,25 @@ function issues() {
   $("out").onclick = async (ev) => {
     // Artist focus, from the top-artists overview or the "show whole library"
     // bar. Checked first: these rows are buttons but not lookups.
+    /*
+     * "Review the N findings" on a finished lookup. Filters the list to that
+     * kind, opens the section they sit in (they are tagging choices, so it is
+     * collapsed by default) and scrolls there, so they can be gone through one
+     * by one with all their evidence, rather than summarised as a list of
+     * Spotify links that overstated how sure the match was.
+     */
+    const review = ev.target.closest("[data-review]");
+    if (review) {
+      ev.preventDefault();
+      fDet = review.dataset.review || ""; fCls = "";
+      if ($("fd")) $("fd").value = fDet;
+      if ($("fc")) $("fc").value = "";
+      issues();
+      for (const det of document.querySelectorAll("#issues details.choices")) det.open = true;
+      const top = $("issues-anchor").getBoundingClientRect().top + window.scrollY - 16;
+      window.scrollTo({ top, behavior: "smooth" });
+      return;
+    }
     const pick = ev.target.closest("[data-focus]");
     if (pick) {
       ev.preventDefault();
