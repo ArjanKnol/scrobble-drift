@@ -549,7 +549,8 @@ const code = html
   ok("the scan makes no discovery lookups", !/DISCOVERY_CAP/.test(code),
      "Any cap here means discovery is still running unasked.");
   ok("discovery is offered by category instead",
-     /discoveryOffers\(scrobbles\)/.test(code),
+     // `used`, since an artist-focused report offers lookups for that artist only.
+     /discoveryOffers\((?:scrobbles|used)\)/.test(code),
      "A category is knowable locally, so it can carry the button a " +
      "not-yet-existing finding cannot.");
   ok("and the offer card renders a button",

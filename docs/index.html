@@ -7,16 +7,36 @@
      Cloudflare Pages redirects foo.html to foo, and Google rejects the redirect.
      Leave this in place, Google re-checks it periodically. -->
 <meta name="google-site-verification" content="S8JxZFC8SJuu97wRYUtfl-W8HiseGvrK9CaV-7KxhDg">
-<title>Scrobble Drift — find the metadata rot in your Last.fm history</title>
-<meta name="description" content="Scan a Last.fm library for split albums,
-  feature-credit inconsistencies and era-tagged unreleased material, and see
-  how much they distort your charts.">
+<title>Scrobble Drift: find split albums and messy metadata in your Last.fm history</title>
+<meta name="description" content="Free, read-only tool that finds split
+  albums, plays with no album, artist name variants and unreleased-material
+  tagging in your Last.fm history, and lists the fixes that matter most.">
+<!--
+  Site name and icon for search results. Without these Google labelled the
+  result "Cloudflare" with a generic globe, taken from the pages.dev host.
+  The WebSite structured data is Google's documented way to set the site name;
+  og:site_name is the fallback it also reads. Inline, so no third-party request.
+-->
+<meta property="og:site_name" content="Scrobble Drift">
+<meta property="og:title" content="Scrobble Drift">
+<meta property="og:description" content="Find split albums and messy metadata
+  in your Last.fm history. Free, read-only, no login.">
+<meta property="og:url" content="https://scrobble-drift.pages.dev/">
+<meta property="og:type" content="website">
+<link rel="canonical" href="https://scrobble-drift.pages.dev/">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"WebSite",
+ "name":"Scrobble Drift","alternateName":"Scrobble Drift for Last.fm",
+ "url":"https://scrobble-drift.pages.dev/"}
+</script>
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=16">
+<link rel="stylesheet" href="style.css?v=17">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
+<!-- Google wants a square icon of at least 48px, in a multiple of 48. -->
+<link rel="icon" type="image/png" sizes="192x192" href="favicon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta name="theme-color" content="#131313">
 </head>
@@ -27,11 +47,11 @@
     <img src="logo.png" alt="Scrobble Drift" width="1044" height="361">
   </h1>
   <p class="lede">
-    Your Last.fm metadata degrades on its own. A single you played on release
-    gets absorbed into an album months later, so your plays end up split across
-    two album strings that share no characters. Catalogues get repackaged.
-    Leaks quietly get official releases. None of it is your fault, and no
-    existing tool catches it.
+    I kept finding old scrobbles filed under a single, or with no album at all,
+    long after the song had landed on an album. My top albums never looked
+    right, so I built this. It reads your history, shows how many plays are
+    filed in the wrong place, and lists the fixes that make the biggest
+    difference.
   </p>
 
   <div class="social" id="social"></div>
@@ -40,6 +60,9 @@
     <form id="f">
       <input id="user" placeholder="Last.fm username" autocomplete="off"
              spellcheck="false" required>
+      <input id="artist" class="opt" placeholder="Artist (optional)"
+             autocomplete="off" spellcheck="false" maxlength="200"
+             aria-label="Only look at one artist (optional)">
       <select id="depth">
         <option value="2000" selected>Last 2,000 scrobbles (~15s)</option>
         <option value="10000">Last 10,000 (~1 min)</option>
@@ -51,6 +74,24 @@
       <button id="go">Scan</button>
       <button id="stop" class="ghost hide" type="button">Stop</button>
     </form>
+
+    <!--
+      The file source. One scan at a time, from ONE source: picking a file swaps
+      the username and depth controls for the file, and both are locked while a
+      scan runs. There is no state in which a Last.fm fetch and a file import can
+      start together.
+    -->
+    <div class="source" id="source">
+      <span class="note">Or scan an export file
+        <button type="button" class="i" data-tip="A CSV of your scrobbles,
+          for example from lastfmstats.com. The file is read in this browser and
+          never uploaded. It covers your whole history with no API key, but it is
+          a snapshot: after fixing things on Last.fm, export a fresh one.">i</button></span>
+      <label class="filebtn" id="csv-pick">Choose CSV file
+        <input id="csv" type="file" accept=".csv,.txt,text/csv"></label>
+      <span id="csv-info" class="note"></span>
+      <a href="#" id="csv-clear" class="hide">use Last.fm instead</a>
+    </div>
 
     <!--
       The "check for leaks that have since been released" checkbox used to live
@@ -156,6 +197,10 @@ import {
 
 import { apiBase, apiUrl, API_V, isConfigured, activeLinks } from "./config.js";
 import * as store from "./store.js";
+import { parseScrobbleCsv } from "./csv.js";
+import {
+  artistMatcher, topArtists, suggestArtists, findingsByArtist, artistKey,
+} from "./focus.js";
 /*
  * `matchTrack` stays; `fetchCatalogue`, `byArtist` and `estimate` go.
  *
@@ -174,6 +219,7 @@ const N = (n) => (n ?? 0).toLocaleString();
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const KEY = (s) => esc(String(s).replace("␟", " — "));
+const cap1 = (s) => String(s).charAt(0).toUpperCase() + String(s).slice(1);
 
 /**
  * Deep links into the scanned user's own Last.fm library.
@@ -295,6 +341,79 @@ $("ownkey-toggle").onclick = (e) => {
   if (!$("ownkey").classList.contains("hide")) $("apikey").focus();
 };
 
+/* ------------------------------------------------------------ scan source */
+/*
+ * Two ways in, never both at once.
+ *
+ * `csvSource` holds a parsed export file, or null for the normal Last.fm scan.
+ * Choosing a file disables the username and depth controls and relabels the
+ * button, so the form can only describe one scan. `scanning` locks everything,
+ * including the file picker, until that scan has finished, so a second scan
+ * cannot be started from the other source while one is running.
+ */
+let csvSource = null;
+let scanning = false;
+
+function applySource() {
+  const f = Boolean(csvSource);
+  $("user").required = !f;
+  $("user").disabled = scanning || f;
+  $("depth").disabled = scanning || f;
+  // A file is always the whole file, so the depth choice would only mislead.
+  $("depth").classList.toggle("hide", f);
+  $("artist").disabled = scanning;
+  $("csv").disabled = scanning;
+  $("csv-pick").classList.toggle("off", scanning);
+  $("csv-pick").classList.toggle("hide", f);
+  $("csv-clear").classList.toggle("hide", !f || scanning);
+  $("go").textContent = f ? "Scan file" : "Scan";
+  if (f) {
+    $("user").value = csvSource.username || "";
+    $("user").placeholder = csvSource.username ? "Last.fm username" : "No username in file";
+  } else {
+    $("user").placeholder = "Last.fm username";
+  }
+  $("csv-info").innerHTML = f
+    ? `<strong>${esc(csvSource.name)}</strong>: ${N(csvSource.scrobbles.length)}
+       scrobbles${csvSource.username ? ` from ${esc(csvSource.username)}` : ""}${
+       csvSource.skipped ? `, ${N(csvSource.skipped)} unreadable
+       row${csvSource.skipped === 1 ? "" : "s"} skipped` : ""}.`
+    : "";
+}
+
+const CSV_MAX_BYTES = 300 * 1024 * 1024;
+
+$("csv").onchange = async (e) => {
+  const file = e.target.files?.[0];
+  // Reset so choosing the same file again still fires a change event.
+  e.target.value = "";
+  if (!file || scanning) return;
+  if (file.size > CSV_MAX_BYTES) {
+    return fail("That file is larger than 300 MB, which is more than any " +
+                "scrobble export should be. Is it the right file?");
+  }
+  $("csv-info").textContent = "Reading the file…";
+  try {
+    const parsed = parseScrobbleCsv(await file.text());
+    csvSource = { ...parsed, name: file.name };
+    $("out").innerHTML = "";
+    $("resume").classList.add("hide");
+  } catch (err) {
+    csvSource = null;
+    fail(err.message || String(err));
+  }
+  applySource();
+};
+
+$("csv-clear").onclick = (e) => {
+  e.preventDefault();
+  if (scanning) return;
+  csvSource = null;
+  $("user").value = "";
+  applySource();
+  $("user").focus();
+};
+
 /* ------------------------------------------------- local storage controls */
 
 async function showUsage() {
@@ -341,6 +460,9 @@ $("clear-data").onclick = async (e) => {
     $("resume").classList.add("hide");
   };
   $("do-resume").onclick = async () => {
+    // Resuming is a Last.fm scan, so it replaces any chosen file.
+    csvSource = null;
+    applySource();
     $("user").value = st.user;
     $("depth").value = String(st.cap ?? 0);
     $("resume").classList.add("hide");
@@ -496,10 +618,15 @@ const freshStats = () => ({
 
 $("f").onsubmit = async (e) => {
   e.preventDefault();
-  const user = $("user").value.trim();
-  if (!/^[A-Za-z0-9_.-]{2,20}$/.test(user)) {
+  if (scanning) return;               // one scan at a time, from one source
+  const fromFile = csvSource;
+  // A file may carry no username (any CSV other than lastfmstats.com's). That
+  // only costs the library links and the album-artist check, so it is allowed.
+  const user = fromFile ? (fromFile.username || "") : $("user").value.trim();
+  if (!fromFile && !/^[A-Za-z0-9_.-]{2,20}$/.test(user)) {
     return fail("That does not look like a Last.fm username.");
   }
+  const focus = $("artist").value.trim();
   const apiKey = $("apikey").value.trim();
   if (apiKey && !/^[a-f0-9]{32}$/i.test(apiKey)) {
     return fail("That API key does not look right. It should be 32 characters, " +
@@ -522,7 +649,7 @@ $("f").onsubmit = async (e) => {
    */
   const DEEP_FROM = 10000;
   const wanted = Number($("depth").value);
-  if (!apiKey && (wanted === 0 || wanted > DEEP_FROM)) {
+  if (!fromFile && !apiKey && (wanted === 0 || wanted > DEEP_FROM)) {
     $("ownkey").classList.remove("hide");
     $("apikey").focus();
     return fail(
@@ -543,6 +670,8 @@ $("f").onsubmit = async (e) => {
   }
 
   abort = false;
+  scanning = true;
+  applySource();
   $("go").disabled = true;
   $("stop").classList.remove("hide");
   $("prog").classList.remove("hide");
@@ -550,32 +679,60 @@ $("f").onsubmit = async (e) => {
   $("out").innerHTML = "";
   $("fill").style.width = "0";
 
-  const cap = Number($("depth").value);
-  setPhase("Reading your scrobbles from Last.fm",
-           "Nothing is looked up yet, this is just your listening history.");
-  $("status").textContent = cap
-    ? `Starting scan of ${N(cap)} scrobbles…`
-    : "Starting full history scan. This takes a few minutes on a big library.";
+  const cap = fromFile ? 0 : Number($("depth").value);
+  if (fromFile) {
+    setPhase("Reading your export file",
+             "Already on this device, so there is nothing to download.");
+    $("status").textContent = `${N(fromFile.scrobbles.length)} scrobbles in the file.`;
+  } else {
+    setPhase("Reading your scrobbles from Last.fm",
+             "Nothing is looked up yet, this is just your listening history.");
+    $("status").textContent = cap
+      ? `Starting scan of ${N(cap)} scrobbles…`
+      : "Starting full history scan. This takes a few minutes on a big library.";
+  }
 
   stats = freshStats();
+  stats.source = fromFile ? "file" : "lastfm";
 
   try {
     const t0 = Date.now();
-    const scrobbles = await fetchAll(user, cap, apiKey);
+    const scrobbles = fromFile
+      ? fromFile.scrobbles
+      : await fetchAll(user, cap, apiKey);
+    if (fromFile) $("fill").style.width = "100%";
     stats.ingest_ms = Date.now() - t0;
     stats.scrobbles = scrobbles.length;
     if (!scrobbles.length) {
       return fail(abort ? "Stopped before anything was fetched."
                         : "No scrobbles found for that user.");
     }
+
+    /*
+     * Artist focus, applied before any lookup so a focused scan also costs less.
+     *
+     * The full set is kept for the top-artists overview and so another artist
+     * can be picked from the report without fetching anything again.
+     */
+    const used = focus ? scrobbles.filter(artistMatcher(focus)) : scrobbles;
+    if (focus && !used.length) {
+      const near = suggestArtists(focus, scrobbles);
+      return fail(
+        `No plays by ${focus} in the ${N(scrobbles.length)} scrobbles scanned.`,
+        near.length
+          ? `Did you mean ${near.join(", ")}?`
+          : "Check the spelling, or scan further back in your history.",
+        null);
+    }
+    lastAll = scrobbles;
     // The analysis is one synchronous pass and cannot show progress from
     // inside. On a full 139k history it is ~16 seconds of blocked main thread,
     // mostly the all-pairs artist comparison, which is deliberately not
     // shortcut for accuracy. Warn plainly so it does not look like a crash.
-    $("status").textContent = scrobbles.length > 40000
-      ? `Analysing ${N(scrobbles.length)} scrobbles. This blocks the tab for ` +
+    $("status").textContent = used.length > 40000
+      ? `Analysing ${N(used.length)} scrobbles. This blocks the tab for ` +
         `up to 30 seconds and cannot show progress. Do not close it.`
-      : `Analysing ${N(scrobbles.length)} scrobbles in your browser…`;
+      : `Analysing ${N(used.length)} scrobbles in your browser…`;
     // Settle ambiguous album names BEFORE analysing, because the answer decides
     // which partition they land in and the era partition is hidden from most
     // detectors. Deliberately not part of resolvePhase: by then analyse() has
@@ -584,22 +741,22 @@ $("f").onsubmit = async (e) => {
     // Cheap enough to run first. Only weak markers qualify ('The Leaks',
     // 'Outtakes', 'Rodeo Sessions'), which is a handful per library, not
     // thousands.
-    const official = await verifyOfficialAlbums(scrobbles, apiKey);
-
     // The album chart, which is the ONLY place Last.fm exposes the album artist.
     // getRecentTracks returns the track artist, so an album re-credited from
     // "Kanye West" to "Various Artists" is invisible in the scrobble stream: both
     // halves look byte-identical. This is what makes D15 possible.
-    const topAlbums = await fetchTopAlbums(user, apiKey);
+    //
+    // A file with no username cannot ask for it, and simply goes without D15.
+    const topAlbums = user ? await fetchTopAlbums(user, apiKey) : [];
+    lastContext = { user, topAlbums };
 
     await sleep(60);                  // let the browser paint before the CPU work
     const t1 = Date.now();
-    report = analyse(scrobbles, { official, topAlbums });
+    report = await buildReport(used, focus, { user, topAlbums, apiKey });
     stats.analyse_ms = Date.now() - t1;
     stats.phase = "analysing";
     setPhase("Analysing in your browser",
              "Finding splits, variants and duplicates. No network needed.");
-    report.user = user;
 
     /*
      * Kept so the report can run a lookup later without re-fetching anything.
@@ -610,8 +767,6 @@ $("f").onsubmit = async (e) => {
      * It is now offered inside the report instead, one card per category, which
      * needs the scrobbles to still be in hand when the button is pressed.
      */
-    lastScrobbles = scrobbles;
-    report.offers = discoveryOffers(scrobbles);
     render();
 
     stats.aborted = abort;
@@ -640,10 +795,71 @@ $("f").onsubmit = async (e) => {
     // Belt and braces: the assignment above covers the success path, this covers
     // every path out of the try, including a throw before it is reached.
     if (stats) stats.running = false;
+    scanning = false;
+    applySource();
     $("go").disabled = false;
     $("stop").classList.add("hide");
   }
 };
+
+/*
+ * Everything the current report can be rebuilt from without touching Last.fm.
+ *
+ * `lastAll` is every scrobble the scan read; `lastScrobbles` (above) is the
+ * subset the report covers, which differs only when it is focused on an artist.
+ */
+let lastAll = null;
+let lastContext = null;
+
+/**
+ * Analyse a set of scrobbles into a report. Shared by a fresh scan and by
+ * picking another artist from the report, so the two cannot drift apart.
+ */
+async function buildReport(used, focus, { user, topAlbums, apiKey }) {
+  // Settle ambiguous album names BEFORE analysing (see verifyOfficialAlbums).
+  // Run on the focused subset only, so a focused report asks about less.
+  const official = await verifyOfficialAlbums(used, apiKey);
+  const r = analyse(used, { official, topAlbums });
+  r.user = user;
+  // Shown as the library spells it, not as typed: "the weeknd" reads as The Weeknd.
+  r.focus = focus ? (topArtists(used, 1)[0]?.artist || focus) : "";
+  r.top_artists = topArtists(lastAll || used, 25);
+  lastScrobbles = used;
+  r.offers = discoveryOffers(used);
+  return r;
+}
+
+/**
+ * Re-focus the report on one artist, or back on everything, from scrobbles
+ * already in memory. No fetch, so it is instant apart from the analysis.
+ */
+async function refocus(name) {
+  if (scanning || !lastAll || !lastContext) return;
+  const used = name ? lastAll.filter(artistMatcher(name)) : lastAll;
+  if (!used.length) return;
+  scanning = true;
+  applySource();
+  $("artist").value = name || "";
+  $("prog").classList.remove("hide");
+  setPhase(name ? `Focusing on ${name}` : "Showing your whole library",
+           "Using the scrobbles already loaded. Nothing is fetched again.");
+  $("status").textContent = `Analysing ${N(used.length)} scrobbles…`;
+  try {
+    await sleep(30);
+    report = await buildReport(used, name, {
+      ...lastContext, apiKey: $("apikey").value.trim(),
+    });
+    fDet = ""; fCls = "";
+    render();
+    $("out").scrollIntoView({ block: "start" });
+  } catch (err) {
+    fail(err.message || String(err));
+  } finally {
+    scanning = false;
+    applySource();
+    $("prog").classList.add("hide");
+  }
+}
 
 /** Human duration. Seconds below 90, then minutes, dropping a zero remainder. */
 const dur = (ms) => {
@@ -2374,7 +2590,13 @@ function render() {
   const d = report, p = d.profile, h = d.hygiene, era = d.era, im = d.impact;
   $("out").innerHTML = `
     ${scanSummary()}
-    <h2>${esc(d.user)}</h2>
+    <h2>${esc(d.user || "Your export")}${d.focus
+      ? ` <span style="color:var(--ink)">&middot; ${esc(d.focus)}</span>` : ""}</h2>
+    ${d.focus ? `<div class="focusbar">
+      Only showing <strong>${esc(d.focus)}</strong>: ${N(d.profile.scrobbles_ingested)}
+      of the ${N((lastAll || []).length)} scrobbles scanned.
+      <button type="button" class="check" data-focus="">Show whole library</button>
+    </div>` : ""}
     ${/*
        * The headline is a COUNT, not a score.
        *
@@ -2542,7 +2764,7 @@ function render() {
           data-to="${h.score}">${h.score}</span><span
           style="font-size:18px;color:var(--dim)">/100</span></div>
         <div class="l" style="color:var(--dim);font-size:12px;margin-bottom:4px">
-          hygiene score${tip(
+          Hygiene score${tip(
             "Four areas combined, each weighted by how much of your library it " +
             "covers, so an area you barely have counts for little and one that " +
             "covers everything counts for a lot. Each is scored on how many " +
@@ -2577,7 +2799,7 @@ function render() {
           Object.entries(h.subscores).map(([k, v]) => v === null ? `
           <div style="margin-bottom:9px;opacity:.45">
             <div class="row" style="border:0;padding:0">
-              <span>${esc(k.replace(/_/g, " "))}${
+              <span>${esc(cap1(k.replace(/_/g, " ")))}${
                 SUBSCORE_TIPS[k] ? tip(SUBSCORE_TIPS[k], "tip-l") : ""}</span>
               <span class="v" style="font-size:12px">not applicable</span></div>
             <div class="note" style="margin:2px 0 0;font-size:11.5px">
@@ -2585,7 +2807,7 @@ function render() {
           </div>` : `
           <div style="margin-bottom:9px">
             <div class="row" style="border:0;padding:0">
-              <span>${esc(k.replace(/_/g, " "))}${
+              <span>${esc(cap1(k.replace(/_/g, " ")))}${
                 SUBSCORE_TIPS[k] ? tip(SUBSCORE_TIPS[k], "tip-l") : ""}</span>
               <span class="v">${
                 h.issue_counts?.[k] ? `<span style="color:var(--dim);
@@ -2621,26 +2843,43 @@ function render() {
                 : ""}
           </div>`).join("")}
       </div>
+      <div>
       <div class="grid g4">
-        ${metric(N(p.scrobbles_ingested), "scrobbles scanned", null,
-          "How many of your most recent scrobbles this scan read. Pick a deeper " +
-          "scan to cover more of your history.", "tip-below")}
-        ${metric(N(p.distinct_albums), "album strings", null,
+        ${metric(N(p.scrobbles_ingested), "Scrobbles scanned", null,
+          d.focus
+            ? `Scrobbles by ${d.focus} within the range this scan read.`
+            : "How many of your most recent scrobbles this scan read. Pick a " +
+              "deeper scan, or import a CSV export, to cover more of your history.",
+          "tip-below")}
+      </div>
+      ${/*
+         * The rest are diagnostics, not answers. "Plays per album string 2.3"
+         * means nothing to most readers, and a wall of four big numbers is what
+         * made the page read as a template. Kept, one click away.
+         */""}
+      <details class="more">
+        <summary>More numbers</summary>
+      <div class="grid g4" style="margin-top:12px">
+        ${metric(N(p.distinct_albums), "Album strings", null,
           "Distinct artist + album text combinations. Not the same as albums: " +
           "if one album is spelled two ways, that is two strings. This is the " +
           "unit the score is measured against.", "tip-below")}
-        ${metric(N(d.issues_total), "issues found",
+        ${metric(N(d.issues_total), "Findings",
           d.issues_total ? "var(--warn)" : "var(--good)",
           "Every finding, including low-confidence ones flagged for review. " +
           "Not all of them are worth acting on, and each one says which it is.",
           "tip-below")}
         ${metric((p.scrobbles_ingested / Math.max(p.distinct_albums, 1)).toFixed(1),
-                 "plays per album string", null,
+                 "Plays per album string", null,
           "Average plays per album string. A low number across a large library " +
           "suggests fragmentation: the same music split across many spellings.",
           "tip-below")}
       </div>
+      </details>
+      </div>
     </div>
+
+    ${topArtistsPanel(d)}
 
     ${d.issues_total ? `<button type="button" class="jump" id="to-issues">
       See the ${N(d.issues_total)} finding${d.issues_total === 1 ? "" : "s"}
@@ -2656,14 +2895,14 @@ function render() {
             "while for anyone who follows leaks it can be a fifth or more. " +
             "There is no right number, it is just useful to know yours.",
             "tip-below")}
-          ${metric(N(era.plays), "unreleased plays", null,
+          ${metric(N(era.plays), "Unreleased plays", null,
             "Plays on album strings that look like unreleased material: an " +
             "'Unreleased' marker, an era or sessions qualifier, or words like " +
             "leak, snippet or outtake.", "tip-below")}
-          ${metric(N(era.album_strings), "unreleased strings", null,
+          ${metric(N(era.album_strings), "Unreleased strings", null,
             "Distinct artist + album combinations holding this material.",
             "tip-below")}
-          ${metric(N(era.distinct_eras), "named eras", null,
+          ${metric(N(era.distinct_eras), "Named eras", null,
             "How many distinct project names you have used, counted per " +
             "artist. Recognised in every form: '(Rodeo Era)', '[Rodeo Era]', " +
             "'(Rodeo Sessions)' and a bare 'Rodeo Sessions' all count as one " +
@@ -2792,6 +3031,46 @@ function render() {
 }
 
 /**
+ * Your top 25 artists, each one click away from a report on just them.
+ *
+ * Asked for alongside the artist field: most people care about a handful of
+ * artists far more than the rest, and the overview is how they find them. Counts
+ * come from the scrobbles already loaded, so picking one fetches nothing.
+ *
+ * The findings column only appears on the whole-library report. On a focused
+ * report every other artist would show zero, which reads as "clean" when it
+ * really means "not looked at".
+ */
+function topArtistsPanel(d) {
+  const top = d.top_artists || [];
+  if (top.length < 2) return "";
+  const counts = d.focus ? null : findingsByArtist(d.issues);
+  const current = artistKey(d.focus);
+  const max = top[0].plays || 1;
+  return `
+    <h2>Top ${N(top.length)} artists</h2>
+    <p class="note" style="margin:-4px 0 12px">Pick one to see only their
+      findings. Uses the scrobbles already loaded, so nothing is fetched again.</p>
+    <div class="panel"><div class="artgrid">
+      ${top.map((a, i) => {
+        const k = artistKey(a.artist);
+        const n = counts ? counts.get(k) || 0 : null;
+        const on = current && k === current;
+        return `<button type="button" class="art${on ? " on" : ""}"
+            data-focus="${on ? "" : esc(a.artist)}"
+            title="${on ? "Show whole library" : `Only ${esc(a.artist)}`}">
+          <span class="rk">${i + 1}</span>
+          <span class="nm">${esc(a.artist)}</span>
+          <span class="v">${N(a.plays)}${n !== null
+            ? ` <span class="fc${n ? "" : " zero"}">${n ? N(n) + " to check" : "clean"}</span>`
+            : ""}</span>
+          <i style="width:${Math.max(2, Math.round(100 * a.plays / max))}%"></i>
+        </button>`;
+      }).join("")}
+    </div></div>`;
+}
+
+/**
  * Grow the hygiene bars from zero.
  *
  * They are rendered at their true width, so this collapses them and lets the CSS
@@ -2837,7 +3116,7 @@ function countUpScore() {
 
   if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
 
-  const DUR = 850;
+  const DUR = 600;
   const start = performance.now();
   // Cubic ease-out, so it sprints then settles rather than crawling linearly.
   const ease = (t) => 1 - Math.pow(1 - t, 3);
@@ -3177,6 +3456,14 @@ function issues() {
    * replaced.
    */
   $("out").onclick = async (ev) => {
+    // Artist focus, from the top-artists overview or the "show whole library"
+    // bar. Checked first: these rows are buttons but not lookups.
+    const pick = ev.target.closest("[data-focus]");
+    if (pick) {
+      ev.preventDefault();
+      await refocus(pick.dataset.focus);
+      return;
+    }
     const btn = ev.target.closest("button.check, button.check-all");
     if (!btn) return;
 
