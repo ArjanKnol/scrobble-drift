@@ -95,14 +95,20 @@ console.log("\none scan, one source");
   ok(/if \(scanning\) return;\s+\/\/ one scan at a time/.test(html),
      "submitting while a scan runs does nothing");
   ok(/\$\("csv"\)\.disabled = scanning;/.test(html), "the file picker is locked during a scan");
-  ok(/\$\("user"\)\.disabled = scanning \|\| f;/.test(html),
-     "the username is locked while a file is chosen or a scan runs");
-  ok(/\$\("depth"\)\.disabled = scanning \|\| f;/.test(html), "and so is the depth");
+  ok(/\$\("user"\)\.classList\.toggle\("hide", file\);/.test(html) &&
+     /\$\("user"\)\.disabled = scanning;/.test(html),
+     "the username is hidden on the file tab and locked during a scan");
+  ok(/\$\("depth"\)\.classList\.toggle\("hide", file\);/.test(html), "and so is the depth");
+  ok(/\$\(id\)\.disabled = scanning;/.test(html), "the source tabs cannot be switched mid-scan");
+  ok(/if \(mode === "lfm"\) csvSource = null;/.test(html),
+     "leaving the file tab drops the file, so no hidden second source exists");
+  ok(/const fromFile = mode === "file" \? csvSource : null;/.test(html),
+     "the scan uses the file only on the file tab");
   ok(/fromFile\s*\? fromFile\.scrobbles\s*: await fetchAll/.test(html),
      "a file scan never calls Last.fm for scrobbles");
   ok(/!fromFile && !apiKey && \(wanted === 0/.test(html),
      "the API-key gate does not apply to a file");
-  ok(/csvSource = null;\s+applySource\(\);\s+\$\("user"\)\.value = st\.user;/.test(html),
+  ok(/mode = "lfm";\s+csvSource = null;\s+applySource\(\);\s+\$\("user"\)\.value = st\.user;/.test(html),
      "resuming a Last.fm scan clears a chosen file");
   ok(/async function refocus\(name\)[\s\S]{0,120}if \(scanning/.test(html),
      "picking another artist is ignored while a scan runs");

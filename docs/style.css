@@ -683,3 +683,28 @@ details.more>summary::before{content:"▸ "}
 details.more[open]>summary::before{content:"▾ "}
 details.more>summary:hover{color:var(--ink)}
 .source a{font-size:12.5px}
+
+/* ------------------------------------------------------------ scan modes */
+/* Two equal tabs: launch feedback was that the file option was easy to miss
+   when it was a small link under the form. */
+.modes{display:inline-flex;gap:0;margin:0 0 12px;border:1px solid var(--line);
+  border-radius:6px;padding:2px;background:#0d0d0d}
+button.mode{background:transparent;color:var(--dim);border:0;border-radius:4px;
+  padding:7px 14px;font-weight:600;font-size:13px}
+button.mode:hover:not(:disabled){background:rgba(255,255,255,.05);color:var(--ink)}
+button.mode.on,button.mode.on:hover:not(:disabled){background:#2a2a2a;color:var(--ink)}
+/* The drop zone takes the username field's place and the same row. */
+.drop{flex:1 1 360px;display:flex;flex-direction:column;justify-content:center;
+  gap:2px;min-height:58px;padding:10px 14px;border:1.5px dashed #444;
+  border-radius:6px;background:#0d0d0d;cursor:pointer;position:relative;
+  font-size:13px;transition:border-color var(--t-fast),background var(--t-fast)}
+.drop.hide{display:none}
+.drop:hover,.drop:focus-within{border-color:var(--dim)}
+.drop.over{border-color:var(--accent);background:rgba(213,16,7,.06)}
+.drop.has{border-style:solid;border-color:#3d5a3d}
+.drop.off{opacity:.5;pointer-events:none}
+.drop strong{font-weight:600}
+.drop span>span,.drop #drop-text span{color:var(--dim);font-size:12.5px;display:block}
+.drop input{position:absolute;inset:0;opacity:0;cursor:pointer;min-width:0;
+  width:100%;padding:0}
+#file-help{margin:10px 0 0}

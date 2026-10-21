@@ -31,7 +31,7 @@
 </script>
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=17">
+<link rel="stylesheet" href="style.css?v=18">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -57,7 +57,27 @@
   <div class="social" id="social"></div>
 
   <div class="panel">
+    <!--
+      Two ways in, shown as two equal choices. The file option used to be a small
+      link under the form and launch-day feedback was that it was easy to miss.
+    -->
+    <div class="modes" role="tablist" aria-label="What to scan">
+      <button type="button" class="mode on" id="mode-lfm" role="tab"
+              aria-selected="true">Last.fm username</button>
+      <button type="button" class="mode" id="mode-file" role="tab"
+              aria-selected="false">Export file (CSV)</button>
+    </div>
     <form id="f">
+      <!--
+        The file source. One scan at a time, from ONE source: the file tab swaps
+        the username and depth controls for the drop zone, and everything is
+        locked while a scan runs, so a Last.fm fetch and a file import can never
+        start together.
+      -->
+      <label class="drop hide" id="drop">
+        <input id="csv" type="file" accept=".csv,.txt,text/csv">
+        <span id="drop-text"></span>
+      </label>
       <input id="user" placeholder="Last.fm username" autocomplete="off"
              spellcheck="false" required>
       <input id="artist" class="opt" placeholder="Artist (optional)"
@@ -75,23 +95,12 @@
       <button id="stop" class="ghost hide" type="button">Stop</button>
     </form>
 
-    <!--
-      The file source. One scan at a time, from ONE source: picking a file swaps
-      the username and depth controls for the file, and both are locked while a
-      scan runs. There is no state in which a Last.fm fetch and a file import can
-      start together.
-    -->
-    <div class="source" id="source">
-      <span class="note">Or scan an export file
-        <button type="button" class="i" data-tip="A CSV of your scrobbles,
-          for example from lastfmstats.com. The file is read in this browser and
-          never uploaded. It covers your whole history with no API key, but it is
-          a snapshot: after fixing things on Last.fm, export a fresh one.">i</button></span>
-      <label class="filebtn" id="csv-pick">Choose CSV file
-        <input id="csv" type="file" accept=".csv,.txt,text/csv"></label>
-      <span id="csv-info" class="note"></span>
-      <a href="#" id="csv-clear" class="hide">use Last.fm instead</a>
-    </div>
+    <p class="note hide" id="file-help">Get your full history as a file at
+      <a href="https://lastfmstats.com/" target="_blank"
+         rel="noopener noreferrer">lastfmstats.com</a>: enter your username, wait
+      for it to load, then use Export. The file is read in this browser and never
+      uploaded. No API key needed, whatever the size. It is a snapshot, so after
+      fixing things on Last.fm, export a fresh one.</p>
 
     <!--
       The "check for leaks that have since been released" checkbox used to live
@@ -345,54 +354,71 @@ $("ownkey-toggle").onclick = (e) => {
 /*
  * Two ways in, never both at once.
  *
- * `csvSource` holds a parsed export file, or null for the normal Last.fm scan.
- * Choosing a file disables the username and depth controls and relabels the
- * button, so the form can only describe one scan. `scanning` locks everything,
- * including the file picker, until that scan has finished, so a second scan
- * cannot be started from the other source while one is running.
+ * `mode` is the tab the visitor picked: "lfm" for a username scan, "file" for an
+ * export. `csvSource` holds the parsed file. The form only ever shows the
+ * controls for the current mode, and `scanning` locks the tabs, the fields and
+ * the file picker until the running scan has finished, so a second scan cannot
+ * be started from the other source.
  */
+let mode = "lfm";
 let csvSource = null;
 let scanning = false;
+const apiReady = isConfigured() || Boolean(localStorage.getItem("drift_api"));
 
 function applySource() {
+  const file = mode === "file";
   const f = Boolean(csvSource);
-  $("user").required = !f;
-  $("user").disabled = scanning || f;
-  $("depth").disabled = scanning || f;
-  // A file is always the whole file, so the depth choice would only mislead.
-  $("depth").classList.toggle("hide", f);
-  $("artist").disabled = scanning;
-  $("csv").disabled = scanning;
-  $("csv-pick").classList.toggle("off", scanning);
-  $("csv-pick").classList.toggle("hide", f);
-  $("csv-clear").classList.toggle("hide", !f || scanning);
-  $("go").textContent = f ? "Scan file" : "Scan";
-  if (f) {
-    $("user").value = csvSource.username || "";
-    $("user").placeholder = csvSource.username ? "Last.fm username" : "No username in file";
-  } else {
-    $("user").placeholder = "Last.fm username";
+  for (const [id, on] of [["mode-lfm", !file], ["mode-file", file]]) {
+    $(id).classList.toggle("on", on);
+    $(id).setAttribute("aria-selected", String(on));
+    $(id).disabled = scanning;
   }
-  $("csv-info").innerHTML = f
-    ? `<strong>${esc(csvSource.name)}</strong>: ${N(csvSource.scrobbles.length)}
-       scrobbles${csvSource.username ? ` from ${esc(csvSource.username)}` : ""}${
-       csvSource.skipped ? `, ${N(csvSource.skipped)} unreadable
-       row${csvSource.skipped === 1 ? "" : "s"} skipped` : ""}.`
-    : "";
+  $("user").classList.toggle("hide", file);
+  $("user").required = !file;
+  $("user").disabled = scanning;
+  // A file is always the whole file, so the depth choice would only mislead.
+  $("depth").classList.toggle("hide", file);
+  $("depth").disabled = scanning;
+  $("artist").disabled = scanning;
+  $("drop").classList.toggle("hide", !file);
+  $("drop").classList.toggle("off", scanning);
+  $("drop").classList.toggle("has", f);
+  $("file-help").classList.toggle("hide", !file);
+  $("csv").disabled = scanning;
+  $("go").textContent = file ? "Scan file" : "Scan";
+  if (!scanning && apiReady) $("go").disabled = file && !f;
+  $("drop-text").innerHTML = f
+    ? `<strong>${esc(csvSource.name)}</strong>
+       <span>${N(csvSource.scrobbles.length)} scrobbles${csvSource.username
+         ? ` from ${esc(csvSource.username)}` : ""}${csvSource.skipped
+         ? `, ${N(csvSource.skipped)} unreadable row${csvSource.skipped === 1 ? "" : "s"}
+            skipped` : ""}. Drop or click to use another file.</span>`
+    : `<strong>Drop your export here, or click to choose a file</strong>
+       <span>A CSV from lastfmstats.com, or any file with Artist, Album, Track
+       and Date columns.</span>`;
 }
+
+function setMode(next) {
+  if (scanning || next === mode) return;
+  mode = next;
+  // Leaving the file tab drops the file, so there is never a hidden second
+  // source waiting behind the visible one.
+  if (mode === "lfm") csvSource = null;
+  applySource();
+  (mode === "lfm" ? $("user") : $("csv")).focus();
+}
+$("mode-lfm").onclick = () => setMode("lfm");
+$("mode-file").onclick = () => setMode("file");
 
 const CSV_MAX_BYTES = 300 * 1024 * 1024;
 
-$("csv").onchange = async (e) => {
-  const file = e.target.files?.[0];
-  // Reset so choosing the same file again still fires a change event.
-  e.target.value = "";
+async function loadFile(file) {
   if (!file || scanning) return;
   if (file.size > CSV_MAX_BYTES) {
     return fail("That file is larger than 300 MB, which is more than any " +
                 "scrobble export should be. Is it the right file?");
   }
-  $("csv-info").textContent = "Reading the file…";
+  $("drop-text").innerHTML = "<strong>Reading the file…</strong>";
   try {
     const parsed = parseScrobbleCsv(await file.text());
     csvSource = { ...parsed, name: file.name };
@@ -403,16 +429,27 @@ $("csv").onchange = async (e) => {
     fail(err.message || String(err));
   }
   applySource();
+}
+
+$("csv").onchange = async (e) => {
+  const file = e.target.files?.[0];
+  // Reset so choosing the same file again still fires a change event.
+  e.target.value = "";
+  await loadFile(file);
 };
 
-$("csv-clear").onclick = (e) => {
+// Drag and drop onto the zone. dragover must be cancelled for drop to fire.
+$("drop").addEventListener("dragover", (e) => {
   e.preventDefault();
-  if (scanning) return;
-  csvSource = null;
-  $("user").value = "";
-  applySource();
-  $("user").focus();
-};
+  if (!scanning) $("drop").classList.add("over");
+});
+$("drop").addEventListener("dragleave", () => $("drop").classList.remove("over"));
+$("drop").addEventListener("drop", async (e) => {
+  e.preventDefault();
+  $("drop").classList.remove("over");
+  await loadFile(e.dataTransfer?.files?.[0]);
+});
+applySource();
 
 /* ------------------------------------------------- local storage controls */
 
@@ -461,6 +498,7 @@ $("clear-data").onclick = async (e) => {
   };
   $("do-resume").onclick = async () => {
     // Resuming is a Last.fm scan, so it replaces any chosen file.
+    mode = "lfm";
     csvSource = null;
     applySource();
     $("user").value = st.user;
@@ -619,7 +657,10 @@ const freshStats = () => ({
 $("f").onsubmit = async (e) => {
   e.preventDefault();
   if (scanning) return;               // one scan at a time, from one source
-  const fromFile = csvSource;
+  if (mode === "file" && !csvSource) {
+    return fail("Choose an export file first.");
+  }
+  const fromFile = mode === "file" ? csvSource : null;
   // A file may carry no username (any CSV other than lastfmstats.com's). That
   // only costs the library links and the album-artist check, so it is allowed.
   const user = fromFile ? (fromFile.username || "") : $("user").value.trim();
@@ -796,8 +837,7 @@ $("f").onsubmit = async (e) => {
     // every path out of the try, including a throw before it is reached.
     if (stats) stats.running = false;
     scanning = false;
-    applySource();
-    $("go").disabled = false;
+    applySource();                    // also re-enables Scan, where it should be
     $("stop").classList.add("hide");
   }
 };
