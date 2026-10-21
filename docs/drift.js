@@ -2722,6 +2722,7 @@ export function d14eReleasedSince(era, lookup) {
     const streaming = best.source === "spotify";
     issues.push({
       detector: "D14e", class: "split",
+      track: rec.track,
       // Spotify presence is much better evidence than a MusicBrainz entry, so
       // the two are not reported with the same confidence.
       confidence: streaming ? 0.6 : 0.35,

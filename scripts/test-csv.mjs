@@ -261,5 +261,23 @@ console.log("\nleaks are asked about as songs, not as leaked versions");
      "the 'check for official releases' button asks for the song, once");
 }
 
+console.log("\nfilters and lookup results are readable");
+{
+  const html = (await readFile(new URL("../docs/index.html", import.meta.url), "utf8"))
+    .replace(/\r\n/g, "\n");
+  ok(/All kinds of finding/.test(html) && !/All detectors/.test(html),
+     "the filter talks about kinds of finding, not detectors");
+  ok(/\$\{esc\(detName\(k\)\)\} \(\$\{N\(v\.count\)\}\)/.test(html),
+     "each option is a plain name and a count");
+  const d = await import("../docs/drift.js");
+  const codes = new Set();
+  const src = await readFile(new URL("../docs/drift.js", import.meta.url), "utf8");
+  for (const m of src.matchAll(/detector: "(D\d+[a-z]?)"/g)) codes.add(m[1]);
+  const named = [...codes].filter((c) => new RegExp(`\\b${c}: "`).test(html));
+  eq(named.length, codes.size, "every detector the analysis can produce has a name");
+  ok(/\$\{offerResults\(o\)\}/.test(html),
+     "a finished lookup lists what it found on its own card");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

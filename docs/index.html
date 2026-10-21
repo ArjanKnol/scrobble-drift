@@ -31,7 +31,7 @@
 </script>
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=21">
+<link rel="stylesheet" href="style.css?v=22">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -231,6 +231,38 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const KEY = (s) => esc(String(s).replace("␟", " — "));
 const cap1 = (s) => String(s).charAt(0).toUpperCase() + String(s).slice(1);
+
+/*
+ * What each detector is, in words. The codes (D4, D14c) are internal and meant
+ * nothing to anyone reading the filter: "D14c - 24 issue(s), 123 plays" was
+ * reported as unclear on launch day. The code survives as a tooltip for bug
+ * reports.
+ */
+const DETECTOR_NAMES = {
+  D0: "Album split (checked)",
+  D4: "Album split",
+  D1: "Artist name variants",
+  D5: "Plays with no album",
+  D6: "Duplicate scrobbles",
+  D7: "Capitalisation only",
+  D8: "Credit or title variants",
+  D11: "Various Artists credits",
+  D12: "Impossible timestamps",
+  D14a: "Unreleased: era spelled differently",
+  D14c: "Unreleased: song in two eras",
+  D14e: "Unreleased: possibly released since",
+  D14f: "Unreleased: all in one bucket",
+  D15: "Album credited to another artist",
+  D16: "Single also on an album",
+};
+const detName = (d) => DETECTOR_NAMES[d] || d;
+const CLASS_NAMES = {
+  error: "Clear mistakes",
+  split: "Plays split in two",
+  review: "Worth a look",
+  anomaly: "Odd data",
+  unfixable: "Not fixable on Last.fm",
+};
 
 /**
  * Deep links into the scanned user's own Last.fm library.
@@ -2386,7 +2418,18 @@ async function runDiscovery(offer) {
 
   report.issues = [...report.issues, ...found].sort(byImportance);
   report.offers = (report.offers || []).map((o) => o.id === offer.id
-    ? { ...o, done: true, found: found.length, checked: plan.length, failed } : o);
+    ? { ...o, done: true, found: found.length, checked: plan.length, failed,
+        // Kept on the card itself. These findings are tagging choices, so in the
+        // list below they land in the collapsed section, and "10 added to the
+        // findings below" pointed at something the reader could not see.
+        results: found.map((i) => ({
+          artist: i.artist, track: i.track || null, title: i.title,
+          plays: i.plays_affected || 0,
+          release: i.external ? { title: i.external.title, primary: i.external.primary,
+            date: i.external.first_release, url: i.external.url || null,
+            spotify: i.external.source === "spotify" } : null,
+          album: i.album || null, released: i.released || null,
+        })) } : o);
 
   report.summary_by_detector = {};
   for (const i of report.issues) {
@@ -3180,14 +3223,16 @@ function render() {
     <h2 id="issues-anchor">Issues</h2>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;
                 align-items:center">
-      <select id="fd"><option value="">All detectors</option>
+      <select id="fd" aria-label="Show one kind of finding">
+        <option value="">All kinds of finding</option>
         ${Object.entries(d.summary_by_detector)
           .sort((a, b) => b[1].plays_affected - a[1].plays_affected)
-          .map(([k, v]) => `<option value="${k}">${k} — ${v.count} issue(s),
-            ${N(v.plays_affected)} plays</option>`).join("")}</select>
-      <select id="fc"><option value="">All classes</option>
+          .map(([k, v]) => `<option value="${k}">${esc(detName(k))} (${N(v.count)})</option>`)
+          .join("")}</select>
+      <select id="fc" aria-label="Show findings by how sure they are">
+        <option value="">Any certainty</option>
         ${[...new Set(d.issues.map((i) => i.class))].sort()
-          .map((c) => `<option value="${c}">${c}</option>`).join("")}</select>
+          .map((c) => `<option value="${c}">${esc(CLASS_NAMES[c] || c)}</option>`).join("")}</select>
       ${tip("Class says how much to trust a finding. 'error' is confident and " +
             "specific. 'split' means your plays are divided across names that " +
             "should probably be one. 'review' is informational: worth a look, " +
@@ -3346,6 +3391,27 @@ function countUpScore() {
  * ran from a check that came back empty, which is the distinction this codebase
  * has got wrong more times than any other.
  */
+/** The results of a finished lookup, listed on its own card. */
+function offerResults(o) {
+  const rows = (o.results || []).slice().sort((a, b) => b.plays - a.plays);
+  if (!rows.length) return "";
+  return `<div class="offer-results">${rows.map((r) => {
+    const lib = libUrl(report.user, r.artist, r.track ? { track: r.track } : { album: r.album });
+    const what = r.track ? esc(r.track) : esc(r.title);
+    const where = r.release
+      ? `${esc(r.release.primary || "Release")} <strong>${esc(r.release.title)}</strong>${
+          r.release.date ? `, ${esc(String(r.release.date).slice(0, 4))}` : ""}${
+          r.release.spotify ? " &middot; on Spotify" : " &middot; per MusicBrainz"}`
+      : r.album ? `on <strong>${esc(r.album)}</strong>${r.released ? `, ${esc(String(r.released).slice(0, 4))}` : ""}` : "";
+    const out = r.release?.url && /^https:\/\//.test(r.release.url)
+      ? ` <a href="${esc(r.release.url)}" target="_blank" rel="noopener noreferrer">open</a>` : "";
+    return `<div class="row"><span>${lib
+        ? `<a href="${lib}" target="_blank" rel="noopener noreferrer">${what}</a>` : what}
+        <span class="note" style="margin:0;display:block">${where}${out}</span></span>
+      <span class="v">${N(r.plays)} play${r.plays === 1 ? "" : "s"}</span></div>`;
+  }).join("")}</div>`;
+}
+
 function offerCards(section) {
   return (report.offers || [])
     .filter((o) => (o.section || "issues") === section)
@@ -3356,7 +3422,8 @@ function offerCards(section) {
              o.candidates && o.candidates > o.checked
                ? ` of ${N(o.candidates)}, the most played first` : ""}.
              ${o.found
-               ? `${N(o.found)} added to the findings below.`
+               ? `Found ${N(o.found)}. Check each is the same version before
+                  changing anything.`
                /*
                 * "Nothing came back" is only a finding when every lookup
                 * answered. A failed lookup is not a "no", and saying "none of
@@ -3368,6 +3435,7 @@ function offerCards(section) {
                : "Nothing came back, so none of these has a release the " +
                  "databases know about. That is the normal answer for genuinely " +
                  "unreleased material."}</div>
+           ${offerResults(o)}
          </div>`
       : `<div class="panel offer" data-offer="${esc(o.id)}">
            <strong>${esc(o.title)}</strong>
@@ -3451,7 +3519,7 @@ function issues() {
     <div class="issue" data-idx="${report.issues.indexOf(i)}">
       <h3>${esc(i.title)}</h3>
       <div>
-        <span class="tag t-${i.class}">${i.class}</span>
+        <span class="tag t-${i.class}" title="${esc(i.class)}">${esc(CLASS_NAMES[i.class] || i.class)}</span>
         ${/*
            * Evidence badge, ahead of the confidence percentage.
            *
@@ -3474,7 +3542,7 @@ function issues() {
             : ""}
         ${i.style_choice ? `<span class="tag t-unfixable">tagging style,
           not scored</span>` : ""}
-        <span class="tag">${i.detector}</span>
+        <span class="tag" title="Detector ${esc(i.detector)}">${esc(detName(i.detector))}</span>
         <span class="tag">${N(i.plays_affected)} plays</span>
         <span class="tag">confidence ${Math.round((i.confidence || 0) * 100)}%</span>
       </div>
