@@ -68,6 +68,8 @@ globalThis.indexedDB = {
 };
 
 const store = await import("../docs/store.js");
+const { API_V } = await import("../docs/config.js");
+const V = `v${API_V}:`;                 // every key carries the API version
 const DAY = 24 * 60 * 60 * 1000;
 const settle = () => new Promise((r) => setTimeout(r, 5));
 
@@ -78,7 +80,7 @@ const settle = () => new Promise((r) => setTimeout(r, 5));
                         { exists: true, matches: [{ title: "Rodeo" }] });
 
   // Backdate it by five years. A release date does not rot.
-  const k = "rg:travis scott:rodeo";
+  const k = `${V}rg:travis scott:rodeo`;
   backing.set(k, { ...backing.get(k), t: Date.now() - 5 * 365 * DAY });
 
   const hit = await store.getLookup("rg", "travis scott", "rodeo");
@@ -91,7 +93,7 @@ const settle = () => new Promise((r) => setTimeout(r, 5));
   backing.clear();
   await store.putLookup("rg", "some artist", "unreleased thing",
                         { exists: false, matches: [], near: [] });
-  const k = "rg:some artist:unreleased thing";
+  const k = `${V}rg:some artist:unreleased thing`;
 
   const fresh = await store.getLookup("rg", "some artist", "unreleased thing");
   ok(fresh !== null, "a fresh negative answer is served, so no lookup is wasted");
@@ -117,7 +119,7 @@ const settle = () => new Promise((r) => setTimeout(r, 5));
   for (const [label, value] of negatives) {
     backing.clear();
     await store.putLookup("k", "a", label);
-    backing.set(`k:a:${label}`.toLowerCase(),
+    backing.set(`${V}k:a:${label}`.toLowerCase(),
                 { v: value, t: Date.now() - 40 * DAY });
     ok(await store.getLookup("k", "a", label) === null,
        `an aged negative is expired: ${label}`);
@@ -132,35 +134,29 @@ const settle = () => new Promise((r) => setTimeout(r, 5));
   for (const [label, value] of positives) {
     backing.clear();
     await store.putLookup("k", "a", label);
-    backing.set(`k:a:${label}`.toLowerCase(),
+    backing.set(`${V}k:a:${label}`.toLowerCase(),
                 { v: value, t: Date.now() - 5 * 365 * DAY });
     ok(await store.getLookup("k", "a", label) !== null,
        `an aged positive is kept: ${label}`);
   }
 }
 
-/* ---- entries written before any of this existed ------------------------- */
+/* ---- entries written under an older API version are not read ------------ */
 {
+  /*
+   * Deliberate since 21 Oct 2026. Unversioned answers outlived the Worker fixes
+   * that made them wrong (MØ "Drum" on a 1999 blues album came back from this
+   * store a day after the Worker stopped returning it). The cost is one round
+   * of re-lookups after a version bump, most of them answered by the shared
+   * D1 cache rather than by MusicBrainz.
+   */
   backing.clear();
-  // The old format: the bare value, no wrapper, no timestamp.
   backing.set("rg:legacy:thing", { exists: true, matches: [{ title: "Old" }] });
-
-  const hit = await store.getLookup("rg", "legacy", "thing");
-  ok(hit !== null, "a legacy entry is still readable, so no cache is thrown away");
-  eq(hit.exists, true, "and unwrapping does not mangle it");
-
-  await settle();                      // the lazy re-stamp is fire and forget
-  const rec = backing.get("rg:legacy:thing");
-  ok(rec && "t" in rec && "v" in rec,
-     "and it gets stamped with now, starting the clock rather than losing the row");
-  ok(Math.abs(Date.now() - rec.t) < 5000, "stamped with the current time");
-
-  // A legacy NEGATIVE must not be expired instantly: on an unreleased-heavy
-  // library that would discard thousands of rows and re-fetch at one per second.
-  backing.clear();
-  backing.set("rg:legacy:neg", { exists: false, matches: [] });
-  ok(await store.getLookup("rg", "legacy", "neg") !== null,
-     "a legacy negative is kept once, and re-checked thirty days from now");
+  ok(await store.getLookup("rg", "legacy", "thing") === null,
+     "an answer saved before versioning is not served");
+  await store.putLookup("rg", "legacy", "thing", { exists: true, matches: [] });
+  ok(backing.has(`${V}rg:legacy:thing`), "new answers are saved under the current version");
+  ok(await store.getLookup("rg", "legacy", "thing") !== null, "and read back from it");
 }
 
 /* ---------------------------------------------------------------------------

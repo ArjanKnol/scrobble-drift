@@ -24,6 +24,8 @@
  * rather than throwing.
  */
 
+import { API_V } from "./config.js";
+
 const DB_NAME = "scrobble-drift";
 const DB_VERSION = 1;
 const CHUNK = 5000;         // scrobbles per record: keeps values a sane size
@@ -200,7 +202,18 @@ const isNegative = (v) =>
     (Array.isArray(v.releases) && v.releases.length === 0)
   );
 
-const KEY = (kind, a, b) => `${kind}:${a}:${b}`.toLowerCase();
+/*
+ * Keyed by API version as well as by question.
+ *
+ * Saved answers outlived the fixes that made them wrong. The Worker was
+ * corrected to stop returning other artists' albums, and API_V was bumped so
+ * no edge cache could serve the old answer, but this browser store had no
+ * version in its key. On launch day two findings fixed the day before came
+ * back from it: MØ's "Drum" on a 1999 blues album, and SoFaygo's "Lil Mama"
+ * on PenSoFaygo. API_V is already the "Worker output changed" lever, so a bump
+ * now empties this cache too.
+ */
+const KEY = (kind, a, b) => `v${API_V}:${kind}:${a}:${b}`.toLowerCase();
 
 export async function getLookup(kind, a, b) {
   const rec = await tx("lookups", "readonly", (store, set) => {
