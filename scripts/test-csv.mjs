@@ -287,5 +287,23 @@ console.log("\nfilters and lookup results are readable");
   ok(!/offerResults/.test(html), "rather than listing bare Spotify links as if certain");
 }
 
+console.log("\nfeatured titles and named bootleg projects");
+{
+  const d = await import("../docs/drift.js");
+  eq(d.membersOnRelease(
+      [{ album: "Birds in the Trap Sing McKnight", plays: 60 }, { album: "Jeffery", plays: 3 }],
+      [{ title: "JEFFERY", secondary: ["Mixtape/Street"] },
+       { title: "Birds in the Trap Sing McKnight", secondary: [] }]).length, 2,
+     "Pick Up the Phone is found on both JEFFERY and Birds in the Trap");
+  const html = (await readFile(new URL("../docs/index.html", import.meta.url), "utf8"))
+    .replace(/\r\n/g, "\n");
+  ok(/tracks\.flatMap\(\(t\) => \[t, baseTitle\(t\) \|\| t\]\)/.test(html),
+     "album-split checks also ask with the title minus its feat. credit");
+  ok(!d.isUndifferentiated("The College Dropout: Early Version"),
+     "a named bootleg project is not 'everything pooled into one bucket'");
+  ok(d.isUndifferentiated("Leaks") && d.isUndifferentiated("Unreleased"),
+     "while a bare 'Leaks' or 'Unreleased' still is");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

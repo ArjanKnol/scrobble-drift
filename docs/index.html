@@ -2749,15 +2749,37 @@ async function resolveIssue(idx) {
      */
     const albumSplit = issue.detector === "D0" || issue.detector === "D4";
     const ask = twoVariants || albumSplit ? identifyingLookup : lookup;
+    /*
+     * Album splits also ask with the bare title. MusicBrainz finds nothing for
+     * "Pick Up the Phone (feat. Quavo)" but lists the song on both JEFFERY and
+     * Birds in the Trap Sing McKnight for "Pick Up the Phone", so asking only
+     * the scrobbled title made "on both releases" impossible to see.
+     */
+    const asked = albumSplit
+      ? [...new Set(tracks.flatMap((t) => [t, baseTitle(t) || t]))]
+      : tracks;
     const answers = new Map();
-    await Promise.all(tracks.map(async (t) => {
+    await Promise.all(asked.map(async (t) => {
       answers.set(t.toLowerCase(), await ask(issue.artist, t));
     }));
+    // A track's answer is merged with its bare title's, groups and all.
+    const merged = (t) => {
+      const a = answers.get(String(t).toLowerCase());
+      const bare = baseTitle(t) || t;
+      const b = bare.toLowerCase() !== String(t).toLowerCase()
+        ? answers.get(bare.toLowerCase()) : null;
+      if (!b) return a;
+      if (!a) return b;
+      return { ...a, groups: [...(a.groups || []), ...(b.groups || [])],
+               recordings: [...(a.recordings || []), ...(b.recordings || [])],
+               candidates: [...(a.candidates || []), ...(b.candidates || [])] };
+    };
 
     // Keyed by track, so resolveOne gets a real per-track lookup rather than one
     // answer pretending to serve every question.
     resolved = tracks.length
-      ? resolveOne(issue, (_artist, t) => answers.get(String(t).toLowerCase()))
+      ? resolveOne(issue, (_artist, t) => albumSplit
+          ? merged(t) : answers.get(String(t).toLowerCase()))
       : { ...issue, resolved: true, unresolved: true };
   }
 

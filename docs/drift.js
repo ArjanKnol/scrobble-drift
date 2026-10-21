@@ -469,8 +469,21 @@ export const eraName = (album) => {
 };
 
 /** True for a bucket with no era distinction at all, e.g. bare "Unreleased". */
-export const isUndifferentiated = (album) =>
-  (explicitEra(album) || weakEra(album)) && !eraName(album);
+export const isUndifferentiated = (album) => {
+  if (!(explicitEra(album) || weakEra(album)) || eraName(album)) return false;
+  if (explicitEra(album)) return true;
+  /*
+   * A WEAK marker is only a bucket when nothing else is left: "Leaks",
+   * "Snippets", "Leaked Songs". "The College Dropout: Early Version" is a named
+   * project (the bootleg early cut of one album), and calling it every
+   * unreleased track "pooled into one album" was wrong on a real library.
+   */
+  const rest = String(album || "")
+    .replace(new RegExp(UNREL_WEAK.source, "gi"), " ")
+    .replace(/\b(?:songs?|tracks?|collection|compilation|various|misc|the|and|of)\b/gi, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  return rest === "";
+};
 
 /**
  * The guard. Era-tagged material is partitioned out before anything else and
