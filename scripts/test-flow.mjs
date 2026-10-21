@@ -486,8 +486,16 @@ const code = html
    * official releases. It also unlocks per-artist catalogue batching, because
    * unreleased material clusters hard by artist.
    */
-  ok("era tracks are separated out before the Spotify pass",
-     /const eraTracks = plan\.filter\(\(j\) => j\.kind === "era"\)/.test(code));
+  /*
+   * REVERSED on 21 Oct 2026. On a Kanye-heavy library the MusicBrainz-only
+   * route reported "checked 150 of 742, nothing came back" while Spotify lists
+   * Hurricane, Jail and New Again on Donda. MusicBrainz files the leaked Donda
+   * as a Bootleg, so its answers are correctly rejected and only Spotify can say
+   * "it is out now". Era tracks now go to Spotify first; misses still reach
+   * MusicBrainz, which the next two checks continue to guarantee.
+   */
+  ok("era tracks are asked of Spotify too, not routed around it",
+     /const spotifyJobs = plan;/.test(code) && /const eraTracks = \[\];/.test(code));
   ok("and the Spotify pass runs only over the rest",
      /await pool\(spotifyJobs, \d+, async \(job\) => \{/.test(code),
      "Pooling over `plan` again would undo this silently.");

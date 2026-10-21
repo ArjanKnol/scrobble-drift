@@ -31,7 +31,7 @@
 </script>
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=20">
+<link rel="stylesheet" href="style.css?v=21">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -2128,8 +2128,19 @@ async function runDiscovery(offer) {
      * splitByStrategy: unreleased material clusters heavily by artist, so one
      * browse can cover dozens of tracks that would otherwise be one lookup each.
      */
-    const spotifyJobs = plan.filter((j) => j.kind !== "era");
-    const eraTracks = plan.filter((j) => j.kind === "era");
+    /*
+     * Reversed: era tracks go to Spotify first after all.
+     *
+     * The measurement above was real, but on a library whose leaks mostly never
+     * came out. On a Kanye-heavy library the same rule produced "checked 150 of
+     * 742, nothing came back" while Spotify plainly lists Hurricane, Jail, New
+     * Again and Off The Grid on Donda. MusicBrainz files the leaked Donda as a
+     * Bootleg and names other releases after the era, so the guards rightly
+     * rejected everything it offered and the one source that answers "is it out
+     * now" was never asked. Spotify misses still fall through to MusicBrainz.
+     */
+    const spotifyJobs = plan;
+    const eraTracks = [];
     const misses = [...eraTracks];
     let gaveUp = false, checked = 0;
     $("status").textContent = spotifyJobs.length
@@ -2375,7 +2386,7 @@ async function runDiscovery(offer) {
 
   report.issues = [...report.issues, ...found].sort(byImportance);
   report.offers = (report.offers || []).map((o) => o.id === offer.id
-    ? { ...o, done: true, found: found.length, checked: plan.length } : o);
+    ? { ...o, done: true, found: found.length, checked: plan.length, failed } : o);
 
   report.summary_by_detector = {};
   for (const i of report.issues) {
@@ -3056,8 +3067,9 @@ function render() {
 
     ${era.plays ? `
       <h2>Unreleased material</h2>
-      <div class="panel grid g2">
-        <div class="metrics" style="align-content:start">
+      <div class="panel">
+        <div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+             margin-bottom:24px">
           ${metric(era.share_of_all_plays + "%", "of all scrobbles", "var(--era)",
             "How much of your listening is unreleased material. This varies " +
             "enormously between people: for most listeners it is near zero, " +
@@ -3091,7 +3103,7 @@ function render() {
            * Pure presentation: the finding and its wording are unchanged, this
            * only puts a pointer where the question gets asked.
            */""}
-        <div>${era.top_albums.slice(0, 12).map((a) => {
+        <div class="era-list">${era.top_albums.slice(0, 12).map((a) => {
           const pooled = report.issues.some(
             (i) => i.detector === "D14f" && KEY(a.key).includes(i.album));
           return `<div class="row"><span>${KEY(a.key)}${pooled
@@ -3345,6 +3357,14 @@ function offerCards(section) {
                ? ` of ${N(o.candidates)}, the most played first` : ""}.
              ${o.found
                ? `${N(o.found)} added to the findings below.`
+               /*
+                * "Nothing came back" is only a finding when every lookup
+                * answered. A failed lookup is not a "no", and saying "none of
+                * these has a release" over failures is the oldest bug here.
+                */
+               : o.failed
+               ? `None found, but ${N(o.failed)} lookup${o.failed === 1 ? "" : "s"}
+                  failed, so this is not conclusive. Try again in a few minutes.`
                : "Nothing came back, so none of these has a release the " +
                  "databases know about. That is the normal answer for genuinely " +
                  "unreleased material."}</div>

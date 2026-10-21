@@ -2672,6 +2672,10 @@ export function d14eReleasedSince(era, lookup) {
       // under. If someone tags a track `Unreleased (Yandhi v2 Era)` and the
       // match is a release group called `Yandhi`, that is the same unreleased
       // project under a different name, not proof it came out.
+      // Spotify is exempt: it carries no leaks, so a Spotify album named after
+      // the era IS the release (the DONDA era came out as Donda). The guard is
+      // for MusicBrainz, which also catalogues the leaked projects themselves.
+      if (g.source === "spotify") return true;
       const title = norm(g.title);
       for (const e of eraNames) {
         const en = norm(e);

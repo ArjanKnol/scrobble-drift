@@ -787,3 +787,8 @@ button.mode.on,button.mode.on:hover:not(:disabled){background:#2a2a2a;color:var(
 .sk-rows{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:0 22px}
 .sk-rows .sk{height:14px;margin:13px 0}
 .verdict .moved-note{display:block;margin-top:6px;font-size:13px;color:var(--dim)}
+/* Unreleased material: the era list runs full width in two columns under the
+   numbers, instead of a narrow column beside a half-empty block. */
+.era-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));
+  gap:0 32px;border-top:1px solid var(--line);padding-top:8px}
+.era-list .row:last-child{border-bottom:1px solid var(--line)}

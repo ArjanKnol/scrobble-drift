@@ -217,5 +217,21 @@ console.log("\na checked finding does not vanish from view");
   ok(/Kept here for now/.test(html), "and the card says where it will go");
 }
 
+console.log("\na leak that came out on the album its era is named after");
+{
+  const d = await import("../docs/drift.js");
+  const era = [{ uts: 1, artist: "Kanye West", album: "Unreleased (DONDA Era)", track: "Jail" }];
+  const spotify = { groups: [{ title: "Donda", primary: "Album", status: "Official",
+    secondary: [], first_release: "2021-08-29", source: "spotify" }] };
+  const mbOnly = { groups: [
+    { title: "Donda", primary: "Album", status: "Bootleg", secondary: [], first_release: "2021" },
+    { title: "DONDA: Miracles", primary: "Album", status: "Official", secondary: [], first_release: "2021" },
+  ] };
+  eq(d.d14eReleasedSince(era, () => spotify).length, 1,
+     "Spotify listing it on Donda counts, even though the era is called DONDA");
+  eq(d.d14eReleasedSince(era, () => mbOnly).length, 0,
+     "a MusicBrainz release named after the era still does not");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
