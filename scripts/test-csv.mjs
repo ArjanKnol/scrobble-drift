@@ -118,5 +118,18 @@ console.log("\none scan, one source");
      "search engines are told the site name");
 }
 
+console.log("\nfindings that say 'nothing to fix' are not counted");
+{
+  const { chartWrongness, fixList, affectsChart } = await import("../docs/drift.js");
+  const mk = (reason) => ({ detector: "D4", reason, artist: "D-Block Europe", track: "Intro",
+    members: [{ album: "Home Alone 2", plays: 9 }, { album: "PTSD", plays: 4 }] });
+  for (const r of ["structural", "disproven", "plain-albums"]) {
+    ok(!affectsChart(mk(r)), `a '${r}' finding is not a chart problem`);
+    eq(fixList([mk(r)]).length, 0, `and never reaches the fix list`);
+    eq(chartWrongness([], [mk(r)]).misplaced, 0, `and adds no misplaced plays`);
+  }
+  eq(fixList([mk("migration")]).length, 1, "a real split still does");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

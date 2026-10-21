@@ -3219,6 +3219,7 @@ export function chartWrongness(scrobbles, issues) {
   for (const i of issues || []) {
     if (!CHART_DETECTORS.has(i?.detector)) continue;
     if (i.chart_already_correct || i.style_choice) continue;
+    if (NOT_A_SPLIT.has(i.reason)) continue;
 
     const mem = (i.members || [])
       .filter((m) => m?.album && Number.isFinite(m.plays));
@@ -4831,9 +4832,22 @@ export const UNSCORED_BY_DESIGN = new Set(["D16"]);
  *
  * Everything else moves plays, so it belongs above the fold.
  */
+/*
+ * Findings whose own text says "nothing to fix": the same title on two albums
+ * that are genuinely different records. They stay in the report as context but
+ * must not count as misplaced plays or appear in the fix list.
+ *
+ * Found on a real 120k-scrobble export, where the very first "Start here" row
+ * told the reader to move D-Block Europe's "Intro" from PTSD to Home Alone 2.
+ * Two different songs that share a structural title, recommended for merging
+ * while the card further down correctly said "nothing to fix".
+ */
+const NOT_A_SPLIT = new Set(["structural", "disproven", "plain-albums"]);
+
 export function affectsChart(issue) {
   if (!issue?.detector) return false;
   if (issue.style_choice || issue.chart_already_correct) return false;
+  if (NOT_A_SPLIT.has(issue.reason)) return false;
   if (DISCOVERY.has(issue.detector)) return false;
   return true;
 }

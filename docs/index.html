@@ -75,7 +75,8 @@
         start together.
       -->
       <label class="drop hide" id="drop">
-        <input id="csv" type="file" accept=".csv,.txt,text/csv">
+        <input id="csv" type="file" accept=".csv,.txt,text/csv"
+               aria-label="Choose a scrobble export file (CSV)">
         <span id="drop-text"></span>
       </label>
       <input id="user" placeholder="Last.fm username" autocomplete="off"
@@ -771,8 +772,8 @@ $("f").onsubmit = async (e) => {
     // mostly the all-pairs artist comparison, which is deliberately not
     // shortcut for accuracy. Warn plainly so it does not look like a crash.
     $("status").textContent = used.length > 40000
-      ? `Analysing ${N(used.length)} scrobbles. This blocks the tab for ` +
-        `up to 30 seconds and cannot show progress. Do not close it.`
+      ? `Analysing ${N(used.length)} scrobbles. On a history this size the tab ` +
+        `freezes for up to a minute and cannot show progress. Do not close it.`
       : `Analysing ${N(used.length)} scrobbles in your browser…`;
     // Settle ambiguous album names BEFORE analysing, because the answer decides
     // which partition they land in and the era partition is hidden from most
