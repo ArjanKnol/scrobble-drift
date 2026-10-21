@@ -1021,6 +1021,27 @@ async function fetchAll(user, cap, apiKey) {
   let totalPages = null, totalScrobbles = null, attempt = 0, sinceSave = 0;
 
   /*
+   * Batch size adapts when a batch is too heavy for the Worker.
+   *
+   * Launch night: every Worker error was "exceeded CPU time", all on deep scans,
+   * and all on the same kind of request: eight Last.fm pages parsed in one go.
+   * For some histories that is more than the free plan's CPU budget. The page
+   * then retried the IDENTICAL request, which failed identically, and the scan
+   * stalled. One log showed the same batch failing four times in a row.
+   *
+   * So a failed batch is retried SMALLER (8, 4, 2, 1 pages), and the size climbs
+   * back after a run of clean batches so one heavy stretch does not slow the
+   * whole scan.
+   */
+  let pagesPer = PAGES_PER_REQUEST, okStreak = 0;
+  const shrinkBatch = () => {
+    if (pagesPer <= 1) return false;
+    pagesPer = Math.max(1, pagesPer >> 1);
+    okStreak = 0;
+    return true;
+  };
+
+  /*
    * Pace requests to match the server's page budget instead of sprinting into it.
    *
    * RL_PAGES allows 120 upstream pages per minute per IP, and each request carries
@@ -1084,7 +1105,7 @@ async function fetchAll(user, cap, apiKey) {
     lastRequestAt = Date.now();
 
     const qs = new URLSearchParams({
-      user, from: String(from), count: String(PAGES_PER_REQUEST),
+      user, from: String(from), count: String(pagesPer),
     });
     if (toAnchor) qs.set("to", String(toAnchor));
     if (apiKey) qs.set("key", apiKey);
@@ -1096,9 +1117,13 @@ async function fetchAll(user, cap, apiKey) {
       // A thrown fetch means no readable response. Usually the Worker itself
       // failed: an exception or a resource-limit error page, neither of which
       // carries CORS headers, so the browser cannot show us the real status.
-      // Retry a few times before blaming the deployment.
-      if (++attempt <= 3) {
-        await waitVisibly(4 * attempt, "Hit a snag talking to the server.");
+      // Retry a few times before blaming the deployment, each time with a
+      // smaller batch, since a CPU-limit failure looks exactly like this.
+      const shrank = shrinkBatch();
+      if (++attempt <= 4) {
+        await waitVisibly(4 * attempt, shrank
+          ? "Hit a snag talking to the server. Retrying in smaller steps."
+          : "Hit a snag talking to the server.");
         continue;
       }
       throw new Error(
@@ -1191,6 +1216,7 @@ async function fetchAll(user, cap, apiKey) {
       // 403 and 404 are settled answers, not turbulence, and are handled above.
       // Anything else 4xx gets a few tries in case it is a transient proxy blip.
       const maxTries = res.status >= 500 ? 6 : 3;
+      if (res.status >= 500) shrinkBatch();
       if (++attempt <= maxTries) {
         await waitVisibly(6 * attempt, body.error || `Server error ${res.status}.`);
         continue;
@@ -1235,6 +1261,10 @@ async function fetchAll(user, cap, apiKey) {
     }
 
     attempt = 0;                       // a clean response resets the budget
+    if (pagesPer < PAGES_PER_REQUEST && ++okStreak >= 5) {
+      pagesPer = Math.min(PAGES_PER_REQUEST, pagesPer * 2);
+      okStreak = 0;
+    }
     const data = await res.json();
     // `??=`: both are captured from the FIRST response only. Once `to` is set,
     // Last.fm reports the count WITHIN the window, so re-reading these would
@@ -1529,6 +1559,10 @@ async function runDiscovery(offer) {
   // run. Reset on any success, so a transient blip does not disable it.
   let spFails = 0;
   const SP_GIVE_UP = 5;
+  // Set when the Worker reports a long shared cooldown. Distinct from spFails
+  // so the fallback message can say "busy" rather than "not responding".
+  let spBusy = false;
+  const SP_BUSY_AFTER = 30;          // seconds; longer than this, stop waiting
 
   /*
    * 3/s, not 6.
@@ -1557,7 +1591,17 @@ async function runDiscovery(offer) {
    * the safety net, and shared-cache hits are refunded, so this ceiling only ever
    * applies to calls that genuinely reach Spotify.
    */
-  const spPace = new Pacer({ perSecond: 5, concurrency: 8 });
+  /*
+   * 3/s and 2 at a time, down from 5/s and 8. Launch night measured it.
+   *
+   * Spotify's limit is per APP, shared by every visitor, and on the first night
+   * of real traffic two thirds of all Spotify calls came back 429. The per-tab
+   * rate was tuned for one person scanning alone. With many tabs open it is the
+   * total that matters, so each tab now asks for less, and the Worker holds a
+   * shared cooldown so that one 429 pauses everyone instead of only the request
+   * that received it.
+   */
+  const spPace = new Pacer({ perSecond: 3, concurrency: 2 });
 
   async function spPaced(path, attempts = 3) {
     for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -1569,6 +1613,14 @@ async function runDiscovery(offer) {
         if (res.status === 429) {
           const b = await res.json().catch(() => ({}));
           retryIn = Number(res.headers.get("Retry-After") || b.retry_after || 5);
+          if (retryIn > SP_BUSY_AFTER) {
+            // A long shared cooldown. Waiting it out would stall the scan for
+            // minutes to save nothing, because MusicBrainz answers the same
+            // question. Hand everything over instead.
+            spBusy = true;
+            spFails = SP_GIVE_UP;
+            return null;
+          }
           spPace.backoff(retryIn);
         } else if (res.ok) {
           const out = await res.json();
@@ -1720,9 +1772,9 @@ async function runDiscovery(offer) {
     let gaveUp = false, checked = 0;
     $("status").textContent = spotifyJobs.length
       ? `Checking ${N(spotifyJobs.length)} tracks against Spotify first ` +
-        `(about ${Math.round(spotifyJobs.length / 5) > 90
-          ? Math.round(spotifyJobs.length / 300) + " min"
-          : Math.round(spotifyJobs.length / 5) + "s"})…` +
+        `(about ${Math.round(spotifyJobs.length / 3) > 90
+          ? Math.max(1, Math.round(spotifyJobs.length / 180)) + " min"
+          : Math.max(1, Math.round(spotifyJobs.length / 3)) + "s"})…` +
         (eraTracks.length
           ? ` ${N(eraTracks.length)} unreleased tracks go straight to MusicBrainz, ` +
             `which is the one that catalogues them.`
@@ -1731,7 +1783,7 @@ async function runDiscovery(offer) {
         `which is the one that catalogues them.`;
 
     const phaseStart = Date.now();
-    await pool(spotifyJobs, 6, async (job) => {
+    await pool(spotifyJobs, 2, async (job) => {
       if (gaveUp) { misses.push(job); return; }
 
       if (spFails >= SP_GIVE_UP) {
@@ -1745,10 +1797,13 @@ async function runDiscovery(offer) {
         if (stats) stats.spotify_gave_up = true;
         misses.push(job);
         $("waiting").classList.remove("hide");
-        $("waiting").innerHTML =
-          `<strong style="color:var(--warn)">Spotify is not responding.</strong>
-           Falling back to MusicBrainz for the remaining tracks.
-           Same findings, just slower.`;
+        $("waiting").innerHTML = spBusy
+          ? `<strong style="color:var(--warn)">Spotify is busy right now.</strong>
+             Using MusicBrainz for the remaining tracks.
+             Same findings, just slower.`
+          : `<strong style="color:var(--warn)">Spotify is not responding.</strong>
+             Falling back to MusicBrainz for the remaining tracks.
+             Same findings, just slower.`;
         return;
       }
 

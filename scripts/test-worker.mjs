@@ -946,5 +946,107 @@ ok(spNorm("Sefyu") !== spNorm("Sef"),
      "and so is its route");
 }
 
+/* ---- Spotify: one shared cooldown for every visitor --------------------- */
+{
+  /*
+   * Launch night: ~1,000 Spotify successes against ~2,000 429s. A 429 paused
+   * only the request that got it, so everyone else kept knocking. These assert
+   * that one 429 now pauses all callers for Spotify's full Retry-After.
+   */
+  const { spotifyCooldown, tripSpotifyCooldown, _resetSpotifyCooldown } =
+    await import("../worker/src/index.js");
+
+  const kv = () => {
+    const rows = new Map();
+    const log = { reads: 0, writes: 0 };
+    return {
+      rows, log,
+      prepare(sql) {
+        let args = [];
+        const st = {
+          bind(...a) { args = a; return st; },
+          async first() { log.reads++; const r = rows.get(args[0]); return r ? { v: r.v } : null; },
+          async run() { log.writes++; rows.set(args[0], { v: args[1], created: args[2] }); return {}; },
+        };
+        return st;
+      },
+    };
+  };
+
+  const t0 = 1_800_000_000_000;
+
+  _resetSpotifyCooldown();
+  const db = kv();
+  eq(await spotifyCooldown({ MB_CACHE: db }, t0), 0, "no cooldown by default");
+
+  await tripSpotifyCooldown({ MB_CACHE: db }, 120, t0);
+  eq(await spotifyCooldown({ MB_CACHE: db }, t0 + 1000), 119,
+     "a 429 starts a cooldown for the full Retry-After, not capped at 60");
+  eq(db.log.writes, 1, "and records it in the shared store");
+
+  // Another isolate (fresh memory) must see the same cooldown via D1.
+  _resetSpotifyCooldown();
+  ok((await spotifyCooldown({ MB_CACHE: db }, t0 + 2000)) > 100,
+     "a different Worker instance picks the cooldown up from D1");
+
+  // A shorter Retry-After must not shorten a running cooldown.
+  await tripSpotifyCooldown({ MB_CACHE: db }, 5, t0 + 3000);
+  ok((await spotifyCooldown({ MB_CACHE: db }, t0 + 4000)) > 100,
+     "a later, shorter 429 never shortens the cooldown");
+
+  eq(await spotifyCooldown({ MB_CACHE: db }, t0 + 121_000), 0,
+     "it ends when Spotify said it would");
+
+  // Reads are throttled per isolate so D1 is not queried on every call.
+  _resetSpotifyCooldown();
+  const quiet = kv();
+  await spotifyCooldown({ MB_CACHE: quiet }, t0);
+  await spotifyCooldown({ MB_CACHE: quiet }, t0 + 1000);
+  await spotifyCooldown({ MB_CACHE: quiet }, t0 + 2000);
+  eq(quiet.log.reads, 1, "D1 is read at most once per few seconds per instance");
+
+  // A broken store fails open rather than switching Spotify off for everyone.
+  _resetSpotifyCooldown();
+  const broken = { prepare() { return { bind() { return this; },
+    async first() { throw new Error("d1 down"); }, async run() { throw new Error("d1 down"); } }; } };
+  eq(await spotifyCooldown({ MB_CACHE: broken }, t0), 0, "a failing D1 read fails open");
+  _resetSpotifyCooldown();
+
+  const src = lf(await readFile(new URL("../worker/src/index.js", import.meta.url), "utf8"));
+  const sp = src.slice(src.indexOf("async function spFetch("), src.indexOf("async function spFetch(") + 1500);
+  ok(/await spotifyCooldown\(env\)/.test(sp), "spFetch checks the cooldown before calling Spotify");
+  ok(/cacheTtlByStatus/.test(sp) && !/cacheTtl: SP_TTL/.test(sp),
+     "and no longer caches 429s at the edge");
+  ok(!/Math\.min\(wait, 60\)/.test(sp), "Retry-After is no longer cut to 60 seconds");
+
+  const html = lf(await readFile(new URL("../docs/index.html", import.meta.url), "utf8"));
+  ok(/pool\(spotifyJobs, 2,/.test(html), "the scan runs 2 Spotify lookups at a time, not 6");
+  ok(/new Pacer\(\{ perSecond: 3, concurrency: 2 \}\)/.test(html), "at 3 per second");
+  ok(/retryIn > SP_BUSY_AFTER/.test(html) && /Spotify is busy right now/.test(html),
+     "a long cooldown hands the scan to MusicBrainz instead of waiting");
+}
+
+/* ---- deep scans: a batch that is too heavy is retried smaller ----------- */
+{
+  const html = lf(await readFile(new URL("../docs/index.html", import.meta.url), "utf8"));
+  ok(/count: String\(pagesPer\)/.test(html), "the batch size is variable");
+  ok(!/count: String\(PAGES_PER_REQUEST\)/.test(html), "not pinned to 8 pages");
+  const shrink = html.match(/const shrinkBatch = \(\) => \{[\s\S]*?\n  \};/);
+  ok(shrink, "a shrink step exists");
+  // Simulate it: 8 -> 4 -> 2 -> 1 -> stays 1.
+  let pagesPer = 8, okStreak = 0;
+  const shrinkBatch = new Function("s", `let pagesPer=s.p, okStreak=0;
+    const f = ${shrink[0].replace("const shrinkBatch = ", "")};
+    const r = f(); s.p = pagesPer; return r;`);
+  const st = { p: 8 }, seen = [];
+  for (let i = 0; i < 4; i++) { shrinkBatch(st); seen.push(st.p); }
+  eq(seen, [4, 2, 1, 1], "halves on each failure and stops at one page");
+  ok(/shrinkBatch\(\);\s*\n\s*if \(\+\+attempt <= 4\)/.test(html),
+     "an unreadable response (how a CPU-limit error arrives) shrinks the batch");
+  ok(/if \(res\.status >= 500\) shrinkBatch\(\);/.test(html), "so does a 5xx");
+  ok(/pagesPer < PAGES_PER_REQUEST && \+\+okStreak >= 5/.test(html),
+     "and the size climbs back after five clean batches");
+}
+
 console.log(`\n${pass} passed, ${fail} failed (including MusicBrainz cache block)\n`);
 process.exit(fail ? 1 : 0);

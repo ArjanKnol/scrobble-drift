@@ -58,7 +58,7 @@
  *
  * Bump this in the same commit as any Worker change. /api/health reports it.
  */
-const BUILD = "2026-10-20-26-tighter-mb-ceiling";
+const BUILD = "2026-10-21-27-spotify-cooldown";
 
 const LASTFM = "https://ws.audioscrobbler.com/2.0/";
 const MB = "https://musicbrainz.org/ws/2";
@@ -1359,18 +1359,107 @@ async function spotifyToken(env) {
   return data.access_token;
 }
 
+/* ------------------------------------------------------ Spotify cooldown --
+ * One shared "Spotify is on a break until X" switch for every visitor.
+ *
+ * Measured on launch night: about 1,000 successful Spotify calls against 2,000
+ * rate-limited ones. A 429 only paused the ONE request that received it. Every
+ * other visitor kept sending, each browser ran several lookups in parallel, and
+ * Retry-After was capped at 60 seconds even when Spotify asked for longer. From
+ * Spotify's side that is an app ignoring its limit, which is how a short
+ * cooldown becomes a long one.
+ *
+ * Now the first 429 sets a cooldown for Spotify's FULL Retry-After, and every
+ * Spotify call checks it before going out. During a cooldown no request reaches
+ * Spotify at all; callers get an immediate 429 with the time remaining, and the
+ * client falls back to MusicBrainz.
+ *
+ * Stored in D1 because it has to be GLOBAL. The Cache API that backs the
+ * Last.fm breaker is per location, and Spotify's limit is per app, so a
+ * per-location switch would let every other datacentre carry on knocking.
+ *
+ * D1 reads are not free, so each isolate keeps its own copy and re-reads at most
+ * every few seconds. A cooldown set elsewhere is therefore noticed within that
+ * window, which costs a handful of calls rather than thousands.
+ */
+const SP_COOLDOWN_KEY = "sys:spotify-cooldown";
+const SP_COOLDOWN_RECHECK_MS = 5000;
+const SP_COOLDOWN_MAX_S = 6 * 3600;   // ignore an absurd Retry-After
+let spBlockedUntil = 0;               // epoch ms, this isolate's view
+let spCooldownCheckedAt = 0;          // epoch ms of the last D1 read
+
+/** Test hook: forget this isolate's view of the cooldown. */
+export function _resetSpotifyCooldown() {
+  spBlockedUntil = 0;
+  spCooldownCheckedAt = 0;
+}
+
+/** Seconds left on the shared Spotify cooldown, or 0 if Spotify may be called. */
+export async function spotifyCooldown(env, now = Date.now()) {
+  if (spBlockedUntil > now) return Math.ceil((spBlockedUntil - now) / 1000);
+  const db = env.MB_CACHE;
+  if (!db || now - spCooldownCheckedAt < SP_COOLDOWN_RECHECK_MS) return 0;
+  spCooldownCheckedAt = now;
+  try {
+    const row = await db.prepare("SELECT v FROM mb_cache WHERE k = ?1")
+      .bind(SP_COOLDOWN_KEY).first();
+    const until = Number(row?.v || 0);
+    if (until > now) {
+      spBlockedUntil = until;
+      return Math.ceil((until - now) / 1000);
+    }
+  } catch (err) {
+    // Fail open: a broken read must not switch Spotify off for everyone.
+    console.error("spotify cooldown read failed: " + (err?.message || err));
+  }
+  return 0;
+}
+
+/** Start (or extend) the shared cooldown. Never shortens one already running. */
+export async function tripSpotifyCooldown(env, seconds, now = Date.now()) {
+  const s = Math.min(Math.max(1, Number(seconds) || 5), SP_COOLDOWN_MAX_S);
+  const until = now + s * 1000;
+  if (until <= spBlockedUntil) return;
+  spBlockedUntil = until;
+  const db = env.MB_CACHE;
+  if (!db) return;
+  try {
+    await db.prepare(
+      "INSERT INTO mb_cache (k, v, created) VALUES (?1, ?2, ?3) " +
+      "ON CONFLICT(k) DO UPDATE SET v = excluded.v, created = excluded.created " +
+      "WHERE CAST(excluded.v AS INTEGER) > CAST(mb_cache.v AS INTEGER)")
+      .bind(SP_COOLDOWN_KEY, String(until), Math.floor(now / 1000)).run();
+  } catch (err) {
+    console.error("spotify cooldown write failed: " + (err?.message || err));
+  }
+}
+
 async function spFetch(path, env) {
+  const left = await spotifyCooldown(env);
+  if (left) throw new Retryable("Spotify is rate limiting us.", left);
+
   const token = await spotifyToken(env);
   const res = await fetch(`${SPOTIFY_API}${path}`, {
     headers: { authorization: `Bearer ${token}` },
-    cf: { cacheTtl: SP_TTL, cacheEverything: true },
+    /*
+     * Cache SUCCESSES only, the same lesson as callLastfm. `cacheTtl` applies to
+     * every status, so a 429 used to be stored at that location for the full
+     * seven days, turning one moment of rate limiting into a week of it for
+     * that track.
+     */
+    cf: {
+      cacheTtlByStatus: { "200-299": SP_TTL, "400-499": 0, "500-599": 0 },
+      cacheEverything: true,
+    },
   });
   if (res.status === 429) {
-    // Spotify always sends Retry-After on 429. Honour it exactly rather than
-    // guessing, and do NOT trip the Last.fm breaker: these are separate quotas
-    // and stalling scrobble fetching over a Spotify limit would be wrong.
+    // Spotify always sends Retry-After on 429. Honour ALL of it, for everyone,
+    // and do NOT trip the Last.fm breaker: these are separate quotas and
+    // stalling scrobble fetching over a Spotify limit would be wrong.
     const wait = Number(res.headers.get("Retry-After") || 5);
-    throw new Retryable("Spotify is rate limiting us.", Math.min(wait, 60));
+    await tripSpotifyCooldown(env, wait);
+    throw new Retryable("Spotify is rate limiting us.",
+                        Math.min(Math.max(1, wait), SP_COOLDOWN_MAX_S));
   }
   if (res.status === 401) {
     // Token rejected despite the cache. Drop it so the next call re-mints.
