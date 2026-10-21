@@ -1,9 +1,29 @@
+/* IBM Plex, self-hosted (SIL Open Font License, see fonts/OFL.txt). Served from
+   this site rather than a font CDN, so the page still makes no third-party
+   request. Latin plus Latin Extended covers accented artist names. */
+@font-face{font-family:"Plex";font-style:normal;font-weight:400;font-display:swap;
+  src:url(fonts/ibm-plex-sans-latin-400-normal.woff2) format("woff2");
+  unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:"Plex";font-style:normal;font-weight:600;font-display:swap;
+  src:url(fonts/ibm-plex-sans-latin-600-normal.woff2) format("woff2");
+  unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+@font-face{font-family:"Plex";font-style:normal;font-weight:400;font-display:swap;
+  src:url(fonts/ibm-plex-sans-latin-ext-400-normal.woff2) format("woff2");
+  unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
+@font-face{font-family:"Plex";font-style:normal;font-weight:600;font-display:swap;
+  src:url(fonts/ibm-plex-sans-latin-ext-600-normal.woff2) format("woff2");
+  unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
+@font-face{font-family:"Plex Mono";font-style:normal;font-weight:400;font-display:swap;
+  src:url(fonts/ibm-plex-mono-latin-400-normal.woff2) format("woff2")}
+
 /* Palette follows Last.fm's own dark theme: near-black greys with their
    signature red (#d51007) as the single accent. Deliberately not a clone --
    this is a third-party tool and should not pass itself off as Last.fm -- but
    it should feel like it belongs next to it. */
 :root{
-  --bg:#131313; --panel:#1c1c1c; --line:#2b2b2b; --ink:#f0f0f0; --dim:#999;
+  --bg:#131313; --panel:#1b1b1b; --line:#2a2a2a; --ink:#efefef; --dim:#b3b3b3;
+  --faint:#808080;            /* tertiary text only: units, ranks */
+  --bar:#3a3a3a;              /* neutral data bars: plays are not a problem */
   --accent:#d51007;          /* Last.fm red */
   --accent-hover:#ff2010;
   --good:#5cb85c; --warn:#e0af68; --bad:#d51007; --era:#b56bd8;
@@ -15,20 +35,21 @@
   --ease:cubic-bezier(.22,.68,.36,1);
   --ease-out:cubic-bezier(.33,1,.68,1);
   --t-fast:.14s;
-  --t-mid:.28s;
-  --t-slow:.5s;
+  --t-mid:.22s;
+  --t-slow:.38s;
   /* Was a red neon halo on every hover. A plain 1px ring reads as focus, not
      as an effect. */
   --glow:0 0 0 1px rgba(213,16,7,.35);
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);
-  font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
+  font:15px/1.55 "Plex",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
     "Helvetica Neue",Arial,sans-serif;
+  font-variant-numeric:tabular-nums;
   -webkit-font-smoothing:antialiased}
 a{color:var(--ink);text-decoration:none;border-bottom:1px solid var(--line)}
 a:hover{color:var(--accent);border-bottom-color:var(--accent)}
-code{font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace}
+code{font:13px "Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
 .wrap{max-width:1080px;margin:0 auto;padding:40px 20px 40px}
 h1{font-size:32px;margin:0 0 6px;letter-spacing:-.02em;font-weight:800}
 h1 .dot{color:var(--accent)}
@@ -38,14 +59,14 @@ h1 .dot{color:var(--accent)}
 h1.brand{margin:0 0 14px;line-height:0}
 h1.brand img{width:270px;max-width:72vw;height:auto;display:block}
 @media (max-width:520px){ h1.brand img{width:210px} }
-h2{font-size:15px;letter-spacing:-.005em;color:var(--ink);
-  margin:38px 0 12px;font-weight:650;
+h2{font-size:22px;letter-spacing:-.01em;color:var(--ink);line-height:1.25;
+  margin:48px 0 16px;font-weight:600;
   border-bottom:1px solid var(--line);padding-bottom:8px}
 /* Full content width, matching the panels below it, rather than a narrow
    measure. */
 .lede{color:var(--dim);margin:0 0 26px}
 .sub{color:var(--dim);font-size:13px;margin-bottom:26px}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:24px}
 .grid{display:grid;gap:14px}
 .g4{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
 .g2{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
@@ -86,11 +107,11 @@ button.ghost:hover{background:transparent;color:var(--ink);
   transform:translateX(-100%);
   animation:sheen 1.6s var(--ease) infinite}
 @keyframes sheen{to{transform:translateX(100%)}}
-.metric .n{font-size:29px;font-weight:650;letter-spacing:-.02em}
-.metric .l{color:var(--dim);font-size:12.5px;margin-top:2px}
+.metric .n{font-size:32px;font-weight:600;letter-spacing:-.02em;line-height:1.1}
+.metric .l{color:var(--dim);font-size:13px;margin-top:4px}
 .score{font-size:52px;font-weight:700;line-height:1}
-.row{display:flex;justify-content:space-between;gap:12px;padding:5px 0;
-  border-bottom:1px solid var(--line);font-size:13px}
+.row{display:flex;justify-content:space-between;gap:12px;padding:7px 0;
+  border-bottom:1px solid var(--line);font-size:14px}
 .row:last-child{border-bottom:0}
 .row .v{color:var(--dim);white-space:nowrap;font-variant-numeric:tabular-nums}
 .tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:99px;
@@ -126,7 +147,7 @@ button.ghost:hover{background:transparent;color:var(--ink);
 .up{color:var(--good)} .down{color:var(--bad)}
 .err{border-color:var(--bad);color:var(--bad)}
 .hide{display:none}
-.note{font-size:12.5px;color:var(--dim);margin-top:9px}
+.note{font-size:13px;color:var(--dim);margin-top:8px}
 .nav{display:flex;gap:18px;font-size:13px;margin-bottom:24px}
 .setup{background:#0d0d0d;border-radius:4px;padding:12px 14px;margin-top:12px;
   overflow-x:auto}
@@ -327,13 +348,7 @@ button.check:disabled::after,button.check-all:disabled::after{
  * top edge. At 3% opacity it is not a visible effect, it just stops a flat
  * #1c1c1c rectangle reading as a div with a border.
  */
-.panel{background:linear-gradient(180deg,#20201f,var(--panel) 120px);
-  position:relative}
-.panel::before{content:"";position:absolute;inset:0 0 auto;height:1px;
-  border-radius:10px 10px 0 0;
-  background:linear-gradient(90deg,transparent,rgba(255,255,255,.07) 30%,
-    rgba(255,255,255,.07) 70%,transparent);
-  pointer-events:none}
+.panel{position:relative}
 
 .issue{transition:border-color var(--t-fast),box-shadow var(--t-fast),
   transform var(--t-fast) var(--ease-out)}
@@ -662,17 +677,17 @@ input:disabled,select:disabled{opacity:.5}
 button.art{display:grid;grid-template-columns:24px 1fr auto;gap:10px;
   align-items:baseline;width:100%;text-align:left;background:transparent;
   border:0;border-bottom:1px solid var(--line);border-radius:0;
-  padding:7px 2px 9px;color:var(--ink);font-size:13px;font-weight:400;
+  padding:8px 2px 10px;color:var(--ink);font-size:14px;font-weight:400;
   position:relative}
 button.art:hover:not(:disabled){background:rgba(255,255,255,.03)}
-button.art.on{background:rgba(213,16,7,.08)}
-button.art .rk{color:var(--dim);font-variant-numeric:tabular-nums;font-size:12px}
+button.art.on{background:rgba(255,255,255,.06)}
+button.art .rk{color:var(--faint);font-size:12.5px}
 button.art .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 button.art .v{color:var(--dim);font-variant-numeric:tabular-nums;white-space:nowrap}
 button.art .fc{margin-left:8px;color:var(--warn);font-size:11.5px}
 button.art .fc.zero{color:var(--good)}
 button.art>i{position:absolute;left:0;bottom:-1px;height:2px;
-  background:rgba(213,16,7,.55);border-radius:2px}
+  background:var(--bar);border-radius:2px}
 
 /* ------------------------------------------------------------ more numbers */
 details.more{margin-top:12px}
@@ -708,3 +723,66 @@ button.mode.on,button.mode.on:hover:not(:disabled){background:#2a2a2a;color:var(
 .drop input{position:absolute;inset:0;opacity:0;cursor:pointer;min-width:0;
   width:100%;padding:0}
 #file-help{margin:10px 0 0}
+
+/* ======================================================== report layout */
+/*
+ * One surface per section, hierarchy from type and hairlines rather than from
+ * boxes inside boxes. Metric tiles are plain blocks inside whatever surface
+ * holds them.
+ */
+.report-title{font-size:40px;letter-spacing:-.02em;font-weight:600;margin:40px 0 4px;
+  border-bottom:0;padding-bottom:0;line-height:1.1;overflow-wrap:anywhere}
+.report-sub{color:var(--dim);font-size:14px;margin:0 0 24px}
+
+/* The headline: one number, one bar that shows what the number is made of. */
+.headline{margin:0 0 32px;padding:0 0 32px;border-bottom:1px solid var(--line)}
+.headline .big{font-size:64px;font-weight:600;letter-spacing:-.03em;line-height:1}
+.headline .cap{font-size:18px;color:var(--ink);margin:8px 0 18px}
+.split{display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--bar)}
+.split>i{display:block;height:100%}
+.split .ok{background:#4a4a4a}
+.split .mis{background:var(--warn)}
+.split .blank{background:var(--accent)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 22px;margin-top:10px;font-size:13px;
+  color:var(--dim)}
+.legend b{display:inline-block;width:9px;height:9px;border-radius:2px;
+  margin-right:7px;vertical-align:0}
+.legend strong{color:var(--ink);font-weight:600}
+
+/* Fix list rows carry a bar for the plays each edit recovers, same grammar as
+   the artist list: neutral grey, because a big number here is good news. */
+.fixgrid .row{position:relative;padding-bottom:10px}
+.fixgrid .row>i{position:absolute;left:0;bottom:-1px;height:2px;
+  background:var(--bar);border-radius:2px}
+
+/* Metrics without their own boxes. */
+.metric{padding:0}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+  gap:20px 24px}
+
+/* Compact scan summary: one line, the detail one click away. */
+.done{padding:14px 18px}
+.done details>summary{cursor:pointer;color:var(--dim);font-size:13px;
+  list-style:none;margin-top:6px}
+.done details>summary::-webkit-details-marker{display:none}
+.done details>summary::before{content:"▸ "}
+.done details[open]>summary::before{content:"▾ "}
+.done details>summary:hover{color:var(--ink)}
+
+/* ============================================================ skeleton */
+/*
+ * The shape of the report, shown while it is being built. It is laid out like
+ * the real thing (title, headline, bar, list) so the page does not jump when
+ * the report replaces it, and it tells a first-time visitor what is coming.
+ */
+.skel{margin-top:8px}
+.sk{background:#202020;border-radius:5px;position:relative;overflow:hidden}
+.sk::after{content:"";position:absolute;inset:0;transform:translateX(-100%);
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.045),transparent);
+  animation:sheen 1.4s var(--ease) infinite}
+.sk.t{height:34px;width:38%;margin:40px 0 28px}
+.sk.big{height:58px;width:22%;margin-bottom:14px}
+.sk.l{height:14px;margin:9px 0}
+.sk.bar{height:10px;margin:18px 0 32px}
+.sk-rows{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:0 22px}
+.sk-rows .sk{height:14px;margin:13px 0}

@@ -31,7 +31,7 @@
 </script>
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=18">
+<link rel="stylesheet" href="style.css?v=19">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -717,7 +717,7 @@ $("f").onsubmit = async (e) => {
   $("stop").classList.remove("hide");
   $("prog").classList.remove("hide");
   $("waiting").classList.add("hide");
-  $("out").innerHTML = "";
+  $("out").innerHTML = skeleton();
   $("fill").style.width = "0";
 
   const cap = fromFile ? 0 : Number($("depth").value);
@@ -841,6 +841,24 @@ $("f").onsubmit = async (e) => {
     $("stop").classList.add("hide");
   }
 };
+
+/**
+ * The report's outline, shown while it is being built. Same rhythm as the real
+ * report so nothing jumps when it arrives. Purely presentational: aria-hidden,
+ * and replaced wholesale by render() or fail().
+ */
+function skeleton() {
+  const rows = Array.from({ length: 8 }, (_, i) =>
+    `<div class="sk" style="width:${[86, 72, 94, 64, 80, 70, 90, 60][i]}%"></div>`).join("");
+  return `<div class="skel" aria-hidden="true">
+    <div class="sk t"></div>
+    <div class="sk big"></div>
+    <div class="sk l" style="width:46%"></div>
+    <div class="sk bar"></div>
+    <div class="panel"><div class="sk l" style="width:18%;margin-top:0"></div>
+      <div class="sk-rows">${rows}</div></div>
+  </div>`;
+}
 
 /*
  * Everything the current report can be rebuilt from without touching Last.fm.
@@ -993,9 +1011,11 @@ function scanSummary() {
         <strong>${s.aborted ? "Stopped" : "Scan complete"}</strong>
         <span class="v" style="color:var(--dim)">${dur(total)} total</span>
       </div>
-      ${lines.map((l) => `<p class="note">${l}</p>`).join("")}
       ${warn.map((w) => `<p class="note"
         style="color:var(--warn)">${w}</p>`).join("")}
+      <details><summary>What this scan did</summary>
+        ${lines.map((l) => `<p class="note">${l}</p>`).join("")}
+      </details>
     </div>`;
 }
 
@@ -2403,7 +2423,7 @@ const tip = (text, where = "") =>
     data-tip="${esc(text)}" aria-label="What is this?">i</button>`;
 
 const metric = (n, l, c, t, where) =>
-  `<div class="panel metric"><div class="n"${c ? ` style="color:${c}"` : ""}>${n}</div>
+  `<div class="metric"><div class="n"${c ? ` style="color:${c}"` : ""}>${n}</div>
    <div class="l">${l}${t ? tip(t, where) : ""}</div></div>`;
 
 /**
@@ -2630,8 +2650,10 @@ function render() {
   const d = report, p = d.profile, h = d.hygiene, era = d.era, im = d.impact;
   $("out").innerHTML = `
     ${scanSummary()}
-    <h2>${esc(d.user || "Your export")}${d.focus
-      ? ` <span style="color:var(--ink)">&middot; ${esc(d.focus)}</span>` : ""}</h2>
+    <h2 class="report-title">${esc(d.focus || d.user || "Your export")}</h2>
+    <p class="report-sub">${d.focus
+      ? `${esc(d.user || "Your export")} &middot; ${N(d.profile.scrobbles_ingested)} scrobbles by this artist`
+      : `${N(d.profile.scrobbles_ingested)} scrobbles${stats?.source === "file" ? " from your export file" : ""}`}</p>
     ${d.focus ? `<div class="focusbar">
       Only showing <strong>${esc(d.focus)}</strong>: ${N(d.profile.scrobbles_ingested)}
       of the ${N((lastAll || []).length)} scrobbles scanned.
@@ -2655,18 +2677,32 @@ function render() {
       if (!w || !w.total) return "";
       const pct = w.share * 100;
       const shown = pct > 0 && pct < 0.1 ? "<0.1" : pct.toFixed(1);
-      return `<div class="panel" style="margin-bottom:14px">
-        <div class="metric"><div class="n" style="color:${
+      /*
+       * The bar shows what the percentage is made of, so the number is never
+       * asked to stand on its own: in place, under the wrong album, no album.
+       */
+      const pc = (n) => `${Math.max(0, 100 * n / w.total)}%`;
+      const ok = w.total - w.misplaced - w.blank;
+      return `<div class="headline">
+        <div class="big" style="color:${
           w.share < 0.01 ? "var(--good)" : w.share < 0.05 ? "var(--warn)" : "var(--bad)"
         }">${shown}%</div>
-        <div class="l">of your plays are in the wrong place</div></div>
-        <p class="note" style="margin:9px 0 0">
-          <strong>${N(w.affected)}</strong> of ${N(w.total)} plays:
-          ${N(w.misplaced)} sitting under a non-dominant spelling of an album
-          ${w.albums ? `across ${N(w.albums)} album${w.albums === 1 ? "" : "s"}` : ""},
-          and ${N(w.blank)} with no album at all, which the album chart cannot
-          see. Everything else below is either already counted correctly or a
-          tagging choice rather than a defect.</p>
+        <div class="cap">of your plays are in the wrong place</div>
+        <div class="split" role="img" aria-label="${N(ok)} plays in place,
+          ${N(w.misplaced)} under the wrong album, ${N(w.blank)} with no album">
+          <i class="ok" style="width:${pc(ok)}"></i><i class="mis"
+            style="width:${pc(w.misplaced)}"></i><i class="blank"
+            style="width:${pc(w.blank)}"></i></div>
+        <div class="legend">
+          <span><b style="background:#4a4a4a"></b><strong>${N(ok)}</strong> in place</span>
+          <span><b style="background:var(--warn)"></b><strong>${N(w.misplaced)}</strong>
+            under a less used spelling of the album${w.albums
+              ? ` (${N(w.albums)} album${w.albums === 1 ? "" : "s"})` : ""}</span>
+          <span><b style="background:var(--accent)"></b><strong>${N(w.blank)}</strong>
+            with no album, invisible to your album chart</span>
+        </div>
+        <p class="note" style="margin-top:14px">Everything else below is either
+          already counted correctly or a tagging choice rather than a defect.</p>
       </div>`;
     })()}
     ${/*
@@ -2684,6 +2720,7 @@ function render() {
       const rows = fixList(d.issues, 20);
       if (rows.length < 3) return "";
       const total = rows.reduce((n, r) => n + r.recovers, 0);
+      const maxRecovers = Math.max(1, ...rows.map((r) => r.recovers));
       return `<div class="panel" style="margin-bottom:14px">
         <div class="sec-head" style="margin-top:0">
           <strong>Start here</strong><span class="tag">${N(rows.length)}</span>
@@ -2733,7 +2770,8 @@ function render() {
                        with none`
                     : `<code>${esc(m.album)}</code> &rarr; <code>${esc(to.album)}</code>`
                 ).join(" &middot; ")}</span></span>
-            <span class="v">+${N(recovers)}</span></div>`;
+            <span class="v">+${N(recovers)}</span>
+            <i style="width:${Math.max(2, Math.round(100 * recovers / maxRecovers))}%"></i></div>`;
         }).join("")}
         </div>
         <div style="margin-top:11px">
@@ -2883,23 +2921,15 @@ function render() {
                 : ""}
           </div>`).join("")}
       </div>
-      <div>
-      <div class="grid g4">
+      <div class="panel">
+      <div class="metrics" style="grid-template-columns:repeat(2,minmax(0,1fr));
+           gap:28px 24px">
         ${metric(N(p.scrobbles_ingested), "Scrobbles scanned", null,
           d.focus
             ? `Scrobbles by ${d.focus} within the range this scan read.`
             : "How many of your most recent scrobbles this scan read. Pick a " +
               "deeper scan, or import a CSV export, to cover more of your history.",
           "tip-below")}
-      </div>
-      ${/*
-         * The rest are diagnostics, not answers. "Plays per album string 2.3"
-         * means nothing to most readers, and a wall of four big numbers is what
-         * made the page read as a template. Kept, one click away.
-         */""}
-      <details class="more">
-        <summary>More numbers</summary>
-      <div class="grid g4" style="margin-top:12px">
         ${metric(N(p.distinct_albums), "Album strings", null,
           "Distinct artist + album text combinations. Not the same as albums: " +
           "if one album is spelled two ways, that is two strings. This is the " +
@@ -2915,7 +2945,6 @@ function render() {
           "suggests fragmentation: the same music split across many spellings.",
           "tip-below")}
       </div>
-      </details>
       </div>
     </div>
 
@@ -2928,7 +2957,7 @@ function render() {
     ${era.plays ? `
       <h2>Unreleased material</h2>
       <div class="panel grid g2">
-        <div class="grid g4" style="align-content:start">
+        <div class="metrics" style="align-content:start">
           ${metric(era.share_of_all_plays + "%", "of all scrobbles", "var(--era)",
             "How much of your listening is unreleased material. This varies " +
             "enormously between people: for most listeners it is near zero, " +
@@ -3101,9 +3130,8 @@ function topArtistsPanel(d) {
             title="${on ? "Show whole library" : `Only ${esc(a.artist)}`}">
           <span class="rk">${i + 1}</span>
           <span class="nm">${esc(a.artist)}</span>
-          <span class="v">${N(a.plays)}${n !== null
-            ? ` <span class="fc${n ? "" : " zero"}">${n ? N(n) + " to check" : "clean"}</span>`
-            : ""}</span>
+          <span class="v">${n ? `<span class="fc">${N(n)} to check</span> ` : ""
+            }${N(a.plays)}</span>
           <i style="width:${Math.max(2, Math.round(100 * a.plays / max))}%"></i>
         </button>`;
       }).join("")}
