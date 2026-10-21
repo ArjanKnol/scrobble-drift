@@ -305,5 +305,27 @@ console.log("\nfeatured titles and named bootleg projects");
      "while a bare 'Leaks' or 'Unreleased' still is");
 }
 
+console.log("\nthe chart simulation never promotes a stray one-play album");
+{
+  const { chartImpact } = await import("../docs/drift.js");
+  const rows = [];
+  const add = (album, track, n) => { for (let i = 0; i < n; i++)
+    rows.push({ uts: rows.length + 1, artist: "Young Thug", album, track }); };
+  add("Slime Language 2 (Deluxe)", "Moon Man", 10);
+  add("Strick Land", "Moon Man", 1);
+  add("Filler", "T", 50);
+  const im = chartImpact(rows, [{ detector: "D4", reason: "candidate",
+    artist: "Young Thug", track: "Moon Man",
+    temporal: { later: "Strick Land" },
+    members: [{ album: "Slime Language 2 (Deluxe)", plays: 10 }, { album: "Strick Land", plays: 1 }] }]);
+  const plays = (a) => im.corrected_top.find((x) => x.album === `Young Thug␟${a}`)?.plays ?? 0;
+  eq(plays("Slime Language 2 (Deluxe)"), 11, "plays move to the deluxe edition that holds them");
+  eq(plays("Strick Land"), 0, "not into the album played once, just because it came later");
+  const skipped = chartImpact(rows, [{ detector: "D4", reason: "on-both",
+    artist: "Young Thug", track: "Moon Man",
+    members: [{ album: "Slime Language 2 (Deluxe)", plays: 10 }, { album: "Strick Land", plays: 1 }] }]);
+  ok(!skipped.biggest_movers.length, "a song on both releases moves nothing in the chart");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

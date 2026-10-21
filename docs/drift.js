@@ -2999,6 +2999,10 @@ export function chartImpact(rest, splits, topN = 25) {
                            (s) => `${s.artist}␟${s.album}`);
   const merged = new Map(reported);
   for (const issue of splits) {
+    // A finding that says "nothing to fix" (the song is on two real releases,
+    // a structural title, a tagging choice) must not move plays in the chart.
+    if (NOT_A_SPLIT.has(issue.reason) || issue.style_choice ||
+        issue.chart_already_correct) continue;
     const members = (issue.members || []).filter((m) => m.album);
     if (members.length < 2) continue;
 
@@ -3020,7 +3024,18 @@ export function chartImpact(rest, splits, topN = 25) {
      * among strings that exist. Recommendation target and simulation target are
      * not the same thing.
      */
-    const wanted = issue.temporal?.later || issue.external?.title || null;
+    /*
+     * `temporal.later` is only a destination for a real migration, a single
+     * later absorbed into its album. For anything else it is just whichever
+     * string was played last. Used unconditionally it sent Young Thug's
+     * "Moon Man" from Slime Language 2 (10 plays) INTO Strick Land (1 play),
+     * someone else's album, and showed Strick Land jumping from #100 to #31.
+     */
+    const migration = issue.reason === "migration";
+    const wanted = migration
+      ? (issue.temporal?.kind === "edition"
+          ? issue.temporal?.target : issue.temporal?.later) || null
+      : issue.external?.title || null;
     let target = null;
     if (wanted) {
       const w = norm(wanted);
@@ -3049,7 +3064,9 @@ export function chartImpact(rest, splits, topN = 25) {
     if (!target) {
       const RANK = {
         "album": 0,
-        "edition variant": 1,        // a deluxe edition is still the album
+        // Same tier as "album", so plays decide between them. Ranked below it,
+        // a one-play "Strick Land" beat a ten-play "Slime Language 2 (Deluxe)".
+        "edition variant": 0,
         "compilation": 2,
         "single or EP": 3,
         "single (album titled after the track)": 4,
