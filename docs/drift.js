@@ -2657,7 +2657,20 @@ export function eraLookupTitle(track) {
   return out || String(track || "");
 }
 
-export function d14eReleasedSince(era, lookup) {
+/**
+ * Is this era a numbered sequel of that release? "JESUS IS KING II" and
+ * "DONDA 2" come after "JESUS IS KING" and "Donda" by their very names, so a
+ * leak filed under them was recorded after that release came out.
+ */
+const N0 = (n) => Number(n || 0).toLocaleString("en-GB");
+
+export function isSequelEra(eraName, releaseTitle) {
+  const e = norm(eraName), r = norm(releaseTitle);
+  if (!e || !r || !e.startsWith(r + " ")) return false;
+  return /^(?:part |pt |vol |volume )?(?:ii|iii|iv|v|2|3|4|5)$/.test(e.slice(r.length + 1));
+}
+
+export function d14eReleasedSince(era, lookup, { eraYear } = {}) {
   const tracks = new Map();
   for (const s of era) {
     const song = eraLookupTitle(s.track);
@@ -2734,6 +2747,42 @@ export function d14eReleasedSince(era, lookup) {
       (a.source === "spotify" ? 0 : 1) - (b.source === "spotify" ? 0 : 1));
     const best = official[0];
     const streaming = best.source === "spotify";
+
+    /*
+     * Plays filed under an era that came AFTER this release.
+     *
+     * A leak from a later era cannot be this release's pre-release version; it
+     * is most likely a later rework. Two ways to know an era is later: its name
+     * is a numbered sequel of the release ("JESUS IS KING II"), or it is named
+     * after an album Spotify dates to a later year ("DONDA 2", 2022, against
+     * Donda, 2021). Eras that cannot be dated ("¥$", "Yandhi") are left alone.
+     *
+     * Lowers confidence and says why. It never removes the finding: a later
+     * era label is the listener's own tag, and the final master sometimes does
+     * leak under a later name.
+     */
+    const releaseYear = Number(String(best.first_release).slice(0, 4)) || null;
+    const later = [];
+    for (const [e, n] of rec.eras) {
+      const y = eraYear?.(rec.artist, e) ?? null;
+      if (isSequelEra(e, best.title) || (releaseYear && y && y > releaseYear)) {
+        later.push({ era: e, plays: n, year: y });
+      }
+    }
+    const laterPlays = later.reduce((t, x) => t + x.plays, 0);
+    const allLater = later.length > 0 && laterPlays >= rec.plays;
+    const baseConfidence = streaming ? 0.6 : 0.35;
+    const confidence = !later.length ? baseConfidence
+      : Math.round(baseConfidence * (allLater ? 0.4 : 0.75) * 100) / 100;
+    const laterNote = !later.length ? ""
+      : (allLater
+          ? ` All your plays are filed under ${later.map((x) => `'${x.era}'`).join(" and ")}, `
+          : ` ${N0(laterPlays)} of your ${N0(rec.plays)} plays ${laterPlays === 1 ? "is" : "are"} filed under ` +
+            `${later.map((x) => `'${x.era}'`).join(" and ")}, `) +
+        `an era after '${best.title}' came out (${releaseYear}), so ` +
+        (allLater ? "this is most likely a later version or rework, not this release."
+                  : "those are most likely a later version, not this release.");
+
     issues.push({
       // "review", not "split": nothing is split, a song with this title may
       // have come out, and the card asks the reader to check.
@@ -2741,7 +2790,8 @@ export function d14eReleasedSince(era, lookup) {
       track: rec.track,
       // Spotify presence is much better evidence than a MusicBrainz entry, so
       // the two are not reported with the same confidence.
-      confidence: streaming ? 0.6 : 0.35,
+      confidence,
+      later_eras: later,
       artist: rec.artist,
       title: `Possibly released since: ${rec.artist} - ${rec.track}`,
       plays_affected: rec.plays,
@@ -2758,7 +2808,7 @@ export function d14eReleasedSince(era, lookup) {
         `${monthName(rec.last)}` +
         (rec.versions.size > 1
           ? `, across ${rec.versions.size} leaked versions with different credits.`
-          : "."),
+          : ".") + laterNote,
       versions: [...rec.versions],
       // Exactly how these plays are tagged, so the card can link to the
       // reader's own scrobbles rather than only to the released title.

@@ -330,7 +330,7 @@ for (const [label, lib] of [
    * without being listed here.
    */
   const STRING_FNS = [
-    "norm", "normTitle", "trackIdentity", "baseTitle", "eraName", "eraLookupTitle",
+    "norm", "normTitle", "trackIdentity", "baseTitle", "eraName", "eraLookupTitle", "isSequelEra",
     "isEraTagged", "isUndifferentiated", "isStructuralTitle", "featCredits",
     "officialKey", "d5Resolve", "digitsOnlyDiffer", "caseOnly",
     "singleShaped",

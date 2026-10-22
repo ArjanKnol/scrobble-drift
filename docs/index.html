@@ -2380,6 +2380,39 @@ async function runDiscovery(offer) {
   let found = [];
   if (offer.id === "era_released") {
     found = d14eReleasedSince(era, lookup);
+    /*
+     * Date the eras the findings are filed under, so a leak from an era AFTER
+     * the release can be marked as a likely later version (lower confidence and
+     * a sentence saying why, never removed). One Spotify album search per era
+     * name: Spotify carries no bootlegs, so a date from it is a real release.
+     * Only the handful of eras behind actual findings are asked about.
+     */
+    const eraNames = new Map();
+    for (const f of found) {
+      for (const m of f.members || []) {
+        if (m.era) eraNames.set(`${f.artist}\u241f${m.era}`.toLowerCase(), [f.artist, m.era]);
+      }
+    }
+    const years = new Map();
+    if (spotifyOn && eraNames.size) {
+      say(`Dating ${N(eraNames.size)} era${eraNames.size === 1 ? "" : "s"} to spot later versions…`);
+      for (const [k, [artist, name]] of eraNames) {
+        if (abort) break;
+        let hit = await store.getLookup("erayear", artist, name);
+        if (!hit) {
+          const r = await spPaced(`/api/spotify/album?${new URLSearchParams({ artist, title: name })}`);
+          if (r) {
+            const m = (r.matches || []).find((g) => g.primary === "Album" && g.first_release);
+            hit = { year: m ? Number(String(m.first_release).slice(0, 4)) || null : null };
+            await store.putLookup("erayear", artist, name, hit);
+          }
+        }
+        if (hit?.year) years.set(k, hit.year);
+      }
+      found = d14eReleasedSince(era, lookup, {
+        eraYear: (artist, name) => years.get(`${artist}\u241f${name}`.toLowerCase()) ?? null,
+      });
+    }
   } else if (offer.id === "stranded_singles") {
     found = d16StrandedSingles(offer.jobs, lookup, { owned: offer.owned });
     /*

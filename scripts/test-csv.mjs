@@ -356,5 +356,36 @@ console.log("\nleak findings link to how you tagged them, and never twice");
      "and a finding the report already holds is never added again");
 }
 
+console.log("\na leak from a later era is marked, not removed");
+{
+  const d = await import("../docs/drift.js");
+  ok(d.isSequelEra("JESUS IS KING II", "JESUS IS KING"), "JESUS IS KING II follows JESUS IS KING");
+  ok(d.isSequelEra("DONDA 2", "Donda"), "DONDA 2 follows Donda");
+  ok(!d.isSequelEra("DONDA: WITH CHILD", "Donda"), "DONDA: WITH CHILD is not a numbered sequel");
+  ok(!d.isSequelEra("Jesus Is King", "JESUS IS KING"), "the release's own era is not later");
+  const spot = { groups: [{ title: "JESUS IS KING", primary: "Album", status: "Official",
+    secondary: [], first_release: "2019-10-25", source: "spotify" }] };
+  const mk = (album, n) => Array.from({ length: n }, (_, i) =>
+    ({ uts: i + 1, artist: "Kanye West", album, track: "Hands On" }));
+  const plain = d.d14eReleasedSince(mk("Unreleased (Jesus Is King Era)", 6), () => spot)[0];
+  const later = d.d14eReleasedSince(mk("Unreleased (JESUS IS KING II Era)", 6), () => spot)[0];
+  ok(later, "an all-later finding is still reported");
+  ok(later.confidence < plain.confidence, `with lower confidence (${later.confidence} < ${plain.confidence})`);
+  ok(/most likely a later version or rework/.test(later.suggest), "and says why");
+  const mixed = d.d14eReleasedSince([...mk("Unreleased (Jesus Is King Era)", 4),
+    ...mk("Unreleased (JESUS IS KING II Era)", 1)], () => spot)[0];
+  ok(/1 of your 5 plays/.test(mixed.suggest), "a partly-later song says how many plays are later");
+  ok(mixed.confidence < plain.confidence && mixed.confidence > later.confidence,
+     "and sits between the two in confidence");
+  const dated = d.d14eReleasedSince(mk("Unreleased (DONDA 2 Era)", 2),
+    () => ({ groups: [{ title: "Donda", primary: "Album", status: "Official", secondary: [],
+      first_release: "2021-08-29", source: "spotify" }] }),
+    { eraYear: (a, e) => (e === "DONDA 2" ? 2022 : null) })[0];
+  ok(dated.later_eras.length === 1, "an era Spotify dates after the release counts as later");
+  const undated = d.d14eReleasedSince(mk("Unreleased (Yandhi Era)", 2), () => spot,
+    { eraYear: () => null })[0];
+  eq(undated.later_eras.length, 0, "an era that cannot be dated is left alone");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
