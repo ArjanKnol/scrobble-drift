@@ -31,7 +31,7 @@
 </script>
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=26">
+<link rel="stylesheet" href="style.css?v=27">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -376,7 +376,7 @@ function issueLinks(issue, user) {
 }
 const col = (v) => v >= 85 ? "var(--good)" : v >= 60 ? "var(--warn)" : "var(--bad)";
 
-let abort = false, report = null, fDet = "", fCls = "";
+let abort = false, report = null, fDet = "", fCls = "", fHideOk = false;
 
 /*
  * The scrobbles the current report was built from.
@@ -3304,17 +3304,28 @@ function render() {
         <option value="">Any certainty</option>
         ${[...new Set(d.issues.map((i) => i.class))].sort()
           .map((c) => `<option value="${c}">${esc(CLASS_NAMES[c] || c)}</option>`).join("")}</select>
-      ${tip("Class says how much to trust a finding. 'error' is confident and " +
-            "specific. 'split' means your plays are divided across names that " +
-            "should probably be one. 'review' is informational: worth a look, " +
-            "not necessarily worth changing. 'unfixable' is shown for context " +
-            "only, because Last.fm gives you no way to change it.")}
+      ${tip("How sure a finding is. 'Clear mistakes' are confident and " +
+            "specific. 'Plays split in two' means your plays are divided across " +
+            "names that should probably be one. 'Worth a look' is informational, " +
+            "not necessarily worth changing. 'Not fixable on Last.fm' is shown for " +
+            "context only.")}
+      ${/*
+         * Findings a check has cleared ("Tags look fine") stay in the report by
+         * default, because the result is worth seeing once. This hides them
+         * when working through what is left.
+         */
+        (() => {
+          const n = d.issues.filter(tagsOk).length;
+          return n ? `<label class="hide-ok"><input type="checkbox" id="fok"${
+            fHideOk ? " checked" : ""}> Hide the ${N(n)} with tags that look fine</label>` : "";
+        })()}
     </div>
     <div id="issues"></div>`;
 
   $("fd").value = fDet; $("fc").value = fCls;
   $("fd").onchange = (e) => { fDet = e.target.value; issues(); };
   $("fc").onchange = (e) => { fCls = e.target.value; issues(); };
+  if ($("fok")) $("fok").onchange = (e) => { fHideOk = e.target.checked; issues(); };
   tidyTips($("out"));
   if ($("to-issues")) {
     // scrollIntoView rather than a #hash link: a hash would push a history
@@ -3523,7 +3534,8 @@ function offerCards(section) {
 
 function issues() {
   const all = report.issues.filter((i) =>
-    (!fDet || i.detector === fDet) && (!fCls || i.class === fCls));
+    (!fDet || i.detector === fDet) && (!fCls || i.class === fCls) &&
+    !(fHideOk && tagsOk(i)));
   // Counted BEFORE the cap, so the notice at the bottom can say how many are
   // being withheld rather than leaving the reader to wonder.
   const matching = all.length;

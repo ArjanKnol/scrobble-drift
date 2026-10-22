@@ -400,5 +400,14 @@ console.log("\na check that clears the tags says so in green");
   ok(!/\.v-different \{ border-left-color: var\(--bad\)/.test(css), "and the verdict is no longer red");
 }
 
+console.log("\ncleared findings can be hidden");
+{
+  const html = (await readFile(new URL("../docs/index.html", import.meta.url), "utf8"))
+    .replace(/\r\n/g, "\n");
+  ok(/!\(fHideOk && tagsOk\(i\)\)/.test(html), "the list can leave out findings whose tags look fine");
+  ok(/Hide the \$\{N\(n\)\} with tags that look fine/.test(html), "via a labelled checkbox with a count");
+  ok(/fHideOk = false;/.test(html), "and they are shown by default");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

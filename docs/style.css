@@ -819,3 +819,8 @@ button.mode.on,button.mode.on:hover:not(:disabled){background:#2a2a2a;color:var(
 .v-different{border-left-color:var(--good)}
 .v-different .v-label{color:var(--good)}
 .issue:has(.t-ok){border-color:color-mix(in srgb,var(--good) 35%,var(--line))}
+.hide-ok{display:inline-flex;align-items:center;gap:7px;font-size:13px;
+  color:var(--dim);cursor:pointer;margin-left:6px}
+.hide-ok input{min-width:0;width:15px;height:15px;padding:0;accent-color:var(--good);
+  cursor:pointer}
+.hide-ok:hover{color:var(--ink)}
