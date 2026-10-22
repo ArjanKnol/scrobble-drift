@@ -387,5 +387,18 @@ console.log("\na leak from a later era is marked, not removed");
   eq(undated.later_eras.length, 0, "an era that cannot be dated is left alone");
 }
 
+console.log("\na check that clears the tags says so in green");
+{
+  const html = (await readFile(new URL("../docs/index.html", import.meta.url), "utf8"))
+    .replace(/\r\n/g, "\n");
+  const css = await readFile(new URL("../docs/style.css", import.meta.url), "utf8");
+  ok(/i\.verdict\?\.state === "different" \|\| i\.reason === "on-both"/.test(html),
+     "two real versions, or a song on both releases, count as tags that are fine");
+  ok(/Tags look fine/.test(html) && /\.tag\.t-ok\{color:var\(--good\)/.test(css),
+     "shown as a green status");
+  ok(/@keyframes okPop/.test(css) && /@keyframes okTick/.test(css), "with a small animation");
+  ok(!/\.v-different \{ border-left-color: var\(--bad\)/.test(css), "and the verdict is no longer red");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

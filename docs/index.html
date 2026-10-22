@@ -31,7 +31,7 @@
 </script>
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=25">
+<link rel="stylesheet" href="style.css?v=26">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -256,6 +256,9 @@ const DETECTOR_NAMES = {
   D16: "Single also on an album",
 };
 const detName = (d) => DETECTOR_NAMES[d] || d;
+/** A lookup settled that the tags are correct as they are. */
+const tagsOk = (i) => Boolean(i?.resolved) &&
+  (i.verdict?.state === "different" || i.reason === "on-both");
 const CLASS_NAMES = {
   error: "Clear mistakes",
   split: "Plays split in two",
@@ -3585,6 +3588,13 @@ function issues() {
     <div class="issue" data-idx="${report.issues.indexOf(i)}">
       <h3>${esc(i.title)}</h3>
       <div>
+        ${/*
+           * A check that came back "these are two real recordings" or "the song
+           * is on both releases" means the tags are right as they are. Said in
+           * green, first, so the result reads as good news rather than as one
+           * more red label on a list of problems.
+           */
+          tagsOk(i) ? `<span class="tag t-ok"><span class="ok-mark" aria-hidden="true"></span>Tags look fine</span>` : ""}
         <span class="tag t-${i.class}" title="${esc(i.class)}">${esc(CLASS_NAMES[i.class] || i.class)}</span>
         ${/*
            * Evidence badge, ahead of the confidence percentage.
@@ -3633,7 +3643,7 @@ function issues() {
            * what the databases hold, not what the user played, and an
            * instruction overstates a finding they are better placed to settle.
            */
-          const label = { same: "Confirmed", different: "Two versions exist",
+          const label = { same: "Confirmed", different: "Both versions are real",
                           unclear: "Not confirmed", info: "Release data" };
           return `<div class="verdict v-${i.verdict.state}">
             <span class="v-label">${esc(i.verdict.label || label[i.verdict.state] || "Checked")}</span>

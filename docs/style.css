@@ -618,8 +618,6 @@ hr.sec-rule{border:0;border-top:1px solid var(--line);margin:40px 0 8px}
 }
 .v-same      { border-left-color: var(--good); }
 .v-same      .v-label { color: var(--good); }
-.v-different { border-left-color: var(--bad); }
-.v-different .v-label { color: var(--bad); }
 .v-unclear   { border-left-color: var(--warn); }
 .v-unclear   .v-label { color: var(--warn); }
 .v-info      { border-left-color: var(--dim); }
@@ -802,3 +800,22 @@ button.mode.on,button.mode.on:hover:not(:disabled){background:#2a2a2a;color:var(
 .offer-live .live-wait:empty{display:none}
 .offer-live .live-wait{color:var(--warn)}
 .offer-live .live-stop{display:inline-block;margin-top:6px;font-size:13px}
+
+/* ------------------------------------------------- "tags look fine" status */
+/* Shown when a check proves the tags are right (two real versions, or a song
+   on both releases). Green, with a check mark that draws itself once. */
+.tag.t-ok{color:var(--good);border-color:var(--good);display:inline-flex;
+  align-items:center;gap:6px;animation:okPop .45s var(--ease) both}
+.ok-mark{width:11px;height:11px;border-radius:50%;background:var(--good);
+  position:relative;flex:0 0 auto}
+.ok-mark::after{content:"";position:absolute;left:3.5px;top:1.5px;width:3px;
+  height:6px;border:solid #0d1a0d;border-width:0 1.6px 1.6px 0;
+  transform:rotate(45deg) scale(0);transform-origin:center;
+  animation:okTick .3s var(--ease) .25s forwards}
+@keyframes okPop{0%{opacity:0;transform:scale(.6)}60%{opacity:1;transform:scale(1.08)}100%{transform:none}}
+@keyframes okTick{to{transform:rotate(45deg) scale(1)}}
+/* "Different" is the good outcome: two real recordings, so the tags are
+   right. Green, not the red it used to be. */
+.v-different{border-left-color:var(--good)}
+.v-different .v-label{color:var(--good)}
+.issue:has(.t-ok){border-color:color-mix(in srgb,var(--good) 35%,var(--line))}
