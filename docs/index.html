@@ -31,7 +31,7 @@
 </script>
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=27">
+<link rel="stylesheet" href="style.css?v=28">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -158,7 +158,7 @@
 
     <div id="ownkey" class="hide" style="margin-top:10px">
       <input id="apikey" placeholder="Your 32-character Last.fm API key"
-             autocomplete="off" spellcheck="false" style="min-width:330px">
+             autocomplete="off" spellcheck="false" style="min-width:min(330px,100%)">
       <p class="note">
         Get one free in two minutes at
         <a href="https://www.last.fm/api/account/create" target="_blank"
@@ -3182,7 +3182,7 @@ function render() {
     ${era.plays ? `
       <h2>Unreleased material</h2>
       <div class="panel">
-        <div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+        <div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(min(130px,100%),1fr));
              margin-bottom:24px">
           ${metric(era.share_of_all_plays + "%", "of all scrobbles", "var(--era)",
             "How much of your listening is unreleased material. This varies " +
@@ -3965,6 +3965,53 @@ function issues() {
     if (wasChart && now && !now.dropped && !affectsChart(now)) now.kept_in_place = true;
     render();
   };
+}
+
+/*
+ * Info tips that work on a phone.
+ *
+ * CSS alone centred every bubble on its icon, so a tip near either edge ran
+ * off the screen, and touch devices never fire :hover reliably, so on a phone
+ * most tips could not be opened at all. A tap now toggles the tip, a tap
+ * anywhere else closes it, and each bubble is measured when it opens and moved
+ * so it lands inside the viewport, flipping below the icon when the space above
+ * is too small.
+ */
+{
+  const PAD = 8;
+  const place = (b) => {
+    const tipStyle = getComputedStyle(b, "::after");
+    const tw = parseFloat(tipStyle.width) || 0;
+    if (!tw) return;
+    const r = b.getBoundingClientRect();
+    const vw = document.documentElement.clientWidth;
+    const left = Math.max(PAD, Math.min(r.left + r.width / 2 - tw / 2, vw - PAD - tw));
+    b.style.setProperty("--tip-x", `${Math.round(left - r.left)}px`);
+    b.classList.add("tip-fit");
+    const th = parseFloat(tipStyle.height) || 0;
+    b.classList.toggle("tip-flip", r.top - th - 14 < 0);
+  };
+  let open = null;
+  const close = () => { open?.classList.remove("open"); open = null; };
+  const onEnter = (e) => {
+    const b = e.target.closest?.("button.i");
+    if (b) place(b);
+  };
+  document.addEventListener("pointerover", onEnter);
+  document.addEventListener("focusin", onEnter);
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest?.("button.i");
+    if (!b) return close();
+    e.preventDefault();
+    if (open === b) return close();
+    close();
+    open = b;
+    b.classList.add("open");
+    place(b);
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+  addEventListener("scroll", close, { passive: true });
+  addEventListener("resize", close);
 }
 </script>
 </body>

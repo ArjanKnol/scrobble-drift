@@ -68,12 +68,13 @@ h2{font-size:22px;letter-spacing:-.01em;color:var(--ink);line-height:1.25;
 .sub{color:var(--dim);font-size:13px;margin-bottom:26px}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:24px}
 .grid{display:grid;gap:14px}
-.g4{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
-.g2{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+.g4{grid-template-columns:repeat(auto-fit,minmax(min(170px,100%),1fr))}
+.g2{grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr))}
 form{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
 input,select,button{background:#0d0d0d;color:var(--ink);border:1px solid var(--line);
   border-radius:4px;padding:11px 13px;font:inherit;font-size:14px}
-input{min-width:230px}
+input{min-width:min(230px,100%)}
+select{max-width:100%}
 input:focus,select:focus{outline:none;border-color:var(--accent)}
 button{background:var(--accent);color:#fff;border-color:transparent;
   font-weight:650;cursor:pointer;font-size:13.5px;border-radius:4px}
@@ -224,8 +225,25 @@ button.i:focus-visible{background:var(--dim);color:var(--panel);
   transform:translateX(-50%);border:5px solid transparent;
   border-top-color:var(--line);opacity:0;visibility:hidden;
   transition:opacity .12s;z-index:51;pointer-events:none}
-.i:hover::after,.i:hover::before,
-.i:focus-visible::after,.i:focus-visible::before{opacity:1;visibility:visible}
+/* A hidden tip has no content, so it takes no space. With the text always
+   present, tips near the right edge widened the page by up to 70px: a sideways
+   wobble on phones and a horizontal scrollbar on desktop. */
+.i::after{content:none;box-sizing:border-box}
+.i:focus-visible::after,.i.open::after{content:attr(data-tip)}
+.i:focus-visible::after,.i:focus-visible::before,
+.i.open::after,.i.open::before{opacity:1;visibility:visible}
+/* Hover only where hover exists. On touch a tap is a click, which toggles
+   .open; a sticky :hover would keep the tip up after the second tap. */
+@media (hover:hover){
+  .i:hover::after{content:attr(data-tip)}
+  .i:hover::after,.i:hover::before{opacity:1;visibility:visible}
+}
+/* Set by JS from the measured tip width, so the bubble always lands inside the
+   viewport and flips below the icon when there is no room above. */
+.i.tip-fit::after{left:var(--tip-x,0);right:auto;transform:none}
+.i.tip-flip::after{bottom:auto;top:calc(100% + 8px)}
+.i.tip-flip::before{bottom:auto;top:calc(100% + 3px);
+  border-top-color:transparent;border-bottom-color:var(--line)}
 
 /* Near the left or right edge the centred tip would overflow the viewport.
    Nudged rather than flipped: a flip needs measurement in JS, and these tips
@@ -525,7 +543,7 @@ button.check:disabled, button.check-all:disabled {
  * something unreadable. Those strings are the actionable part and must not wrap
  * to three lines.
  */
-.fixgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));
+.fixgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(330px,100%),1fr));
   gap:0 22px}
 /* The bottom border is the row separator, and in a grid the last row of each
    column needs it suppressed, not just the last child overall. */
@@ -647,7 +665,7 @@ hr.sec-rule{border:0;border-top:1px solid var(--line);margin:40px 0 8px}
 }
 
 /* ------------------------------------------------------------ scan source */
-input.opt{min-width:190px}
+input.opt{min-width:min(190px,100%)}
 .source{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;
   margin-top:12px}
 .source>.note{margin:0;display:inline-flex;align-items:baseline}
@@ -669,7 +687,7 @@ input:disabled,select:disabled{opacity:.5}
 .focusbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;
   font-size:13px;color:var(--dim);margin:-4px 0 14px}
 .focusbar strong{color:var(--ink)}
-.artgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
+.artgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr));
   gap:2px 22px}
 /* Each artist is a real button: keyboard reachable, and the whole row is the
    target. The thin bar underneath is the play share, the only decoration. */
@@ -756,7 +774,7 @@ button.mode.on,button.mode.on:hover:not(:disabled){background:#2a2a2a;color:var(
 
 /* Metrics without their own boxes. */
 .metric{padding:0}
-.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(140px,100%),1fr));
   gap:20px 24px}
 
 /* Compact scan summary: one line, the detail one click away. */
@@ -783,12 +801,12 @@ button.mode.on,button.mode.on:hover:not(:disabled){background:#2a2a2a;color:var(
 .sk.big{height:58px;width:22%;margin-bottom:14px}
 .sk.l{height:14px;margin:9px 0}
 .sk.bar{height:10px;margin:18px 0 32px}
-.sk-rows{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:0 22px}
+.sk-rows{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr));gap:0 22px}
 .sk-rows .sk{height:14px;margin:13px 0}
 .verdict .moved-note{display:block;margin-top:6px;font-size:13px;color:var(--dim)}
 /* Unreleased material: the era list runs full width in two columns under the
    numbers, instead of a narrow column beside a half-empty block. */
-.era-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));
+.era-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(380px,100%),1fr));
   gap:0 32px;border-top:1px solid var(--line);padding-top:8px}
 .era-list .row:last-child{border-bottom:1px solid var(--line)}
 /* A finished lookup with results stays at full strength: it still asks for
@@ -824,3 +842,50 @@ button.mode.on,button.mode.on:hover:not(:disabled){background:#2a2a2a;color:var(
 .hide-ok input{min-width:0;width:15px;height:15px;padding:0;accent-color:var(--good);
   cursor:pointer}
 .hide-ok:hover{color:var(--ink)}
+
+/* ============================================================ small screens */
+/*
+ * Measured on 320 to 430px wide. Before this block the fix list, the top
+ * artists and the era list all overflowed: their grid floors (300 to 380px)
+ * were wider than a phone's content column, so the play counts on the right
+ * were cut off. Those floors now shrink with min(); what is left here is space
+ * and touch.
+ */
+@media (max-width:560px){
+  .wrap{padding:24px 14px 32px}
+  .panel{padding:16px}
+  .issue{padding:12px 13px}
+  h2{margin:36px 0 14px;font-size:20px}
+  .report-title{font-size:30px;margin-top:28px}
+  .headline{margin-bottom:24px;padding-bottom:24px}
+  .headline .big{font-size:52px}
+  .headline .cap{font-size:16px}
+  .score{font-size:44px}
+  .metric .n{font-size:clamp(22px,7vw,30px)}
+  .lede{font-size:14.5px}
+
+  /* The form stacks: each field the full width, the buttons share a row. */
+  .modes{display:flex;width:100%}
+  button.mode{flex:1 1 0;padding:8px 6px;font-size:12.5px}
+  #f>input,#f>select,#f>.drop{flex:1 1 100%;width:100%;min-width:0}
+  #f>.drop{flex-basis:100%}
+  #go{flex:1 1 auto}
+
+  /* Rows: the label may wrap, the number never leaves the screen. */
+  .row>:first-child{min-width:0;overflow-wrap:break-word}
+  .fixgrid .row code{overflow-wrap:anywhere}
+  .era-list{gap:0}
+  .done-head .v{margin-left:0;flex:1 1 100%}
+  .jump{width:100%;justify-content:center}
+}
+
+/* Touch: targets of at least 36px, and an info icon you can hit with a thumb. */
+@media (pointer:coarse){
+  button.i{width:24px;height:24px;font-size:12px;margin:0 2px 0 6px}
+  button.check,button.check-all{min-height:36px;padding:6px 14px}
+  .links a{min-height:34px;padding:5px 12px 5px 6px}
+  .social .ic{min-height:38px}
+  .filebtn{min-height:36px}
+  .facts a{display:inline-block;padding:6px 0}
+  .hide-ok input{width:20px;height:20px}
+}
