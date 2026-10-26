@@ -240,7 +240,9 @@ button.i:focus-visible{background:var(--dim);color:var(--panel);
 }
 /* Set by JS from the measured tip width, so the bubble always lands inside the
    viewport and flips below the icon when there is no room above. */
-.i.tip-fit::after{left:var(--tip-x,0);right:auto;transform:none}
+/* button.i, not .i: the edge nudges .tip-l and .tip-r further down have the
+   same specificity and would otherwise win, pinning the bubble at left:0. */
+button.i.tip-fit::after{left:var(--tip-x,0);right:auto;transform:none}
 .i.tip-flip::after{bottom:auto;top:calc(100% + 8px)}
 .i.tip-flip::before{bottom:auto;top:calc(100% + 3px);
   border-top-color:transparent;border-bottom-color:var(--line)}
