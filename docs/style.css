@@ -891,3 +891,17 @@ button.mode.on,button.mode.on:hover:not(:disabled){background:#2a2a2a;color:var(
   .facts a{display:inline-block;padding:6px 0}
   .hide-ok input{width:20px;height:20px}
 }
+
+/* ------------------------------------------------- fixed / ignore marks */
+/* Quiet on purpose: a secondary action on every card, below the evidence. */
+.mark-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px;
+  padding-top:9px;border-top:1px solid var(--line)}
+button.mk{font-size:12px;padding:4px 11px;border-radius:99px;background:transparent;
+  color:var(--dim);border:1px solid var(--line);font-weight:600}
+button.mk:hover:not(:disabled){background:transparent;color:var(--ink);border-color:var(--dim)}
+.tag.t-marked{color:var(--good);border-color:color-mix(in srgb,var(--good) 50%,var(--line))}
+.tag.t-back{color:var(--warn);border-color:var(--warn)}
+.issue p.back-note{color:var(--warn)}
+.mark-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 12px}
+.mark-bar .hide-ok{margin-left:0}
+@media (pointer:coarse){ button.mk{min-height:36px;padding:6px 14px} }

@@ -1493,21 +1493,47 @@ export function baseTitle(track) {
  */
 export function featCredits(title) {
   const names = new Set();
-  let out = title || "", prev = null;
-  while (out !== prev) {
-    prev = out;
-    const m = FEAT_SUFFIX.exec(out);
-    if (!m) break;
-    const inner = m[0]
+  const collect = (clause) => {
+    const inner = clause
       .replace(/^[\s([]*/, "").replace(/[)\]\s]*$/, "")
       .replace(/^(?:feat\.?|ft\.?|featuring|with|w\/)\s+/i, "");
     for (const n of inner.split(/\s*(?:,|&|\+|\band\b|\bx\b)\s*/i)) {
       const k = norm(n);
       if (k) names.add(k);
     }
+  };
+  // A credit in the middle, ahead of a " - Remix" style suffix, counts too.
+  let out = String(title || "").replace(MID_FEAT, (m) => { collect(m); return ""; });
+  let prev = null;
+  while (out !== prev) {
+    prev = out;
+    const m = FEAT_SUFFIX.exec(out);
+    if (!m) break;
+    collect(m[0]);
     out = out.replace(FEAT_SUFFIX, "").trim();
   }
   return names;
+}
+
+/*
+ * A bracketed credit in the MIDDLE of a title, directly before a " - " suffix.
+ *
+ *   'Wish (feat. Trippie Redd) - Trippie Mix'
+ *   'Adderall (Corvette Corvette) [feat. Lil Uzi Vert] - Remix'
+ *
+ * FEAT_SUFFIX only reads a credit at the very end, so these never met their
+ * uncredited twins ('Wish - Trippie Mix') and a real split on one album went
+ * unreported. Found by comparing against another tool on a real export.
+ *
+ * Only directly before " - ", never anywhere: a bracket mid-title that is not
+ * followed by a suffix is part of the name ('Adderall (Corvette Corvette)').
+ */
+const MID_FEAT =
+  /\s*[([]\s*(?:feat\.?|ft\.?|featuring|with|w\/)\s+[^)\]]*[)\]](?=\s+-\s)/gi;
+
+/** The title with every feature credit removed, trailing or mid-title. */
+export function creditFreeTitle(track) {
+  return baseTitle(String(track || "").replace(MID_FEAT, ""));
 }
 
 /**
@@ -1564,11 +1590,18 @@ export function d8FeatureCredits(rest) {
 
   const variants = new Map();
   const when = new Map();          // `${key}␟${rawTitle}` -> {first, last}
+  const albumsOf = new Map();      // `${key}␟${rawTitle}` -> Set of album keys
   for (const s of rest) {
-    const k = `${norm(s.artist)}␟${trackIdentity(baseTitle(s.track))}`;
+    const k = `${norm(s.artist)}␟${trackIdentity(creditFreeTitle(s.track))}`;
     if (!variants.has(k)) variants.set(k, { artist: s.artist, titles: new Map() });
     const v = variants.get(k);
     v.titles.set(s.track, (v.titles.get(s.track) || 0) + 1);
+    if (s.album) {
+      const ak = `${k}␟${s.track}`;
+      if (!albumsOf.has(ak)) albumsOf.set(ak, new Map());
+      const am = albumsOf.get(ak);
+      am.set(norm(s.album), s.album);
+    }
 
     // WHEN each spelling was played. Without this a finding like "'IMY2' 1 play"
     // is unfindable: the user knows they never scrobbled it that way, cannot
@@ -1580,6 +1613,108 @@ export function d8FeatureCredits(rest) {
     w.last = Math.max(w.last, s.uts);
     when.set(wk, w);
   }
+  /*
+   * One spelling-variant finding for `order`, the titles believed to be one
+   * recording, most played first.
+   */
+  const emit = (key, artist, order, tVerdict, { sameAlbum = false } = {}) => {
+    /*
+     * A single stray play is not the same finding as an even split.
+     *
+     * 14 plays of 'IMY2 (with Kid Cudi)' against 1 of 'IMY2' is one mis-scrobble,
+     * not a systematic tagging inconsistency, and calling both 80% confident
+     * "standardise on..." overstates it. Renaming one scrobble is also barely
+     * worth doing, so the wording should not imply a chore.
+     */
+    const total = order.reduce((n, [, v]) => n + v, 0);
+    const strays = order.slice(1).reduce((n, [, v]) => n + v, 0);
+    // A confirmed identical recording is not a "stray" however few plays it has:
+    // it is the same performance filed twice, and that is worth stating plainly.
+    const stray = tVerdict !== "same" && strays <= 2 && strays / total < 0.15;
+    const proven = tVerdict === "same";
+
+    /*
+     * Different releases, and nothing in common between them.
+     *
+     * When every spelling has an album and no two of them ever share one, the
+     * credit was probably added on a DIFFERENT RELEASE, and a different release
+     * is very often a different recording:
+     *
+     *   'Pop Style'                 Views          solo album version
+     *   'Pop Style (feat. The Throne)'  Pop Style  the single, with Jay-Z
+     *   'Without Me'                ...            Halsey's original
+     *   'Without Me (with Juice WRLD)'             the remix
+     *
+     * These were 80% "standardise on ..." splits. 75 of 127 credit findings on
+     * one real library looked like this, and spot checks found remixes and
+     * feature versions among them. Lowered and reworded, not removed: some ARE
+     * the same recording released twice, and the reader can listen.
+     */
+    const albumsFor = (t) => albumsOf.get(`${key}␟${t}`) || new Map();
+    const sets = order.map(([t]) => albumsFor(t));
+    const allKnown = sets.every((s) => s.size > 0);
+    let shared = sameAlbum;
+    for (let i = 0; i < sets.length && !shared; i++) {
+      for (let j = i + 1; j < sets.length && !shared; j++) {
+        for (const k of sets[i].keys()) if (sets[j].has(k)) { shared = true; break; }
+      }
+    }
+    const crossRelease = !proven && allKnown && !shared;
+    const firstAlbum = (t) => [...albumsFor(t).values()][0];
+
+    issues.push({
+      detector: "D8",
+      class: proven ? "error" : crossRelease ? "review" : "split",
+      confidence: proven ? 0.97
+        : crossRelease ? (stray ? 0.3 : 0.45)
+        : (stray ? 0.5 : 0.8),
+      mbid_verdict: tVerdict,
+      ...(crossRelease ? { cross_release: true } : {}),
+      // The artist is carried AND named in the title. Without it the report
+      // said things like "'Make It Work' scrobbled under 2 title variants",
+      // which does not identify whose track it is, and left the issue with no
+      // artist for the library deep links to use.
+      artist,
+      track: order[0][0],
+      title: `${artist} - '${baseTitle(order[0][0])}' scrobbled under ` +
+             `${order.length} title variants`,
+      plays_affected: total,
+      suggest: proven
+        ? `MusicBrainz gives both spellings the same recording ID, so this is ` +
+          `one performance filed twice rather than two versions. Standardise on ` +
+          `'${order[0][0]}' (${order[0][1]} plays).`
+        : crossRelease
+        ? `These spellings never appear on the same release: ` +
+          `${order.slice(0, 3).map(([t]) => `'${t}' on '${firstAlbum(t)}'`)
+              .join(", ")}. A credit that only shows up on a different release ` +
+          `is often a remix or a separate feature version rather than the same ` +
+          `recording, so check by listening before merging anything.`
+        : stray
+        ? `Almost all of these say '${order[0][0]}' (${order[0][1]} plays). ` +
+          `${strays === 1 ? "One scrobble" : `${strays} scrobbles`} used a ` +
+          `different spelling, dated below, which usually means a one-off from ` +
+          `another player or a manual entry rather than a tagging habit. Barely ` +
+          `worth fixing, but the date is there if you want to find it.`
+        : `standardise on '${order[0][0]}' (${order[0][1]} plays). Check ` +
+          `the official credit style before assuming 'feat.': many ` +
+          `releases use 'with'.`,
+      members: order.map(([track, plays]) => {
+        const w = when.get(`${key}␟${track}`);
+        return {
+          track, plays,
+          first: w?.first, last: w?.last,
+          // Shown next to the variant. A single play gets one date; a range
+          // gets both, which distinguishes "one stray" from "used for months".
+          looks_like: w
+            ? (plays === 1 || monthName(w.first) === monthName(w.last)
+                ? monthName(w.first)
+                : `${monthName(w.first)} to ${monthName(w.last)}`)
+            : undefined,
+        };
+      }),
+    });
+  };
+
   for (const [key, { artist, titles }] of variants) {
     if (titles.size < 2) continue;
 
@@ -1632,7 +1767,49 @@ export function d8FeatureCredits(rest) {
     if (tVerdict === "same") conflict = false;
     if (tVerdict === "different") conflict = true;
 
+    const albumSet = (t) => albumsOf.get(`${key}␟${t}`) || new Map();
+    const shareAlbum = (a, b) => {
+      const sa = albumSet(a), sb = albumSet(b);
+      for (const k of sa.keys()) if (sb.has(k)) return true;
+      return false;
+    };
+
     if (conflict) {
+      /*
+       * Compatible credits on the SAME album still form a real split, even when a
+       * third, genuinely different version exists alongside them.
+       *
+       *   'FE!N (feat. Playboi Carti)'              16  UTOPIA
+       *   'FE!N (feat. Playboi Carti & Sheck Wes)'   5  UTOPIA
+       *   'FE!N (feat. Sheck Wes)'                   1  CIRCUS MAXIMUS
+       *
+       * The third conflicts with the first, so the whole group used to be
+       * dropped, losing the first two: one recording, one album, two credit
+       * spellings. They are linked here only when their credits are compatible
+       * AND they share an album string, which is about as strong as evidence
+       * gets without an ID. Only credited titles take part; a bare title next to
+       * conflicting line-ups stays the ambiguous case handled below.
+       */
+      const credited = order.map((o, i) => [o, credits[i]]).filter(([, c]) => c.size);
+      const parent = credited.map((_, i) => i);
+      const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+      for (let i = 0; i < credited.length; i++) {
+        for (let j = i + 1; j < credited.length; j++) {
+          const [[ta], ca] = credited[i], [[tb], cb] = credited[j];
+          if (!creditsCompatible(ca, cb) || !shareAlbum(ta, tb)) continue;
+          if (trackMbidVerdict(tmb, artist, ta, tb) === "different") continue;
+          parent[find(i)] = find(j);
+        }
+      }
+      const groups = new Map();
+      credited.forEach(([o], i) => {
+        const r = find(i);
+        if (!groups.has(r)) groups.set(r, []);
+        groups.get(r).push(o);
+      });
+      for (const g of groups.values()) {
+        if (g.length >= 2) emit(key, artist, g, "unknown", { sameAlbum: true });
+      }
       /*
        * Conflicting line-ups. Almost always genuinely different recordings, so
        * this must NEVER recommend a merge.
@@ -1680,63 +1857,7 @@ export function d8FeatureCredits(rest) {
       continue;
     }
 
-    /*
-     * A single stray play is not the same finding as an even split.
-     *
-     * 14 plays of 'IMY2 (with Kid Cudi)' against 1 of 'IMY2' is one mis-scrobble,
-     * not a systematic tagging inconsistency, and calling both 80% confident
-     * "standardise on..." overstates it. Renaming one scrobble is also barely
-     * worth doing, so the wording should not imply a chore.
-     */
-    const total = order.reduce((n, [, v]) => n + v, 0);
-    const strays = order.slice(1).reduce((n, [, v]) => n + v, 0);
-    // A confirmed identical recording is not a "stray" however few plays it has:
-    // it is the same performance filed twice, and that is worth stating plainly.
-    const stray = tVerdict !== "same" && strays <= 2 && strays / total < 0.15;
-    const proven = tVerdict === "same";
-
-    issues.push({
-      detector: "D8",
-      class: proven ? "error" : "split",
-      confidence: proven ? 0.97 : (stray ? 0.5 : 0.8),
-      mbid_verdict: tVerdict,
-      // The artist is carried AND named in the title. Without it the report
-      // said things like "'Make It Work' scrobbled under 2 title variants",
-      // which does not identify whose track it is, and left the issue with no
-      // artist for the library deep links to use.
-      artist,
-      track: order[0][0],
-      title: `${artist} - '${baseTitle(order[0][0])}' scrobbled under ` +
-             `${titles.size} title variants`,
-      plays_affected: order.reduce((n, [, v]) => n + v, 0),
-      suggest: proven
-        ? `MusicBrainz gives both spellings the same recording ID, so this is ` +
-          `one performance filed twice rather than two versions. Standardise on ` +
-          `'${order[0][0]}' (${order[0][1]} plays).`
-        : stray
-        ? `Almost all of these say '${order[0][0]}' (${order[0][1]} plays). ` +
-          `${strays === 1 ? "One scrobble" : `${strays} scrobbles`} used a ` +
-          `different spelling, dated below, which usually means a one-off from ` +
-          `another player or a manual entry rather than a tagging habit. Barely ` +
-          `worth fixing, but the date is there if you want to find it.`
-        : `standardise on '${order[0][0]}' (${order[0][1]} plays). Check ` +
-          `the official credit style before assuming 'feat.': many ` +
-          `releases use 'with'.`,
-      members: order.map(([track, plays]) => {
-        const w = when.get(`${key}␟${track}`);
-        return {
-          track, plays,
-          first: w?.first, last: w?.last,
-          // Shown next to the variant. A single play gets one date; a range
-          // gets both, which distinguishes "one stray" from "used for months".
-          looks_like: w
-            ? (plays === 1 || monthName(w.first) === monthName(w.last)
-                ? monthName(w.first)
-                : `${monthName(w.first)} to ${monthName(w.last)}`)
-            : undefined,
-        };
-      }),
-    });
+    emit(key, artist, order, tVerdict);
   }
 
   // Artist field polluted with a feature. Worse than an album split: it
@@ -1902,6 +2023,254 @@ export function d8VerifyJointCredits(issues, exists) {
     out.push(i);                        // unknown: unchanged, and said so
   }
   return out;
+}
+
+/* --------------------------------------------- D17: look-alike characters */
+
+/*
+ * Names that look identical on screen but are different strings to Last.fm.
+ *
+ * Two kinds, both invisible to a reader:
+ *
+ *   hidden characters   a double space, a non-breaking space, a zero-width
+ *                       character, a soft hyphen, a leading or trailing space
+ *   look-alike marks    a curly apostrophe against a straight one, curly quotes
+ *                       against straight ones
+ *
+ * Last.fm keys its pages on the exact text, so 'Pi’erre Bourne' and
+ * 'Pi'erre Bourne' are two artists, and a title with two spaces is a different
+ * track from the same title with one. The double space is visible in the page
+ * address, where spaces become "+" and two of them become "++".
+ *
+ * Found by comparing against another tool on a real 144k export: two plays sat
+ * under a straight-apostrophe 'Pi'erre Bourne' that nothing here reported, because
+ * the artist check only ever saw released material and one spelling lived only
+ * under era tags.
+ */
+const ZERO_WIDTH = /[\u200B-\u200D\u2060\uFEFF]/g;
+const SOFT_HYPHEN = /\u00AD/g;
+const NBSP = /[\u00A0\u202F\u2007]/g;
+const CURLY_APOS = /[‘’ʼ`´]/g;
+const CURLY_QUOTE = /[“”„]/g;
+
+/** Key that ignores every look-alike difference. Case is kept separately. */
+export function lookalikeKey(text) {
+  return String(text ?? "").normalize("NFC")
+    .replace(ZERO_WIDTH, "").replace(SOFT_HYPHEN, "")
+    .replace(NBSP, " ").replace(CURLY_APOS, "'").replace(CURLY_QUOTE, '"')
+    .replace(/\s+/g, " ").trim();
+}
+
+/** Hidden characters in one string, in words. Empty when there are none. */
+export function hiddenCharacters(text) {
+  const s = String(text ?? "");
+  const out = [];
+  if (/\S {2,}\S/.test(s)) out.push("double space");
+  if (/^\s/.test(s)) out.push("leading space");
+  if (/\s$/.test(s)) out.push("trailing space");
+  if (/[\u00A0\u202F\u2007]/.test(s)) out.push("non-breaking space");
+  if (/[\u200B-\u200D\u2060\uFEFF]/.test(s)) out.push("zero-width character");
+  if (/\u00AD/.test(s)) out.push("soft hyphen");
+  if (/\t/.test(s)) out.push("tab");
+  return out;
+}
+
+/** The string with its hidden characters drawn, for display. */
+export function visibleName(text) {
+  return String(text ?? "")
+    .replace(/ {2,}/g, (m) => "␣".repeat(m.length))
+    .replace(/^ +| +$/g, (m) => "␣".repeat(m.length))
+    .replace(/[\u00A0\u202F\u2007]/g, "[nbsp]")
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "[zero-width]")
+    .replace(/\u00AD/g, "[soft hyphen]")
+    .replace(/\t/g, "[tab]");
+}
+
+/** What makes `a` look like `b` without being it, in words. */
+function lookalikeDiff(a, b) {
+  const out = hiddenCharacters(a);
+  const marks = (s) => [...String(s).matchAll(/['‘’ʼ`´"“”„]/g)].map((m) => m[0]).join("");
+  if (marks(a) !== marks(b) && marks(a)) {
+    const ch = [...new Set(marks(a))].filter((c) => !marks(b).includes(c));
+    for (const c of ch) {
+      out.push(`${c === "'" ? "straight apostrophe" : c === '"' ? "straight quote"
+        : /[“”„]/.test(c) ? "curly quote" : "curly apostrophe"} ${c} ` +
+        `(U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")})`);
+    }
+  }
+  return out;
+}
+
+/**
+ * D17 candidates. analyse() merges them with the other detectors: where another
+ * finding already covers the same names, that finding gets the explanation
+ * instead and the candidate is dropped, so nothing is reported twice.
+ *
+ * Runs on ALL scrobbles, era material included. A name is a name: the era guard
+ * exists to protect deliberate album filing, and nobody files an artist under a
+ * double space on purpose.
+ */
+export function d17Lookalikes(scrobbles) {
+  const issues = [];
+  const loose = [];   // hidden characters with no clean twin, reported together
+  const plays = (keyOf) => {
+    const m = new Map();
+    for (const s of scrobbles) {
+      const k = keyOf(s);
+      if (k == null) continue;
+      m.set(k, (m.get(k) || 0) + 1);
+    }
+    return m;
+  };
+  const ARTIST = (s) => s.artist || null;
+
+  const twins = (counts, groupOf, field, artistOf) => {
+    const groups = new Map();
+    for (const [raw, n] of counts) {
+      const g = groupOf(raw);
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push([raw, n]);
+    }
+    for (const list of groups.values()) {
+      list.sort((a, b) => b[1] - a[1]);
+      const [target] = list[0];
+      // Casing alone is unfixable on Last.fm, so it never counts.
+      const others = list.slice(1).filter(([raw]) => !caseOnly(raw, target));
+      if (others.length) {
+        const keep = [list[0], ...others];
+        const artist = artistOf(keep[0][0]);
+        const label = field === "artist" ? "Artist" : field === "album" ? "Album" : "Track";
+        const moving = others.reduce((n, [, v]) => n + v, 0);
+        issues.push({
+          detector: "D17", class: "split", confidence: 0.9,
+          lookalike: field,
+          ...(artist ? { artist } : {}),
+          ...(field === "track" ? { track: target } : {}),
+          title: `${label} spelled with look-alike characters: ` +
+            `'${visibleName(stripArtist(target))}'` +
+            `${field !== "artist" && artist ? ` by ${artist}` : ""}`,
+          plays_affected: keep.reduce((n, [, v]) => n + v, 0),
+          suggest:
+            `These look the same but Last.fm counts them separately. Rename ` +
+            `${others.map(([raw]) => `'${visibleName(stripArtist(raw))}' ` +
+              `(${lookalikeDiff(stripArtist(raw), stripArtist(target)).join(", ") || "different characters"})`)
+              .join(" and ")} to '${visibleName(stripArtist(target))}', which moves ` +
+            `${moving} play${moving === 1 ? "" : "s"}.` +
+            (keep.some(([raw]) => /\S {2,}\S/.test(stripArtist(raw))) ? ` ${LFM_URL_HINT}` : ""),
+          members: keep.map(([raw, n]) => {
+            const name = stripArtist(raw);
+            const why = lookalikeDiff(name, stripArtist(target));
+            return {
+              [field]: name, plays: n, shown: visibleName(name),
+              ...(field !== "artist" && artist ? { artist } : {}),
+              looks_like: raw === target ? "most played" : (why.join(", ") || undefined),
+            };
+          }),
+        });
+      }
+      // Hidden characters with no clean twin: nothing is split in this library,
+      // but Last.fm still files it apart from everyone else's correct spelling.
+      for (const [raw, n] of list) {
+        const name = stripArtist(raw);
+        const hidden = hiddenCharacters(name);
+        if (!hidden.length) continue;
+        if (list.length > 1 && others.some(([r]) => r === raw)) continue;
+        if (list.length > 1 && raw === target && others.length) continue;
+        const artist = artistOf(raw);
+        loose.push({
+          [field]: name, plays: n, shown: visibleName(name),
+          ...(field !== "artist" && artist ? { artist } : {}),
+          looks_like: `${field}, ${hidden.join(", ")}`,
+        });
+      }
+    }
+  };
+
+  // Artist names, grouped across the whole library.
+  const stripArtist = (raw) => (raw.includes("␟") ? raw.split("␟")[1] : raw);
+  twins(plays(ARTIST), (raw) => lookalikeKey(raw).toLowerCase(), "artist", (raw) => raw);
+  // Album and track names, within one artist. The raw key carries the artist so
+  // two artists' identical titles never meet.
+  // Grouped under the EXACT artist string: when only the artist differs, that is
+  // the artist finding's job, and grouping on the folded artist here reported
+  // the same album twice as a look-alike of itself.
+  twins(plays((s) => (s.album ? `${s.artist}␟${s.album}` : null)),
+        (raw) => `${raw.split("␟")[0]}␟${lookalikeKey(raw.split("␟")[1]).toLowerCase()}`,
+        "album", (raw) => raw.split("␟")[0]);
+  twins(plays((s) => (s.track ? `${s.artist}␟${s.track}` : null)),
+        (raw) => `${raw.split("␟")[0]}␟${lookalikeKey(raw.split("␟")[1]).toLowerCase()}`,
+        "track", (raw) => raw.split("␟")[0]);
+
+  /*
+   * Hidden characters with no clean twin, as ONE finding listing them all.
+   *
+   * Nothing is split inside this library, but Last.fm files each of these apart
+   * from the normal spelling everyone else uses, so its page, listener count and
+   * artwork are not the real ones. One card with a list, like the blank-album
+   * finding, rather than thirty cards that each say the same thing.
+   */
+  if (loose.length) {
+    loose.sort((a, b) => b.plays - a.plays);
+    const kinds = [...new Set(loose.flatMap((m) => m.looks_like.split(", ").slice(1)))];
+    const n = loose.reduce((t, m) => t + m.plays, 0);
+    issues.push({
+      detector: "D17", class: "review", confidence: 0.6,
+      reason: "hidden-only",
+      title: `${loose.length} name${loose.length === 1 ? "" : "s"} contain hidden ` +
+             `characters (${kinds.slice(0, 3).join(", ")})`,
+      plays_affected: n,
+      suggest:
+        `Each of these is the only spelling in your library, so nothing is split ` +
+        `here, but Last.fm files them apart from the normal spelling everyone ` +
+        `else uses. The hidden characters are drawn in: ␣ is a space. Renaming ` +
+        `each one to the plain spelling tidies it up.` +
+        (kinds.includes("double space") ? ` ${LFM_URL_HINT}` : ""),
+      members: loose.slice(0, 30),
+    });
+  }
+  return issues.sort((a, b) => b.plays_affected - a.plays_affected);
+}
+
+const LFM_URL_HINT =
+  "On Last.fm a double space shows up in the page address as '++' instead of '+'.";
+
+/**
+ * Fold D17 candidates into the report.
+ *
+ * Where another finding already lists the same names, the look-alike explanation
+ * is added to THAT finding and the candidate is dropped: a split album whose two
+ * names differ by a double space is one problem, and the reader needs to be told
+ * why the two names that look identical are not.
+ */
+const NAME_HOSTS = new Set(["D0", "D1", "D4", "D8", "D11", "D14a", "D14c", "D15"]);
+export function mergeLookalikes(issues, candidates) {
+  const fieldNames = (i, f) => new Set((i.members || [])
+    .map((m) => m?.[f]).filter((x) => typeof x === "string"));
+  const kept = [];
+  for (const c of candidates) {
+    const f = c.lookalike;
+    const names = (c.members || []).map((m) => m[f]);
+    const host = c.class === "split" && issues.find((i) => {
+      if (!NAME_HOSTS.has(i.detector)) return false;
+      const have = fieldNames(i, f);
+      return names.filter((n) => have.has(n)).length >= 2;
+    });
+    if (host) {
+      const why = (c.members || []).filter((m) => m.looks_like && m.looks_like !== "most played")
+        .map((m) => `'${m.shown}' has a ${m.looks_like}`);
+      if (why.length && !host.lookalike_note) {
+        host.lookalike_note = true;
+        host.suggest = `${host.suggest || ""} Two of these names look identical ` +
+          `but are not: ${why.join("; ")}.`.trim();
+        for (const m of host.members || []) {
+          if (typeof m[f] === "string" && hiddenCharacters(m[f]).length) m.shown = visibleName(m[f]);
+        }
+      }
+      continue;
+    }
+    kept.push(c);
+  }
+  return kept;
 }
 
 /* ------------------------------------ D1, D5, D6, D7, D11, D12 */
@@ -3200,7 +3569,7 @@ export const DETECTOR_ORDER = [
   ["D5"],                            // scrobbles with no album
   ["D0", "D4", "D15"],               // album splits, including album-artist ones
   ["D8"],                            // one track split across title variants
-  ["D1"],                            // artist name variants
+  ["D1", "D17"],                     // artist name variants, look-alike characters
   ["D11"],                           // Various Artists
   ["D6", "D12"],                     // duplicate and impossible scrobbles
   ["D14a", "D14c", "D14e", "D14f"],  // unreleased tagging, mostly review
@@ -3258,7 +3627,7 @@ export const byImportance = (a, b) =>
  */
 const BUCKETS = {
   album_integrity:  ["D0", "D4", "D5", "D15"],
-  artist_integrity: ["D1", "D8", "D11"],
+  artist_integrity: ["D1", "D8", "D11", "D17"],
   duplicate_rate:   ["D6", "D12"],
   era_consistency:  ["D14a", "D14c", "D14e", "D14f"],
 };
@@ -4347,7 +4716,7 @@ export function applyRecordingVerdict(issue, verdict, timing = null, opts = {}) 
  * D14e and D16 are DISCOVERY: the finding exists only because a lookup already
  * ran, so there is nothing left to ask and a button would be a lie.
  */
-export const LOCAL_ONLY = new Set(["D6", "D12"]);
+export const LOCAL_ONLY = new Set(["D6", "D12", "D17"]);
 export const DISCOVERY = new Set(["D14e", "D16"]);
 export const RESOLVABLE = new Set(
   ["D0", "D4", "D5", "D8", "D1", "D11", "D15", "D14a", "D14c"]);
@@ -5041,7 +5410,9 @@ export const UNSCORED_BY_DESIGN = new Set(["D16"]);
  * Two different songs that share a structural title, recommended for merging
  * while the card further down correctly said "nothing to fix".
  */
-const NOT_A_SPLIT = new Set(["structural", "disproven", "plain-albums", "on-both"]);
+const NOT_A_SPLIT = new Set(["structural", "disproven", "plain-albums", "on-both",
+  // D17 with no twin: odd characters, but nothing is split in this library.
+  "hidden-only"]);
 
 export function affectsChart(issue) {
   if (!issue?.detector) return false;
@@ -5095,6 +5466,9 @@ export function analyse(scrobbles, { official, topAlbums, onProgress } = {}) {
     // caller could not fetch it, in which case this simply contributes nothing.
     ...d15AlbumArtistSplits(topAlbums || []),
   ];
+  // Look-alike characters last: where another finding already covers the same
+  // names it is annotated instead, so this has to see everything else first.
+  issues.push(...mergeLookalikes(issues, d17Lookalikes(scrobbles)));
   // Two detectors are deliberately NOT run, and both stay in this file so the
   // reasoning survives and re-enabling is one line.
   //

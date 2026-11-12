@@ -31,7 +31,7 @@
 </script>
 <!-- Version query busts the GitHub Pages asset cache (~10 min TTL). Bump it
      whenever style.css changes, or visitors keep the old stylesheet. -->
-<link rel="stylesheet" href="style.css?v=29">
+<link rel="stylesheet" href="style.css?v=30">
 <link rel="icon" href="favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
@@ -100,8 +100,12 @@
       <a href="https://lastfmstats.com/" target="_blank"
          rel="noopener noreferrer">lastfmstats.com</a>: enter your username, wait
       for it to load, then use Export. The file is read in this browser and never
-      uploaded. No API key needed, whatever the size. It is a snapshot, so after
-      fixing things on Last.fm, export a fresh one.</p>
+      uploaded. No API key needed, whatever the size.
+      <br><strong>After fixing things on Last.fm:</strong> lastfmstats.com can
+      reuse the history it already loaded and fetch only new plays, so a new
+      export may still show your old tags. If your fixes do not show up, remove
+      your saved library there (its Database option), load your username again
+      and wait for it to finish before exporting.</p>
 
     <!--
       The "check for leaks that have since been released" checkbox used to live
@@ -209,6 +213,7 @@ import {
 import { apiBase, apiUrl, API_V, isConfigured, activeLinks } from "./config.js";
 import * as store from "./store.js";
 import { parseScrobbleCsv } from "./csv.js";
+import { loadMarks, saveMarks, setMark, markState } from "./marks.js";
 import {
   artistMatcher, topArtists, suggestArtists, findingsByArtist, artistKey,
 } from "./focus.js";
@@ -254,6 +259,7 @@ const DETECTOR_NAMES = {
   D14f: "Unreleased: all in one bucket",
   D15: "Album credited to another artist",
   D16: "Single also on an album",
+  D17: "Look-alike characters",
 };
 const detName = (d) => DETECTOR_NAMES[d] || d;
 /** A lookup settled that the tags are correct as they are. */
@@ -377,6 +383,18 @@ function issueLinks(issue, user) {
 const col = (v) => v >= 85 ? "var(--good)" : v >= 60 ? "var(--warn)" : "var(--bad)";
 
 let abort = false, report = null, fDet = "", fCls = "", fHideOk = false;
+/*
+ * Fixed / Ignore marks for the user the current report belongs to. Loaded lazily
+ * the first time the list is drawn for a user, so a CSV and a username scan of
+ * the same account share them.
+ */
+let marks = {}, marksUser = null, fShowMarked = false;
+const marksFor = () => {
+  const u = report?.user || "";
+  if (u !== marksUser) { marks = loadMarks(u); marksUser = u; }
+  return marks;
+};
+const markOf = (i) => markState(marksFor(), i, report?.generated);
 
 /*
  * The scrobbles the current report was built from.
@@ -3535,7 +3553,9 @@ function offerCards(section) {
 function issues() {
   const all = report.issues.filter((i) =>
     (!fDet || i.detector === fDet) && (!fCls || i.class === fCls) &&
-    !(fHideOk && tagsOk(i)));
+    !(fHideOk && tagsOk(i)) && (fShowMarked || !markOf(i).hidden));
+  const hiddenMarked = report.issues.filter((i) => markOf(i).hidden).length;
+  const backCount = report.issues.filter((i) => markOf(i).back).length;
   // Counted BEFORE the cap, so the notice at the bottom can say how many are
   // being withheld rather than leaving the reader to wonder.
   const matching = all.length;
@@ -3582,7 +3602,21 @@ function issues() {
   const filtered = Boolean(fDet || fCls);
   const offers = filtered ? "" : offerCards("issues");
 
-  $("issues").innerHTML = offers + (pending && !filtered ? `
+  /*
+   * Marked findings are hidden by default, and the toggle that brings them back
+   * lives here rather than in the filter bar so its count updates the moment
+   * something is marked.
+   */
+  const markBar = (hiddenMarked || backCount || fShowMarked) ? `
+    <div class="mark-bar">
+      ${backCount ? `<span class="tag t-back">${N(backCount)} back after you
+        marked ${backCount === 1 ? "it" : "them"} fixed</span>` : ""}
+      ${hiddenMarked || fShowMarked ? `<label class="hide-ok"><input type="checkbox"
+        id="fmk"${fShowMarked ? " checked" : ""}> Show the ${N(hiddenMarked)} you
+        marked fixed or ignored</label>` : ""}
+    </div>` : "";
+
+  $("issues").innerHTML = markBar + offers + (pending && !filtered ? `
     <div class="panel" style="margin-bottom:9px;display:flex;gap:11px;
          align-items:center;flex-wrap:wrap">
       <button class="check-all ghost" type="button">Check all ${N(pending)}</button>
@@ -3630,11 +3664,17 @@ function issues() {
             : ""}
         ${i.style_choice ? `<span class="tag t-unfixable">tagging style,
           not scored</span>` : ""}
+        ${markOf(i).back ? `<span class="tag t-back" title="You marked this fixed
+          after an earlier scan">Still here after you marked it fixed</span>` : ""}
         <span class="tag" title="Detector ${esc(i.detector)}">${esc(detName(i.detector))}</span>
         <span class="tag">${N(i.plays_affected)} plays</span>
         <span class="tag">confidence ${Math.round((i.confidence || 0) * 100)}%</span>
       </div>
       ${i.suggest ? `<p>${esc(i.suggest)}</p>` : ""}
+      ${markOf(i).back ? `<p class="back-note">You marked this fixed after an
+        earlier scan and it is still here. Either the edit did not take on
+        Last.fm, the export was made before it (a CSV is a snapshot), or the same
+        spelling has been scrobbled again since.</p>` : ""}
       ${/*
          * The answer from a lookup, given its own block.
          *
@@ -3690,7 +3730,16 @@ function issues() {
         return `<div class="mem">${mem.map((m) => {
         // artist + track together when both are present, so a multi-artist list
         // like D5's says whose track each one is.
-        const label = (m.artist && m.track) ? `${m.artist} - ${m.track}`
+        /*
+         * `shown` is the name with its hidden characters drawn in (a double space
+         * as two ␣). Without it two chips that differ only by an invisible
+         * character render identically, which is the whole problem being
+         * reported.
+         */
+        const label = m.shown
+          ? ((m.artist && (m.track || m.album) && m.shown !== m.artist)
+              ? `${m.artist} - ${m.shown}` : m.shown)
+          : (m.artist && m.track) ? `${m.artist} - ${m.track}`
           : (m.album && m.artist && !titlesDiffer && artistsDiffer) ? m.artist
           : m.album ?? m.artist ?? m.track ?? m.era ?? m.month ?? "";
         const n = m.plays ?? m.dupes ?? null;
@@ -3737,6 +3786,23 @@ function issues() {
               <span class="note" style="margin:0 0 0 9px;color:var(--dim)">
                 Looks up what the release databases hold for this one finding.</span>
             </div>`}
+      ${(() => {
+        /*
+         * Fixed / Ignore. Remembered in this browser for this username only,
+         * keyed on what the finding is about rather than its play count, so a
+         * new export finds the same mark.
+         */
+        const ms = markOf(i);
+        if (ms.state && !ms.back) {
+          return `<div class="mark-row"><span class="tag t-marked">${
+            ms.state === "fixed" ? "Marked fixed" : "Ignored"}</span>
+            <button type="button" class="mk" data-mark="">Undo</button></div>`;
+        }
+        return `<div class="mark-row">
+          <button type="button" class="mk" data-mark="fixed">Mark as fixed</button>
+          <button type="button" class="mk" data-mark="ignored">Ignore</button>
+        </div>`;
+      })()}
     </div>`;
 
     if (!matching) return `<div class="panel">Nothing matches that filter.</div>`;
@@ -3796,6 +3862,8 @@ function issues() {
         narrow it: each one re-slices from all ${N(matching)}, so nothing is
         out of reach.</div></div>` : "");
 
+  if ($("fmk")) $("fmk").onchange = (e) => { fShowMarked = e.target.checked; issues(); };
+
   /*
    * Delegated, so it survives every re-render. Binding per button would leave
    * dead handlers behind each time the list is filtered.
@@ -3839,6 +3907,16 @@ function issues() {
     if (pick) {
       ev.preventDefault();
       await refocus(pick.dataset.focus);
+      return;
+    }
+    const mk = ev.target.closest("button.mk");
+    if (mk) {
+      const card = mk.closest(".issue");
+      const issue = report?.issues[Number(card?.dataset.idx)];
+      if (!issue) return;
+      marks = setMark(marksFor(), issue, mk.dataset.mark || null, report.generated);
+      saveMarks(report.user, marks);
+      issues();
       return;
     }
     const btn = ev.target.closest("button.check, button.check-all");

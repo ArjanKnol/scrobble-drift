@@ -477,5 +477,78 @@ console.log("\ntrack identity preserves symbols");
      "an unambiguous feature credit is not affected by artist verification");
 }
 
+
+/* ---------------------------------------------------------------------------
+ * Found by comparing against another tool on a real 144k export.
+ * ------------------------------------------------------------------------- */
+console.log("\ncredit variants across releases, clusters and mid-title credits");
+{
+  const L = (spec) => {
+    const out = []; let uts = 1600000000;
+    for (const [artist, album, track, n] of spec)
+      for (let i = 0; i < n; i++) out.push({ uts: uts++, artist, album, track });
+    return out;
+  };
+  const tv = (rows) => d8FeatureCredits(L(rows))
+    .filter((i) => i.title.includes("title variants"));
+
+  // Never on the same release: lowered and reworded, not removed.
+  const pop = tv([["Drake", "Views", "Pop Style", 28],
+                  ["Drake", "Pop Style", "Pop Style (feat. The Throne)", 4]]);
+  eq(pop.length, 1, "a credit only on a different release is still reported");
+  eq(pop[0]?.class, "review", "  as worth a look, not a split");
+  ok(pop[0]?.confidence < 0.5, `  at lower confidence (${pop[0]?.confidence})`);
+  ok(pop[0]?.cross_release === true, "  marked cross_release");
+  ok(/remix or a separate feature version/.test(pop[0]?.suggest || ""),
+     "  and says it may be a remix or feature version");
+  ok(/'Pop Style' on 'Views'/.test(pop[0]?.suggest || ""), "  naming where each spelling lives");
+
+  // Same release: unchanged.
+  const same = tv([["Drake", "Views", "Pop Style", 20],
+                   ["Drake", "Views", "Pop Style (feat. The Throne)", 10]]);
+  eq(same[0]?.class, "split", "credit variants on one album stay a split");
+  eq(same[0]?.confidence, 0.8, "  at 80%");
+
+  // Shared release for SOME plays counts as shared.
+  const part = tv([["Drake", "Views", "Pop Style", 20],
+                   ["Drake", "Views", "Pop Style (feat. The Throne)", 3],
+                   ["Drake", "Pop Style", "Pop Style (feat. The Throne)", 3]]);
+  eq(part[0]?.class, "split", "one shared album is enough to keep it a split");
+
+  // No album known on one side: no evidence either way, so unchanged.
+  const blank = tv([["Drake", "Views", "Pop Style", 20],
+                    ["Drake", "", "Pop Style (feat. The Throne)", 10]]);
+  eq(blank[0]?.class, "split", "a blank album is not evidence of a different release");
+
+  // FE!N: the compatible pair on UTOPIA survives a conflicting third version.
+  const fein = tv([["Travis Scott", "UTOPIA", "FE!N (feat. Playboi Carti)", 16],
+                   ["Travis Scott", "UTOPIA", "FE!N (feat. Playboi Carti & Sheck Wes)", 5],
+                   ["Travis Scott", "CIRCUS MAXIMUS", "FE!N (feat. Sheck Wes)", 1]]);
+  eq(fein.length, 1, "compatible credits on one album are reported despite a third version");
+  eq(fein[0]?.members.length, 2, "  with only the two that belong together");
+  ok(!fein[0]?.members.some((m) => /Sheck Wes\)$/.test(m.track) && !/Carti/.test(m.track)),
+     "  and never the conflicting one");
+  eq(fein[0]?.class, "split", "  as a split");
+
+  // Different albums AND conflicting: still nothing to merge.
+  const rip = tv([["Kodak Black", "PB2", "Roll in Peace (feat. XXXTENTACION)", 41],
+                  ["Kodak Black", "PB2", "Roll in Peace (feat. Travis Scott)", 2]]);
+  eq(rip.length, 0, "disjoint credits on one album are still never merged");
+
+  // Mid-title credits ahead of a suffix.
+  eq([...featCredits("Wish (feat. Trippie Redd) - Trippie Mix")].join(), "trippie redd",
+     "a credit before ' - Trippie Mix' is read");
+  const wish = tv([["Diplo", "LIFE'S A TRIP", "Wish - Trippie Mix", 18],
+                   ["Diplo", "LIFE'S A TRIP", "Wish (feat. Trippie Redd) - Trippie Mix", 3]]);
+  eq(wish.length, 1, "'Wish - Trippie Mix' and its credited twin are one finding");
+  const add = tv([["Popp Hunna", "Mud Baby", "Adderall (Corvette Corvette) - Remix", 8],
+                  ["Popp Hunna", "Mud Baby", "Adderall (Corvette Corvette) [feat. Lil Uzi Vert] - Remix", 1]]);
+  eq(add.length, 1, "a square-bracket credit before ' - Remix' too");
+  eq(featCredits("Adderall (Corvette Corvette)").size, 0,
+     "a non-credit bracket mid-title is part of the name");
+  const two = tv([["X", "A", "Song (Live) - Remix", 3], ["X", "A", "Song - Remix", 3]]);
+  eq(two.length, 0, "a mid-title bracket that is not a credit does not merge titles");
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
