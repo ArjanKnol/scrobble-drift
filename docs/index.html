@@ -3607,6 +3607,9 @@ function issues() {
    * lives here rather than in the filter bar so its count updates the moment
    * something is marked.
    */
+  // Nothing left to show: switch the toggle back off rather than leaving a
+  // "Show the 0" checkbox behind after the last mark is undone.
+  if (!hiddenMarked && !report.issues.some((i) => markOf(i).state)) fShowMarked = false;
   const markBar = (hiddenMarked || backCount || fShowMarked) ? `
     <div class="mark-bar">
       ${backCount ? `<span class="tag t-back">${N(backCount)} back after you
